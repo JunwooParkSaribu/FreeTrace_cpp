@@ -461,6 +461,204 @@ SegmentationResult segmentation(const Localizations& loc, const std::vector<int>
 // When jump_threshold <= 0, estimates from std of distributions.
 // ============================================================
 
+// ============================================================ // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// 1D Gaussian Mixture Model with EM algorithm
+// ============================================================
+
+// Fit 1D GMM with n_components using Expectation-Maximization // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// Returns (weights, means, variances, log_likelihood)
+struct GMM1DResult { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<double> weights; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<double> means; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<double> variances; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    double log_likelihood; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+};
+
+static double gauss_pdf_1d(double x, double mean, double var) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    double d = x - mean; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    return std::exp(-0.5 * d * d / var) / std::sqrt(2.0 * M_PI * var); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+}
+
+static GMM1DResult fit_gmm_1d(const std::vector<double>& data, int n_comp, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                               int max_iter = 100, int n_init = 3,
+                               bool use_mean_prior = false,
+                               double mean_prior = 0.0,
+                               double mean_precision_prior = 1e7) {
+    int n = (int)data.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (n == 0) return {{}, {}, {}, -1e30}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+    GMM1DResult best_result; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    best_result.log_likelihood = -1e30; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+    // Compute data variance for initialization // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    double data_mean = 0, data_var = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    for (double x : data) data_mean += x; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    data_mean /= n; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    for (double x : data) data_var += (x - data_mean) * (x - data_mean); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    data_var /= n; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (data_var < 1e-10) data_var = 1e-10; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+    std::mt19937 rng(42); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+    for (int init = 0; init < n_init; init++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        // Initialize: all means at 0 (matching Python's means_init=[[0],[0],...]) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<double> weights(n_comp, 1.0 / n_comp); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<double> means(n_comp, 0.0); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<double> vars(n_comp, data_var); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        // Add small perturbation for multi-init // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (init > 0) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            std::normal_distribution<double> nd(0, std::sqrt(data_var) * 0.1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            for (int k = 0; k < n_comp; k++) means[k] = nd(rng); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        }
+
+        // Responsibilities matrix // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<std::vector<double>> resp(n, std::vector<double>(n_comp)); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        double prev_ll = -1e30; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int iter = 0; iter < max_iter; iter++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            // E-step // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            double ll = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            for (int i = 0; i < n; i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                double total = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                for (int k = 0; k < n_comp; k++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    resp[i][k] = weights[k] * gauss_pdf_1d(data[i], means[k], vars[k]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    total += resp[i][k]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                }
+                if (total < 1e-300) total = 1e-300; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                ll += std::log(total); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                for (int k = 0; k < n_comp; k++) resp[i][k] /= total; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+
+            // Check convergence // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            if (std::abs(ll - prev_ll) < 1e-6) break; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            prev_ll = ll; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+            // M-step // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            for (int k = 0; k < n_comp; k++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                double nk = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                for (int i = 0; i < n; i++) nk += resp[i][k]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                if (nk < 1e-10) nk = 1e-10; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+                weights[k] = nk / n; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+                // Mean update with optional Bayesian prior // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                double sum_x = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                for (int i = 0; i < n; i++) sum_x += resp[i][k] * data[i]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                if (use_mean_prior) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    means[k] = (sum_x + mean_precision_prior * mean_prior) / (nk + mean_precision_prior); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                } else {
+                    means[k] = sum_x / nk; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                }
+
+                double sum_var = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                for (int i = 0; i < n; i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    double d = data[i] - means[k]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    sum_var += resp[i][k] * d * d; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                }
+                vars[k] = sum_var / nk; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                if (vars[k] < 1e-10) vars[k] = 1e-10; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+        }
+
+        // Compute final log-likelihood // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double ll = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int i = 0; i < n; i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            double total = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            for (int k = 0; k < n_comp; k++) total += weights[k] * gauss_pdf_1d(data[i], means[k], vars[k]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            if (total < 1e-300) total = 1e-300; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            ll += std::log(total); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        }
+
+        if (ll > best_result.log_likelihood) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            best_result.weights = weights; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            best_result.means = means; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            best_result.variances = vars; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            best_result.log_likelihood = ll; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        }
+    }
+    return best_result; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+}
+
+// BIC score for 1D GMM: -2*LL + k*log(n) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+static double gmm_bic(const GMM1DResult& result, int n_comp, int n_data) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    int n_params = 3 * n_comp - 1; // weights(k-1) + means(k) + vars(k) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    return -2.0 * result.log_likelihood + n_params * std::log((double)n_data); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+}
+
+// approx_gauss: full GMM-based jump threshold estimation (matches Python) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+static float approx_gauss(const std::vector<std::vector<float>>& distributions) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    float min_euclid = 5.0f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<float> max_xyz; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+    for (const auto& raw_dist : distributions) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (raw_dist.empty()) continue; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        // Check variance // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double mean_v = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (float x : raw_dist) mean_v += x; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        mean_v /= raw_dist.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double var_v = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (float x : raw_dist) var_v += (x - mean_v) * (x - mean_v); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        var_v /= raw_dist.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (var_v <= 1e-5) continue; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        // Quantile filter (2.5% - 97.5%) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<float> sorted_dist = raw_dist; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::sort(sorted_dist.begin(), sorted_dist.end()); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        int n = (int)sorted_dist.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        float q025 = sorted_dist[(int)(0.025 * (n - 1))]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        float q975 = sorted_dist[(int)(0.975 * (n - 1))]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<double> filtered; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (float x : raw_dist) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            if (x > q025 && x < q975) filtered.push_back((double)x); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        }
+        if (filtered.empty()) continue; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        // Recheck variance after filtering // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double fmean = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (double x : filtered) fmean += x; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        fmean /= filtered.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double fvar = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (double x : filtered) fvar += (x - fmean) * (x - fmean); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        fvar /= filtered.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (fvar <= 1e-5) continue; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        // GridSearch: fit GMM with 1,2,3 components, select by BIC // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        int best_n_comp = 1; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double best_bic = 1e30; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int nc = 1; nc <= 3; nc++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            auto result = fit_gmm_1d(filtered, nc, 100, 3, false); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            double bic = gmm_bic(result, nc, (int)filtered.size()); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            if (bic < best_bic) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                best_bic = bic; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                best_n_comp = nc; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+        }
+
+        // Bayesian GMM with optimal components and mean prior at 0 // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        auto cluster = fit_gmm_1d(filtered, best_n_comp, 100, 3, true, 0.0, 1e7); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        // Select components near zero with weight > 0.05 // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<double> selec_var; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int k = 0; k < best_n_comp; k++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            if (cluster.means[k] > -1.0 && cluster.means[k] < 1.0 && cluster.weights[k] > 0.05) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                selec_var.push_back(cluster.variances[k]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+        }
+        if (selec_var.empty()) continue; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        // Take the component with largest variance // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double max_var = *std::max_element(selec_var.begin(), selec_var.end()); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        max_xyz.push_back((float)(std::sqrt(max_var) * 2.5)); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    }
+
+    // Compute Euclidean norm across dimensions // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    float max_euclid_sq = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    for (float v : max_xyz) max_euclid_sq += v * v; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    return std::max(std::sqrt(max_euclid_sq), min_euclid); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+}
+
 std::map<int, float> approximation(const std::vector<float>& dist_x, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
                                    const std::vector<float>& dist_y,
                                    const std::vector<float>& dist_z,
@@ -469,26 +667,12 @@ std::map<int, float> approximation(const std::vector<float>& dist_x, // Modified
     if (jump_threshold > 0) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         for (int t = 0; t <= time_forecast; t++) approx[t] = jump_threshold;
     } else {
-        // Simplified GMM: use 2.5 * max(std_x, std_y) as threshold // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        float min_euclid = 5.0f;
-        auto compute_var = [](const std::vector<float>& v) -> float {
-            if (v.empty()) return 0.0f;
-            float mean = 0;
-            for (float x : v) mean += x;
-            mean /= v.size();
-            float var = 0;
-            for (float x : v) var += (x - mean) * (x - mean);
-            return var / v.size();
-        };
-        float max_euclid_sq = 0;
-        float var_x = compute_var(dist_x); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        float var_y = compute_var(dist_y); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        float var_z = compute_var(dist_z); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        float std_x = std::sqrt(var_x) * 2.5f;
-        float std_y = std::sqrt(var_y) * 2.5f;
-        max_euclid_sq = std_x * std_x + std_y * std_y;
-        if (var_z > 1e-5f) max_euclid_sq += (std::sqrt(var_z) * 2.5f) * (std::sqrt(var_z) * 2.5f);
-        float max_euclid = std::max(std::sqrt(max_euclid_sq), min_euclid); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        // Full GMM-based threshold estimation (matches Python approx_gauss) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<std::vector<float>> distributions; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        distributions.push_back(dist_x); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        distributions.push_back(dist_y); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (!dist_z.empty()) distributions.push_back(dist_z); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        float max_euclid = approx_gauss(distributions); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         for (int t = 0; t <= time_forecast; t++) approx[t] = max_euclid;
     }
     return approx;
@@ -1616,6 +1800,325 @@ static std::array<uint8_t, 3> traj_color(int idx) { // Modified by Claude (claud
     return {(uint8_t)(x & 0xFF), (uint8_t)((x >> 8) & 0xFF), (uint8_t)((x >> 16) & 0xFF)}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 }
 
+// ============================================================ // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// 2D Spherical GMM with k-means++ initialization
+// ============================================================
+
+struct GMM2DResult { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<double> weights; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<std::array<double,2>> means; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<double> variances; // spherical: single variance per component // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<int> labels; // predicted labels for each point // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+};
+
+static double dist2d(double x1, double y1, double x2, double y2) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    double dx = x1 - x2, dy = y1 - y2; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    return std::sqrt(dx*dx + dy*dy); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+}
+
+// k-means++ initialization for 2D data // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+static std::vector<std::array<double,2>> kmeans_pp_init(const std::vector<std::array<double,2>>& data, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                                                         int k, std::mt19937& rng) {
+    int n = (int)data.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<std::array<double,2>> centers; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::uniform_int_distribution<int> uid(0, n-1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    centers.push_back(data[uid(rng)]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+    std::vector<double> min_dist(n, 1e30); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    for (int c = 1; c < k; c++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double total = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int i = 0; i < n; i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            double d = dist2d(data[i][0], data[i][1], centers.back()[0], centers.back()[1]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            min_dist[i] = std::min(min_dist[i], d * d); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            total += min_dist[i]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        }
+        std::uniform_real_distribution<double> urd(0, total); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double r = urd(rng); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double cumul = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        int chosen = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int i = 0; i < n; i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            cumul += min_dist[i]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            if (cumul >= r) { chosen = i; break; } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        }
+        centers.push_back(data[chosen]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    }
+    return centers; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+}
+
+// Fit 2D spherical GMM with k-means++ init // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+static GMM2DResult fit_gmm_2d_spherical(const std::vector<std::array<double,2>>& data, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                                         int n_comp, int max_iter = 1000) {
+    int n = (int)data.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (n == 0) return {{}, {}, {}, {}}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+    std::mt19937 rng(42); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    auto centers = kmeans_pp_init(data, n_comp, rng); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+    std::vector<double> weights(n_comp, 1.0 / n_comp); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<std::array<double,2>> means = centers; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Initialize variance from data spread // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    double data_var = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    double mx = 0, my = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    for (const auto& p : data) { mx += p[0]; my += p[1]; } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    mx /= n; my /= n; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    for (const auto& p : data) { data_var += (p[0]-mx)*(p[0]-mx) + (p[1]-my)*(p[1]-my); } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    data_var /= (2.0 * n); // spherical: average per dimension // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (data_var < 1e-10) data_var = 1e-10; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<double> vars(n_comp, data_var); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+    std::vector<std::vector<double>> resp(n, std::vector<double>(n_comp)); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+    for (int iter = 0; iter < max_iter; iter++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double prev_ll = -1e30; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        // E-step // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double ll = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int i = 0; i < n; i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            double total = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            for (int k = 0; k < n_comp; k++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                double dx = data[i][0] - means[k][0]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                double dy = data[i][1] - means[k][1]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                double exponent = -0.5 * (dx*dx + dy*dy) / vars[k]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                resp[i][k] = weights[k] * std::exp(exponent) / (2.0 * M_PI * vars[k]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                total += resp[i][k]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+            if (total < 1e-300) total = 1e-300; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            ll += std::log(total); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            for (int k = 0; k < n_comp; k++) resp[i][k] /= total; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        }
+
+        if (std::abs(ll - prev_ll) < 1e-6) break; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        prev_ll = ll; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        // M-step // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int k = 0; k < n_comp; k++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            double nk = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            for (int i = 0; i < n; i++) nk += resp[i][k]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            if (nk < 1e-10) nk = 1e-10; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+            weights[k] = nk / n; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+            double sx = 0, sy = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            for (int i = 0; i < n; i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                sx += resp[i][k] * data[i][0]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                sy += resp[i][k] * data[i][1]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+            means[k][0] = sx / nk; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            means[k][1] = sy / nk; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+            // Spherical variance: average of both dimensions // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            double sv = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            for (int i = 0; i < n; i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                double dx = data[i][0] - means[k][0]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                double dy = data[i][1] - means[k][1]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                sv += resp[i][k] * (dx*dx + dy*dy); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+            vars[k] = sv / (2.0 * nk); // divide by 2 for spherical (d dimensions) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            if (vars[k] < 1e-10) vars[k] = 1e-10; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        }
+    }
+
+    // Predict labels // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<int> labels(n); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    for (int i = 0; i < n; i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        int best_k = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double best_r = resp[i][0]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int k = 1; k < n_comp; k++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            if (resp[i][k] > best_r) { best_r = resp[i][k]; best_k = k; } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        }
+        labels[i] = best_k; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    }
+
+    return {weights, means, vars, labels}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+}
+
+// ============================================================ // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// PostProcessing — trajectory splitting at false state transitions
+// ============================================================
+
+std::vector<TrajectoryObj> post_processing(const std::vector<TrajectoryObj>& trajectory_list, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                                            const Localizations& locs, int cutoff, bool verbose) {
+    // Helper: extract sorted positions and frames for a trajectory // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    auto extract_positions = [&](const TrajectoryObj& traj, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                                  std::vector<double>& xs, std::vector<double>& ys,
+                                  std::vector<int>& frames) {
+        struct Entry { int frame; double x, y; }; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<Entry> entries; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (const auto& [f, idx] : traj.tuples) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            auto it = locs.find(f); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            if (it != locs.end() && idx < (int)it->second.size()) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                entries.push_back({f, (double)it->second[idx][0], (double)it->second[idx][1]}); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+        }
+        std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.frame < b.frame; }); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        xs.clear(); ys.clear(); frames.clear(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (const auto& e : entries) { xs.push_back(e.x); ys.push_back(e.y); frames.push_back(e.frame); } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    };
+
+    // Helper: GMM clustering + label merging (shared by both passes) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    auto cluster_trajectory = [](const std::vector<double>& xs, const std::vector<double>& ys, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                                  int n_comp) -> std::pair<GMM2DResult, std::vector<int>> {
+        int n = (int)xs.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<std::array<double,2>> pos(n); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int i = 0; i < n; i++) pos[i] = {xs[i], ys[i]}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        auto gm = fit_gmm_2d_spherical(pos, n_comp, 1000); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        auto labels = gm.labels; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        // Merge nearby clusters (distance < 1.5 px) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::map<int, int> change_label; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int a = 0; a < n_comp; a++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            for (int b = a + 1; b < n_comp; b++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                double d = dist2d(gm.means[a][0], gm.means[a][1], gm.means[b][0], gm.means[b][1]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                if (d < 1.5) change_label[b] = a; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+        }
+        // Apply relabeling in reverse key order // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (auto it = change_label.rbegin(); it != change_label.rend(); ++it) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            for (auto& lb : labels) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                if (lb == it->first) lb = it->second; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+        }
+        return {gm, labels}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    };
+
+    // ---- Pass 1: compute gap distribution and seuil ---- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<double> gap_distrib; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    for (const auto& traj : trajectory_list) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (traj.get_trajectory_length() < cutoff) continue; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<double> xs, ys; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<int> frames; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        extract_positions(traj, xs, ys, frames); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if ((int)xs.size() < 5) continue; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        int n_comp = ((int)xs.size() <= 10) ? 2 : ((int)xs.size() < 100 ? 3 : 4); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        auto [gm, labels] = cluster_trajectory(xs, ys, n_comp); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        // Compute mean displacement per cluster, take max gap // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::set<int> unique_labels(labels.begin(), labels.end()); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double max_gap = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int lb : unique_labels) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            double sum_disp = 0; int count = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            for (int i = 0; i < (int)labels.size(); i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                if (labels[i] == lb) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    double dx = xs[i] - gm.means[lb][0]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    double dy = ys[i] - gm.means[lb][1]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    sum_disp += std::sqrt(dx*dx + dy*dy); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    count++; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                }
+            }
+            if (count > 0) max_gap = std::max(max_gap, sum_disp / count); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        }
+        gap_distrib.push_back(max_gap); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    }
+
+    // Compute seuil (threshold for splitting) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    double seuil = 0.0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (!gap_distrib.empty()) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        int below_1 = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (double g : gap_distrib) if (g < 1.0) below_1++; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if ((double)below_1 / gap_distrib.size() > 0.8) seuil = 1.0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    }
+
+    // ---- Pass 2: split trajectories at false state transitions ---- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<TrajectoryObj> filtered; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    int traj_index = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    int post_processed_count = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+    for (const auto& traj : trajectory_list) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (traj.get_trajectory_length() < cutoff) continue; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<double> xs, ys; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<int> frames; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        extract_positions(traj, xs, ys, frames); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        // Find original (frame, idx) mapping sorted by frame // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        struct TupleEntry { int frame; int idx; }; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<TupleEntry> sorted_tuples; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (const auto& [f, idx] : traj.tuples) sorted_tuples.push_back({f, idx}); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::sort(sorted_tuples.begin(), sorted_tuples.end(), [](const TupleEntry& a, const TupleEntry& b) { return a.frame < b.frame; }); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        std::set<std::pair<int,int>> predicted_false_pairs; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        if ((int)xs.size() >= 5) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            int n_comp = ((int)xs.size() <= 10) ? 2 : ((int)xs.size() < 100 ? 3 : 4); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            auto [gm, labels] = cluster_trajectory(xs, ys, n_comp); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+            // Compute overall gap (mean displacement to cluster centers) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            double gap_sum = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            for (int i = 0; i < (int)labels.size(); i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                int lb = labels[i]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                double dx = xs[i] - gm.means[lb][0]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                double dy = ys[i] - gm.means[lb][1]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                gap_sum += std::sqrt(dx*dx + dy*dy); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+            double gap = gap_sum / labels.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+            // Collect unique label pairs // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            std::set<int> unique_labels(labels.begin(), labels.end()); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            std::vector<std::pair<int,int>> pairs; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            for (auto it1 = unique_labels.begin(); it1 != unique_labels.end(); ++it1) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                for (auto it2 = std::next(it1); it2 != unique_labels.end(); ++it2) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    pairs.push_back({*it1, *it2}); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                }
+            }
+
+            // If gap < seuil, all pairs are false transitions // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            if (gap < seuil) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                for (const auto& p : pairs) predicted_false_pairs.insert(p); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+        }
+
+        if (!predicted_false_pairs.empty()) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            // Need labels from pass 2 clustering // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            int n_comp = ((int)xs.size() <= 10) ? 2 : ((int)xs.size() < 100 ? 3 : 4); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            auto [gm2, labels2] = cluster_trajectory(xs, ys, n_comp); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            post_processed_count++; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+            int prev_label = labels2[0]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            TrajectoryObj new_traj; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            new_traj.index = traj_index; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            new_traj.add_trajectory_tuple(sorted_tuples[0].frame, sorted_tuples[0].idx); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+            for (int i = 1; i < (int)labels2.size(); i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                int cur_label = labels2[i]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                int a = std::min(prev_label, cur_label); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                int b = std::max(prev_label, cur_label); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                if (predicted_false_pairs.count({a, b})) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    if (new_traj.get_trajectory_length() >= cutoff) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                        filtered.push_back(new_traj); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                        traj_index++; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    }
+                    new_traj = TrajectoryObj(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    new_traj.index = traj_index; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                }
+                new_traj.add_trajectory_tuple(sorted_tuples[i].frame, sorted_tuples[i].idx); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                prev_label = cur_label; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+            if (new_traj.get_trajectory_length() >= cutoff) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                filtered.push_back(new_traj); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                traj_index++; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+        } else { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            TrajectoryObj new_traj; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            new_traj.index = traj_index; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            for (const auto& te : sorted_tuples) new_traj.add_trajectory_tuple(te.frame, te.idx); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            if (new_traj.get_trajectory_length() >= cutoff) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                filtered.push_back(new_traj); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                traj_index++; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+        }
+    }
+
+    if (verbose && !gap_distrib.empty()) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        int below_1 = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (double g : gap_distrib) if (g < 1.0) below_1++; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::cerr << "Post processed nb of trajectories: " << post_processed_count // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                  << " with ratio: " << (double)below_1 / gap_distrib.size()
+                  << ", seuil: " << seuil << std::endl;
+    }
+    return filtered; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+}
+
 void make_trajectory_image(const std::string& output_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
                            const std::vector<TrajectoryObj>& trajectories,
                            const Localizations& locs,
@@ -1764,6 +2267,13 @@ bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude
 
     if (config.verbose) {
         std::cerr << "Found " << trajectories.size() << " trajectories" << std::endl;
+    }
+
+    // PostProcessing (optional) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (config.post_process) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (config.verbose) std::cerr << "Running post-processing..." << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        trajectories = post_processing(trajectories, loc, config.cutoff, config.verbose); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (config.verbose) std::cerr << "After post-processing: " << trajectories.size() << " trajectories" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     }
 
     // Extract output filename from loc_csv_path // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
