@@ -15,7 +15,7 @@ FreeTrace localizes and tracks fluorescent particles in microscopy video data (T
 
 The backward pass (multi-scale deflation for overlapping particles) is structurally implemented but disabled by default (`deflation=0`), matching the Python FreeTrace default. Deflation is disabled because it fails critically on low SNR images.
 
-The C++ port achieves **exact numerical parity** with the Python version (verified: 930/930 detections match, max position error 0.0005 px, max rho error 1.6e-6).
+The C++ port produces **the same results** as the Python FreeTrace. Verified on real microscopy data: 930/930 detections match, max position error 0.0005 px, max rho error 1.6e-6.
 
 ## Project Structure
 
