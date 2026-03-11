@@ -30,6 +30,8 @@ void image_overlap(Image2D& img1, const Image2D& img2, int div);
 void boundary_smoothing(Image2D& img, int row_min_idx, int row_max_idx, int col_min_idx, int col_max_idx);
 
 // Likelihood and cropping
+// crop_imgs: [nb_imgs, nb_crops, win_area], gauss_grid: [win_h, win_w]
+// Returns: [nb_imgs, nb_crops, 1]
 std::vector<float> likelihood(
     const std::vector<float>& crop_imgs,
     const Image2D& gauss_grid,
@@ -37,7 +39,7 @@ std::vector<float> likelihood(
     const std::vector<float>& bg_means,
     int nb_imgs, int nb_crops,
     int window_size1, int window_size2
-);
+); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
 std::vector<float> image_cropping(
     const std::vector<float>& extended_imgs,
@@ -51,4 +53,11 @@ std::vector<float> mapping(
     int nb_img, int row_shape, int col_shape, int shift
 );
 
-} // namespace freetrace // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11 13:20
+// Add block noise to extended image borders (Gaussian noise matching local statistics)
+void add_block_noise(
+    std::vector<float>& ext_imgs,
+    int nb_imgs, int ext_rows, int ext_cols,
+    int extend
+); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+} // namespace freetrace
