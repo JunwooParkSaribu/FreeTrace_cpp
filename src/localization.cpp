@@ -1,4 +1,4 @@
-#include "localization.h" // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11 13:30
+#include "localization.h" // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 #include <cmath>
 #include <algorithm>
 #include <numeric>
@@ -8,11 +8,14 @@
 #include <cassert>
 #include <random>
 
-// OpenCV for TIFF I/O (optional — can be replaced with libtiff)
 #ifdef USE_OPENCV
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/core.hpp>
 #endif
+
+#ifdef USE_LIBTIFF // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+#include <tiffio.h>
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
 namespace freetrace {
 
@@ -41,15 +44,89 @@ std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& heigh
                 global_max = std::max(global_max, v);
             }
     }
-    // Normalize to [0, 1]
     if (global_max > 0.0f)
         for (auto& v : data) v /= global_max;
     return data;
 }
+#elif defined(USE_LIBTIFF) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& height, int& width) {
+    TIFF* tif = TIFFOpen(path.c_str(), "r");
+    if (!tif) { nb_frames = height = width = 0; return {}; }
+
+    // Count directories (frames)
+    nb_frames = 0;
+    do { nb_frames++; } while (TIFFReadDirectory(tif));
+
+    // Read dimensions from first frame
+    TIFFSetDirectory(tif, 0);
+    uint32_t w = 0, h = 0;
+    TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &w);
+    TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &h);
+    width = static_cast<int>(w);
+    height = static_cast<int>(h);
+
+    uint16_t bits_per_sample = 8, sample_format = SAMPLEFORMAT_UINT;
+    TIFFGetFieldDefaulted(tif, TIFFTAG_BITSPERSAMPLE, &bits_per_sample);
+    TIFFGetFieldDefaulted(tif, TIFFTAG_SAMPLEFORMAT, &sample_format);
+
+    std::vector<float> data(nb_frames * height * width);
+
+    for (int n = 0; n < nb_frames; ++n) {
+        TIFFSetDirectory(tif, n);
+        std::vector<uint8_t> buf(TIFFScanlineSize(tif));
+        for (int r = 0; r < height; ++r) {
+            TIFFReadScanline(tif, buf.data(), r);
+            for (int c = 0; c < width; ++c) {
+                float v = 0.0f;
+                if (bits_per_sample == 8) {
+                    v = static_cast<float>(buf[c]);
+                } else if (bits_per_sample == 16) {
+                    if (sample_format == SAMPLEFORMAT_UINT)
+                        v = static_cast<float>(reinterpret_cast<uint16_t*>(buf.data())[c]);
+                    else
+                        v = static_cast<float>(reinterpret_cast<int16_t*>(buf.data())[c]);
+                } else if (bits_per_sample == 32) {
+                    if (sample_format == SAMPLEFORMAT_IEEEFP)
+                        v = reinterpret_cast<float*>(buf.data())[c];
+                    else
+                        v = static_cast<float>(reinterpret_cast<uint32_t*>(buf.data())[c]);
+                }
+                data[n * height * width + r * width + c] = v;
+            }
+        }
+    }
+    TIFFClose(tif);
+
+    // Normalization matching Python read_tif: // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Step 1: global (img - s_min) / (s_max - s_min)
+    int total = nb_frames * height * width;
+    float s_min = data[0], s_max = data[0];
+    for (int i = 1; i < total; ++i) {
+        s_min = std::min(s_min, data[i]);
+        s_max = std::max(s_max, data[i]);
+    }
+    float range = s_max - s_min;
+    if (range > 0.0f)
+        for (int i = 0; i < total; ++i)
+            data[i] = (data[i] - s_min) / range;
+
+    // Step 2: per-frame normalization by frame max
+    int frame_size = height * width;
+    for (int n = 0; n < nb_frames; ++n) {
+        int base = n * frame_size;
+        float fmax = 0.0f;
+        for (int i = 0; i < frame_size; ++i)
+            fmax = std::max(fmax, data[base + i]);
+        if (fmax > 0.0f)
+            for (int i = 0; i < frame_size; ++i)
+                data[base + i] /= fmax;
+    }
+
+    return data;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 #else
 std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& height, int& width) {
-    std::cerr << "TIFF reading requires OpenCV (compile with -DUSE_OPENCV). "
-              << "Returning empty." << std::endl;
+    std::cerr << "TIFF reading requires OpenCV (-DUSE_OPENCV) or libtiff (-DUSE_LIBTIFF)." << std::endl;
     nb_frames = height = width = 0;
     return {};
 }
@@ -72,7 +149,7 @@ void write_localization_csv(
             auto& pdf = result.pdfs[frame][p];
             int ws = static_cast<int>(std::sqrt(static_cast<float>(pdf.size())));
             float intensity = (pdf.size() > 0) ? pdf[pdf.size() / 2] : 0.0f;
-            // Note: x/y swap as in Python version
+            // x/y swap as in Python version
             ofs << (frame + 1) << ","
                 << pos[1] << "," << pos[0] << "," << pos[2] << ","
                 << info[0] << "," << info[1] << "," << info[2] << ","
@@ -89,7 +166,6 @@ BackgroundResult compute_background(
     const std::vector<float>& imgs, int nb_imgs, int rows, int cols,
     const std::vector<WinParams>& window_sizes, float alpha
 ) {
-    // Normalize images per frame
     std::vector<float> norm_imgs(imgs.size());
     for (int n = 0; n < nb_imgs; ++n) {
         float fmax = 0.0f;
@@ -109,7 +185,6 @@ BackgroundResult compute_background(
         int base = n * rows * cols;
         int pixel_count = rows * cols;
 
-        // Quantize to uint8/100
         std::vector<float> bg_int(pixel_count);
         for (int i = 0; i < pixel_count; ++i)
             bg_int[i] = static_cast<int>(norm_imgs[base + i] * 100) / 100.0f;
@@ -118,11 +193,9 @@ BackgroundResult compute_background(
         std::iota(args.begin(), args.end(), 0);
         std::vector<int> post_mask = args;
 
-        // Iterative background estimation (3 iterations)
         float mode_val = 0.0f, mask_std = 0.0f;
         for (int iter = 0; iter < 3; ++iter) {
             if (post_mask.empty()) break;
-            // Find max value in masked data
             float max_val = 0.0f;
             for (int idx : post_mask)
                 max_val = std::max(max_val, bg_int[idx]);
@@ -137,13 +210,11 @@ BackgroundResult compute_background(
             int mode_bin = std::distance(hist.begin(), std::max_element(hist.begin(), hist.end()));
             mode_val = mode_bin * bins + bins / 2.0f;
 
-            // Compute std
             float sum = 0.0f, sum2 = 0.0f;
             for (int idx : post_mask) { sum += bg_int[idx]; sum2 += bg_int[idx] * bg_int[idx]; }
             float mean_tmp = sum / post_mask.size();
-            mask_std = std::sqrt(sum2 / post_mask.size() - mean_tmp * mean_tmp);
+            mask_std = std::sqrt(std::max(0.0f, sum2 / post_mask.size() - mean_tmp * mean_tmp));
 
-            // Filter
             std::vector<int> new_mask;
             float lo = mode_val - 3.0f * mask_std;
             float hi = mode_val + 3.0f * mask_std;
@@ -153,16 +224,14 @@ BackgroundResult compute_background(
             post_mask = new_mask;
         }
 
-        // Compute final mean/std
         if (!post_mask.empty()) {
             float sum = 0.0f, sum2 = 0.0f;
             for (int idx : post_mask) { sum += bg_int[idx]; sum2 += bg_int[idx] * bg_int[idx]; }
             bg_means[n] = sum / post_mask.size();
-            bg_stds[n] = std::sqrt(sum2 / post_mask.size() - bg_means[n] * bg_means[n]);
+            bg_stds[n] = std::sqrt(std::max(0.0f, sum2 / post_mask.size() - bg_means[n] * bg_means[n]));
         }
     }
 
-    // Build background arrays per window size
     BackgroundResult result;
     for (auto& ws : window_sizes) {
         int area = ws.w * ws.h;
@@ -173,7 +242,6 @@ BackgroundResult compute_background(
         result.bgs[ws.w] = std::move(bg);
     }
 
-    // Thresholds
     result.thresholds.resize(nb_imgs);
     for (int n = 0; n < nb_imgs; ++n) {
         float t = (bg_stds[n] > 0) ? 1.0f / (bg_means[n] * bg_means[n] / (bg_stds[n] * bg_stds[n])) * 2.0f : 1.0f;
@@ -206,7 +274,7 @@ Image2D gauss_psf(int win_w, int win_h, float radius) {
 }
 
 // ============================================================
-// Region max filter (simplified single-window version)
+// Region max filter (single-window, forward)
 // ============================================================
 
 std::vector<DetIndex> region_max_filter2(
@@ -226,7 +294,6 @@ std::vector<DetIndex> region_max_filter2(
                     int idx = n * rows * cols + r * cols + c;
                     if (maps[idx] <= thresh) { maps[idx] = 0.0f; continue; }
 
-                    // Check if local maximum
                     int r0 = std::max(0, r - r_start);
                     int r1 = std::min(rows, r + r_start + 1);
                     int c0 = std::max(0, c - c_start);
@@ -239,7 +306,6 @@ std::vector<DetIndex> region_max_filter2(
 
                     if (maps[idx] == local_max && maps[idx] != 0.0f) {
                         indices.push_back({n, r, c});
-                        // Zero out neighborhood
                         for (int ri = r0; ri < r1; ++ri)
                             for (int ci = c0; ci < c1; ++ci)
                                 maps[n * rows * cols + ri * cols + ci] = 0.0f;
@@ -252,7 +318,268 @@ std::vector<DetIndex> region_max_filter2(
 }
 
 // ============================================================
-// Parameter generation (same as Python params_gen)
+// Region max filter (multi-window, backward) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// ============================================================
+
+std::vector<DetIndexWin> region_max_filter_multi(
+    std::vector<float>& maps,
+    int nb_wins, int nb_imgs, int rows, int cols,
+    const std::vector<WinParams>& window_sizes,
+    const std::vector<float>& thresholds,
+    int detect_range
+) {
+    // maps: [nb_wins][nb_imgs][rows][cols] flattened
+    // thresholds: [nb_imgs * nb_wins]
+    std::vector<DetIndexWin> all_indices;
+
+    // Per-frame aggregation: collect detections from all windows, sort by score, apply NMS
+    // For each frame, gather (win_idx, r, c, score)
+    struct CandidateInfo { int win_idx; int r; int c; float score; };
+    std::vector<std::vector<CandidateInfo>> per_frame(nb_imgs);
+
+    for (int wi = 0; wi < nb_wins; ++wi) {
+        int r_half = (detect_range == 0) ? window_sizes[wi].h / 2 : detect_range;
+        int c_half = (detect_range == 0) ? window_sizes[wi].w / 2 : detect_range;
+
+        for (int n = 0; n < nb_imgs; ++n) {
+            float thresh = thresholds[n * nb_wins + wi];
+            for (int r = 0; r < rows; ++r) {
+                for (int c = 0; c < cols; ++c) {
+                    int idx = wi * nb_imgs * rows * cols + n * rows * cols + r * cols + c;
+                    if (maps[idx] <= thresh) { maps[idx] = 0.0f; continue; }
+
+                    int r0 = std::max(0, r - r_half);
+                    int r1 = std::min(rows, r + r_half + 1);
+                    int c0 = std::max(0, c - c_half);
+                    int c1 = std::min(cols, c + c_half + 1);
+
+                    float local_max = 0.0f;
+                    for (int ri = r0; ri < r1; ++ri)
+                        for (int ci = c0; ci < c1; ++ci)
+                            local_max = std::max(local_max,
+                                maps[wi * nb_imgs * rows * cols + n * rows * cols + ri * cols + ci]);
+
+                    if (maps[idx] == local_max && maps[idx] != 0.0f) {
+                        per_frame[n].push_back({wi, r, c, maps[idx]});
+                        // Zero out neighborhood for this window
+                        for (int ri = r0; ri < r1; ++ri)
+                            for (int ci = c0; ci < c1; ++ci)
+                                maps[wi * nb_imgs * rows * cols + n * rows * cols + ri * cols + ci] = 0.0f;
+                    }
+                }
+            }
+        }
+    }
+
+    // NMS per frame: sort by score descending, mask overlaps
+    for (int n = 0; n < nb_imgs; ++n) {
+        auto& cands = per_frame[n];
+        std::sort(cands.begin(), cands.end(),
+                  [](const CandidateInfo& a, const CandidateInfo& b) { return a.score > b.score; });
+
+        std::vector<std::vector<bool>> mask(rows, std::vector<bool>(cols, false));
+        for (auto& cand : cands) {
+            if (mask[cand.r][cand.c]) continue;
+            int ext = (detect_range == 0) ? (window_sizes[cand.win_idx].w - 1) / 2 : detect_range;
+            int r0 = std::max(0, cand.r - ext);
+            int r1 = std::min(rows - 1, cand.r + ext);
+            int c0 = std::max(0, cand.c - ext);
+            int c1 = std::min(cols - 1, cand.c + ext);
+
+            all_indices.push_back({{n, cand.r, cand.c}, window_sizes[cand.win_idx].w});
+            for (int ri = r0; ri <= r1; ++ri)
+                for (int ci = c0; ci <= c1; ++ci)
+                    mask[ri][ci] = true;
+        }
+    }
+    return all_indices;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+// ============================================================
+// Bivariate normal PDF (unnormalized) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// ============================================================
+
+std::vector<float> bi_variate_normal_pdf(
+    int nb_imgs, int win_w, int win_h,
+    const std::vector<float>& x_var, const std::vector<float>& y_var,
+    const std::vector<float>& rho, const std::vector<float>& amp
+) {
+    int win_area = win_w * win_h;
+    std::vector<float> result(nb_imgs * win_area, 0.0f);
+
+    for (int n = 0; n < nb_imgs; ++n) {
+        float xv = x_var[n], yv = y_var[n], r = rho[n];
+        float k = 1.0f - r * r;
+        if (std::abs(k) < 1e-12f) k = 1e-12f;
+        float sx = std::sqrt(std::abs(xv));
+        float sy = std::sqrt(std::abs(yv));
+
+        // Covariance matrix: [[xv, r*sx*sy], [r*sx*sy, yv]]
+        // inv(cov) = 1/det * [[yv, -r*sx*sy], [-r*sx*sy, xv]]
+        // det = xv*yv - (r*sx*sy)^2 = xv*yv*k
+        float det = xv * yv * k;
+        if (std::abs(det) < 1e-12f) det = 1e-12f;
+
+        float inv00 = yv / det;
+        float inv01 = -r * sx * sy / det;
+        float inv11 = xv / det;
+
+        for (int ri = 0; ri < win_h; ++ri) {
+            for (int ci = 0; ci < win_w; ++ci) {
+                float dx = static_cast<float>(ci - win_w / 2);
+                float dy = static_cast<float>(ri - win_h / 2);
+                float exponent = -0.5f * (dx * dx * inv00 + 2.0f * dx * dy * inv01 + dy * dy * inv11);
+                result[n * win_area + ri * win_w + ci] = amp[n] * std::exp(exponent);
+            }
+        }
+    }
+    return result;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+// ============================================================
+// Image regression (Guo + unpack + PDF construction) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// ============================================================
+
+RegressionResult image_regression(
+    std::vector<float>& imgs,
+    const std::vector<float>& bgs,
+    int nb_imgs, int win_w, int win_h,
+    const float* p0, int repeat
+) {
+    int win_area = win_w * win_h;
+    RegressionResult res;
+
+    // Run Guo algorithm
+    auto coefs = guo_algorithm(imgs, bgs, p0, nb_imgs, win_w, win_h, repeat);
+
+    // Unpack coefficients
+    auto unpacked = unpack_coefs(coefs, win_w, win_h);
+
+    // If there are errors, retry with repeat+1 on a fresh copy
+    if (!unpacked.err_indices.empty()) {
+        // Re-run with more iterations (imgs already modified, but guo handles it)
+        auto coefs2 = guo_algorithm(imgs, bgs, p0, nb_imgs, win_w, win_h, repeat + 1);
+        unpacked = unpack_coefs(coefs2, win_w, win_h);
+    }
+
+    res.xs.resize(nb_imgs);
+    res.ys.resize(nb_imgs);
+    res.x_vars.resize(nb_imgs);
+    res.y_vars.resize(nb_imgs);
+    res.amps.resize(nb_imgs);
+    res.rhos.resize(nb_imgs);
+
+    for (int i = 0; i < nb_imgs; ++i) {
+        res.x_vars[i] = unpacked.x_var[i];
+        res.xs[i] = unpacked.x_mu[i];
+        res.y_vars[i] = unpacked.y_var[i];
+        res.ys[i] = unpacked.y_mu[i];
+        res.rhos[i] = unpacked.rho[i];
+        res.amps[i] = unpacked.amp[i];
+    }
+
+    // Build PDFs: amp * bivariate_normal(unnormalized) + bg
+    auto pdf_flat = bi_variate_normal_pdf(nb_imgs, win_w, win_h,
+                                           res.x_vars, res.y_vars, res.rhos, res.amps);
+
+    res.pdfs.resize(nb_imgs);
+    for (int n = 0; n < nb_imgs; ++n) {
+        res.pdfs[n].resize(win_area);
+        for (int p = 0; p < win_area; ++p) {
+            res.pdfs[n][p] = pdf_flat[n * win_area + p] + bgs[n * win_area + p];
+        }
+    }
+
+    return res;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+// ============================================================
+// Subtract PDF (deflation) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// ============================================================
+
+void subtract_pdf(
+    std::vector<float>& ext_imgs,
+    int nb_imgs, int ext_rows, int ext_cols,
+    const std::vector<std::vector<float>>& pdfs,
+    const std::vector<std::array<int, 3>>& indices,
+    int win_w, int win_h,
+    const std::vector<float>& bg_means,
+    int extend
+) {
+    int half_w = (win_w - 1) / 2;
+    int half_h = (win_h - 1) / 2;
+    int half_ext = extend / 2;
+
+    for (size_t i = 0; i < indices.size(); ++i) {
+        int n = indices[i][0];
+        int r = indices[i][1];
+        int c = indices[i][2];
+        float bg_val = bg_means[n];
+
+        int r0 = r - half_h + half_ext;
+        int c0 = c - half_w + half_ext;
+
+        for (int ri = 0; ri < win_h; ++ri) {
+            for (int ci = 0; ci < win_w; ++ci) {
+                int er = r0 + ri;
+                int ec = c0 + ci;
+                if (er < 0 || er >= ext_rows || ec < 0 || ec >= ext_cols) continue;
+                int ext_idx = n * ext_rows * ext_cols + er * ext_cols + ec;
+                ext_imgs[ext_idx] -= pdfs[i][ri * win_w + ci];
+                ext_imgs[ext_idx] = std::max(ext_imgs[ext_idx], bg_val);
+            }
+        }
+
+        // Boundary smoothing around the subtracted region
+        // (simplified — smooth the border of the subtracted area)
+        int row_min = r0, row_max = r0 + win_h - 1;
+        int col_min = c0, col_max = c0 + win_w - 1;
+        if (row_min >= 0 && row_max < ext_rows && col_min >= 0 && col_max < ext_cols) {
+            // Create a temporary Image2D view of this frame
+            // Use the already-ported boundary_smoothing on a crop
+            // For efficiency, do a simple local mean smoothing on the border pixels
+            const int erase_space = 2;
+            const int border_iters = 2;
+            for (int iter = 0; iter < border_iters; ++iter) {
+                // Top and bottom edges
+                for (int ec = col_min; ec <= col_max; ++ec) {
+                    for (int edge_r : {row_min, row_max}) {
+                        int er0 = std::max(0, edge_r - erase_space);
+                        int er1 = std::min(ext_rows - 1, edge_r + erase_space);
+                        int ec0 = std::max(0, ec - erase_space);
+                        int ec1 = std::min(ext_cols - 1, ec + erase_space);
+                        float sum = 0; int cnt = 0;
+                        for (int rr = er0; rr <= er1; ++rr)
+                            for (int cc = ec0; cc <= ec1; ++cc) {
+                                sum += ext_imgs[n * ext_rows * ext_cols + rr * ext_cols + cc];
+                                cnt++;
+                            }
+                        ext_imgs[n * ext_rows * ext_cols + edge_r * ext_cols + ec] = sum / cnt;
+                    }
+                }
+                // Left and right edges
+                for (int er = row_min; er <= row_max; ++er) {
+                    for (int edge_c : {col_min, col_max}) {
+                        int er0 = std::max(0, er - erase_space);
+                        int er1 = std::min(ext_rows - 1, er + erase_space);
+                        int ec0 = std::max(0, edge_c - erase_space);
+                        int ec1 = std::min(ext_cols - 1, edge_c + erase_space);
+                        float sum = 0; int cnt = 0;
+                        for (int rr = er0; rr <= er1; ++rr)
+                            for (int cc = ec0; cc <= ec1; ++cc) {
+                                sum += ext_imgs[n * ext_rows * ext_cols + rr * ext_cols + cc];
+                                cnt++;
+                            }
+                        ext_imgs[n * ext_rows * ext_cols + er * ext_cols + edge_c] = sum / cnt;
+                    }
+                }
+            }
+        }
+    }
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+// ============================================================
+// Parameter generation
 // ============================================================
 
 static void params_gen(int win_s,
@@ -271,15 +598,559 @@ static void params_gen(int win_s,
 }
 
 // ============================================================
-// Top-level localization run
+// Core localization (forward + backward) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 // ============================================================
 
-bool run(const std::string& input_video_path,
+LocalizationResult localize(
+    const std::vector<float>& imgs, int nb_imgs, int rows, int cols,
+    int window_size, float threshold_alpha, int shift,
+    int deflation_loop_backward
+) {
+    // Generate window params
+    std::vector<WinParams> single_ws, multi_ws;
+    std::vector<float> single_rad, multi_rad;
+    params_gen(window_size, single_ws, single_rad, multi_ws, multi_rad);
+
+    // Compute background
+    std::vector<WinParams> all_ws = single_ws;
+    all_ws.insert(all_ws.end(), multi_ws.begin(), multi_ws.end());
+    auto bg_result = compute_background(imgs, nb_imgs, rows, cols, all_ws, threshold_alpha);
+
+    // Generate Gaussian PSFs
+    std::vector<Image2D> forward_grids, backward_grids;
+    for (size_t i = 0; i < single_ws.size(); ++i)
+        forward_grids.push_back(gauss_psf(single_ws[i].w, single_ws[i].h, single_rad[i]));
+    for (size_t i = 0; i < multi_ws.size(); ++i)
+        backward_grids.push_back(gauss_psf(multi_ws[i].w, multi_ws[i].h, multi_rad[i]));
+
+    int extend = multi_ws.back().w * 4;
+    int ext_rows = rows + extend;
+    int ext_cols = cols + extend;
+    int half_ext = extend / 2;
+
+    // Create extended images with zero padding
+    std::vector<float> ext_imgs(nb_imgs * ext_rows * ext_cols, 0.0f);
+    for (int n = 0; n < nb_imgs; ++n)
+        for (int r = 0; r < rows; ++r)
+            for (int c = 0; c < cols; ++c)
+                ext_imgs[n * ext_rows * ext_cols + (r + half_ext) * ext_cols + (c + half_ext)] =
+                    imgs[n * rows * cols + r * cols + c];
+
+    // Add block noise to borders // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    add_block_noise(ext_imgs, nb_imgs, ext_rows, ext_cols, extend);
+
+    // Background means (per-frame scalar)
+    float bg_ws_key = static_cast<float>(multi_ws[0].w);
+    auto& bg_vec = bg_result.bgs[multi_ws[0].w];
+    std::vector<float> bg_means(nb_imgs);
+    for (int n = 0; n < nb_imgs; ++n)
+        bg_means[n] = bg_vec[n * multi_ws[0].w * multi_ws[0].h]; // all same per frame
+
+    // Initial parameters for Guo regression
+    float p0[6] = {1.5f, 0.0f, 1.5f, 0.0f, 0.0f, 0.5f};
+
+    // Result
+    LocalizationResult result;
+    result.coords.resize(nb_imgs);
+    result.pdfs.resize(nb_imgs);
+    result.infos.resize(nb_imgs);
+
+    // ==============================
+    // FORWARD PASS (single window) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // ==============================
+    {
+        auto& ws0 = single_ws[0];
+        auto& grid0 = forward_grids[0];
+
+        // Crop images
+        int nb_crops = 0;
+        auto crop_imgs = image_cropping(ext_imgs, nb_imgs, ext_rows, ext_cols,
+                                         extend, ws0.w, ws0.h, shift, nb_crops);
+
+        // Compute bg_squared_sums
+        std::vector<float> bg_sq_sums(nb_imgs);
+        for (int n = 0; n < nb_imgs; ++n)
+            bg_sq_sums[n] = ws0.w * ws0.h * bg_means[n] * bg_means[n];
+
+        // Compute likelihood
+        auto lik = likelihood(crop_imgs, grid0, bg_sq_sums, bg_means,
+                              nb_imgs, nb_crops, ws0.h, ws0.w);
+
+        // Map likelihood back to image space
+        auto h_map = mapping(lik, nb_imgs, rows, cols, shift);
+
+        // Thresholds for single window — use bg_result.thresholds directly
+        auto& thresholds = bg_result.thresholds;
+
+        // Region max filter with NMS (matching Python region_max_filter)
+        // Step 1: Find local maxima above threshold
+        int r_half = (shift == 0) ? ws0.h / 2 : shift;
+        int c_half = (shift == 0) ? ws0.w / 2 : shift;
+        struct CandInfo { int frame; int r; int c; float score; };
+        std::vector<std::vector<CandInfo>> per_frame_cands(nb_imgs);
+
+        for (int n = 0; n < nb_imgs; ++n) {
+            float thresh = thresholds[n];
+            for (int r = 0; r < rows; ++r) {
+                for (int c = 0; c < cols; ++c) {
+                    int idx = n * rows * cols + r * cols + c;
+                    if (h_map[idx] <= thresh) continue;
+
+                    int r0 = std::max(0, r - r_half);
+                    int r1 = std::min(rows, r + r_half + 1);
+                    int c0 = std::max(0, c - c_half);
+                    int c1 = std::min(cols, c + c_half + 1);
+
+                    float local_max = 0.0f;
+                    for (int ri = r0; ri < r1; ++ri)
+                        for (int ci = c0; ci < c1; ++ci)
+                            local_max = std::max(local_max, h_map[n * rows * cols + ri * cols + ci]);
+
+                    if (h_map[idx] == local_max)
+                        per_frame_cands[n].push_back({n, r, c, h_map[idx]});
+                }
+            }
+        }
+
+        // Step 2: Per-frame NMS with mask (sort by score desc, suppress overlaps)
+        // Matching Python: mask[row_min:row_max, col_min:col_max] = 1 (exclusive upper bound)
+        std::vector<DetIndex> indices;
+        for (int n = 0; n < nb_imgs; ++n) {
+            auto& cands = per_frame_cands[n];
+            std::sort(cands.begin(), cands.end(),
+                      [](const CandInfo& a, const CandInfo& b) { return a.score > b.score; });
+
+            std::vector<std::vector<uint8_t>> mask(rows, std::vector<uint8_t>(cols, 0));
+            int ext_nms = (shift == 0) ? (ws0.w - 1) / 2 : shift;
+            for (auto& cand : cands) {
+                if (mask[cand.r][cand.c] != 0) continue;
+                indices.push_back({n, cand.r, cand.c});
+                // Python: mask[max(0,r-ext) : min(shape-1, r+ext), ...] = 1
+                // Python slice is exclusive upper bound, so upper = min(shape-1, r+ext)
+                int r0 = std::max(0, cand.r - ext_nms); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                int r1 = std::min(rows - 1, cand.r + ext_nms); // exclusive upper (Python slice)
+                int c0 = std::max(0, cand.c - ext_nms);
+                int c1 = std::min(cols - 1, cand.c + ext_nms); // exclusive upper (Python slice)
+                for (int ri = r0; ri < r1; ++ri)
+                    for (int ci = c0; ci < c1; ++ci)
+                        mask[ri][ci] = 1;
+            }
+        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        if (!indices.empty()) {
+            int ws = ws0.w;
+            int win_area = ws * ws;
+
+            // Gather crop images and background for detected points
+            int nb_det = static_cast<int>(indices.size());
+            std::vector<float> regress_imgs(nb_det * win_area);
+            std::vector<float> bg_regress(nb_det * win_area);
+            std::vector<int> ns(nb_det), det_rs(nb_det), det_cs(nb_det);
+
+            int cols_per_row = cols / shift;
+            if (shift == 1) cols_per_row = cols;
+
+            for (int d = 0; d < nb_det; ++d) {
+                int n = indices[d].frame;
+                int r = indices[d].row;
+                int c = indices[d].col;
+                ns[d] = n;
+                det_rs[d] = r;
+                det_cs[d] = c;
+
+                // Get the crop from crop_imgs
+                int crop_idx = (r / shift) * (cols / shift) + (c / shift);
+                if (crop_idx < nb_crops) {
+                    for (int p = 0; p < win_area; ++p)
+                        regress_imgs[d * win_area + p] = crop_imgs[n * nb_crops * win_area + crop_idx * win_area + p];
+                }
+
+                // Background for this detection
+                auto& bg_for_ws = bg_result.bgs[ws];
+                for (int p = 0; p < win_area; ++p)
+                    bg_regress[d * win_area + p] = bg_for_ws[n * win_area + p];
+            }
+
+            // Run image regression
+            auto reg = image_regression(regress_imgs, bg_regress, nb_det, ws, ws, p0, 5);
+
+            // Filter errors and collect valid results
+            std::vector<int> err_indices;
+            for (int d = 0; d < nb_det; ++d) {
+                if (reg.x_vars[d] < 0 || reg.y_vars[d] < 0 ||
+                    reg.x_vars[d] > 3 * ws || reg.y_vars[d] > 3 * ws ||
+                    reg.rhos[d] > 1 || reg.rhos[d] < -1)
+                    err_indices.push_back(d);
+            }
+
+            // Collect valid detections
+            std::vector<std::array<int, 3>> del_indices;
+            for (int d = 0; d < nb_det; ++d) {
+                if (std::find(err_indices.begin(), err_indices.end(), d) != err_indices.end())
+                    continue;
+
+                int n = ns[d];
+                float r_f = det_rs[d] + reg.ys[d];
+                float c_f = det_cs[d] + reg.xs[d];
+                if (r_f <= -1 || r_f >= rows || c_f <= -1 || c_f >= cols)
+                    continue;
+
+                float x_coord = std::max(0.0f, std::min(r_f, static_cast<float>(rows - 1)));
+                float y_coord = std::max(0.0f, std::min(c_f, static_cast<float>(cols - 1)));
+                float z_coord = 0.0f;
+
+                result.coords[n].push_back({x_coord, y_coord, z_coord});
+                result.pdfs[n].push_back(reg.pdfs[d]);
+                result.infos[n].push_back({reg.x_vars[d], reg.y_vars[d], reg.rhos[d], reg.amps[d]});
+
+                // Collect indices for deflation
+                del_indices.push_back({n,
+                    static_cast<int>(std::round(det_rs[d] + reg.ys[d])),
+                    static_cast<int>(std::round(det_cs[d] + reg.xs[d]))});
+            }
+
+            // Deflation: subtract fitted PSFs from extended images
+            if (!del_indices.empty()) {
+                // Gather pdfs for valid detections only
+                std::vector<std::vector<float>> valid_pdfs;
+                int valid_idx = 0;
+                for (int d = 0; d < nb_det; ++d) {
+                    if (std::find(err_indices.begin(), err_indices.end(), d) != err_indices.end())
+                        continue;
+                    int n = ns[d];
+                    float r_f = det_rs[d] + reg.ys[d];
+                    float c_f = det_cs[d] + reg.xs[d];
+                    if (r_f <= -1 || r_f >= rows || c_f <= -1 || c_f >= cols)
+                        continue;
+                    valid_pdfs.push_back(reg.pdfs[d]);
+                }
+                subtract_pdf(ext_imgs, nb_imgs, ext_rows, ext_cols,
+                             valid_pdfs, del_indices, ws, ws, bg_means, extend);
+            }
+        }
+    }
+
+    // ==============================
+    // BACKWARD PASS (multi-window) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // ==============================
+    for (int df_loop = 0; df_loop < deflation_loop_backward; ++df_loop) {
+        int nb_multi = static_cast<int>(multi_ws.size());
+
+        // Compute likelihood maps for each backward window size
+        // h_maps: [nb_multi][nb_imgs * rows * cols]
+        std::vector<std::vector<float>> h_maps(nb_multi);
+
+        for (int wi = 0; wi < nb_multi; ++wi) {
+            auto& ws = multi_ws[wi];
+            auto& grid = backward_grids[wi];
+
+            int nb_crops = 0;
+            auto crop_imgs = image_cropping(ext_imgs, nb_imgs, ext_rows, ext_cols,
+                                             extend, ws.w, ws.h, shift, nb_crops);
+
+            std::vector<float> bg_sq_sums(nb_imgs);
+            for (int n = 0; n < nb_imgs; ++n)
+                bg_sq_sums[n] = ws.w * ws.h * bg_means[n] * bg_means[n];
+
+            auto lik = likelihood(crop_imgs, grid, bg_sq_sums, bg_means,
+                                  nb_imgs, nb_crops, ws.h, ws.w);
+
+            auto h_map = mapping(lik, nb_imgs, rows, cols, shift);
+
+            // Scale by window area ratio (as in Python)
+            float scale = static_cast<float>(multi_ws[0].w * multi_ws[0].w) /
+                          static_cast<float>(ws.w * ws.w);
+            for (auto& v : h_map) v *= scale;
+
+            h_maps[wi] = std::move(h_map);
+        }
+
+        // Run region_max_filter2 per window size (backward pass)
+        // Then do multi-scale selection + regression
+        for (int wi = nb_multi - 1; wi >= 0; --wi) {
+            auto& ws = multi_ws[wi];
+            auto indices = region_max_filter2(h_maps[wi], nb_imgs, rows, cols,
+                                              ws, bg_result.thresholds, shift);
+
+            if (indices.empty()) continue;
+
+            int win = ws.w;
+            int win_area = win * win;
+            int nb_det = static_cast<int>(indices.size());
+
+            // Extract regression images from extended_imgs
+            std::vector<float> regress_imgs(nb_det * win_area);
+            std::vector<float> bg_regress(nb_det * win_area);
+
+            for (int d = 0; d < nb_det; ++d) {
+                int n = indices[d].frame;
+                int r = indices[d].row + half_ext;
+                int c = indices[d].col + half_ext;
+
+                int r0 = r - (win - 1) / 2;
+                int c0 = c - (win - 1) / 2;
+
+                for (int ri = 0; ri < win; ++ri)
+                    for (int ci = 0; ci < win; ++ci) {
+                        int er = r0 + ri, ec = c0 + ci;
+                        if (er >= 0 && er < ext_rows && ec >= 0 && ec < ext_cols)
+                            regress_imgs[d * win_area + ri * win + ci] =
+                                ext_imgs[n * ext_rows * ext_cols + er * ext_cols + ec];
+                    }
+
+                auto& bg_for_ws = bg_result.bgs[win];
+                for (int p = 0; p < win_area; ++p)
+                    bg_regress[d * win_area + p] = bg_for_ws[n * win_area + p];
+            }
+
+            // Regression
+            float p0_back[6] = {1.5f, 0.0f, 1.5f, 0.0f, 0.0f, 0.5f};
+            auto reg = image_regression(regress_imgs, bg_regress, nb_det, win, win, p0_back, 5);
+
+            // Collect valid results
+            std::vector<std::array<int, 3>> del_indices;
+            std::vector<std::vector<float>> valid_pdfs;
+
+            for (int d = 0; d < nb_det; ++d) {
+                if (reg.x_vars[d] < 0 || reg.y_vars[d] < 0 ||
+                    reg.x_vars[d] > 3 * win || reg.y_vars[d] > 3 * win ||
+                    reg.rhos[d] > 1 || reg.rhos[d] < -1)
+                    continue;
+
+                int n = indices[d].frame;
+                float r_f = indices[d].row + reg.ys[d];
+                float c_f = indices[d].col + reg.xs[d];
+                if (r_f <= -1 || r_f >= rows || c_f <= -1 || c_f >= cols)
+                    continue;
+
+                float x_coord = std::max(0.0f, std::min(r_f, static_cast<float>(rows - 1)));
+                float y_coord = std::max(0.0f, std::min(c_f, static_cast<float>(cols - 1)));
+
+                result.coords[n].push_back({x_coord, y_coord, 0.0f});
+                result.pdfs[n].push_back(reg.pdfs[d]);
+                result.infos[n].push_back({reg.x_vars[d], reg.y_vars[d], reg.rhos[d], reg.amps[d]});
+
+                del_indices.push_back({n,
+                    static_cast<int>(std::round(indices[d].row + reg.ys[d])),
+                    static_cast<int>(std::round(indices[d].col + reg.xs[d]))});
+                valid_pdfs.push_back(reg.pdfs[d]);
+            }
+
+            // Deflation
+            if (!del_indices.empty() && df_loop < deflation_loop_backward - 1) {
+                subtract_pdf(ext_imgs, nb_imgs, ext_rows, ext_cols,
+                             valid_pdfs, del_indices, win, win, bg_means, 0);
+            }
+        }
+    }
+
+    return result;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+// ============================================================ // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// Localize from pre-built extended images
+// ============================================================
+LocalizationResult localize_from_ext( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    const std::vector<float>& ext_imgs_in,
+    int nb_imgs, int rows, int cols, int ext_rows, int ext_cols,
+    int window_size, float threshold_alpha, int shift,
+    int extend
+) {
+    // Generate window params
+    std::vector<WinParams> single_ws, multi_ws; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<float> single_rad, multi_rad;
+    params_gen(window_size, single_ws, single_rad, multi_ws, multi_rad);
+
+    // We need original (non-extended) images for background computation // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    int half_ext = extend / 2;
+    std::vector<float> imgs(nb_imgs * rows * cols);
+    for (int n = 0; n < nb_imgs; ++n)
+        for (int r = 0; r < rows; ++r)
+            for (int c = 0; c < cols; ++c)
+                imgs[n * rows * cols + r * cols + c] = // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    ext_imgs_in[n * ext_rows * ext_cols + (r + half_ext) * ext_cols + (c + half_ext)];
+
+    // Compute background from original images // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<WinParams> all_ws = single_ws;
+    all_ws.insert(all_ws.end(), multi_ws.begin(), multi_ws.end());
+    auto bg_result = compute_background(imgs, nb_imgs, rows, cols, all_ws, threshold_alpha);
+
+    // Make a mutable copy of ext_imgs // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<float> ext_imgs(ext_imgs_in);
+
+    // Generate Gaussian PSFs
+    std::vector<Image2D> forward_grids, backward_grids; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    for (size_t i = 0; i < single_ws.size(); ++i)
+        forward_grids.push_back(gauss_psf(single_ws[i].w, single_ws[i].h, single_rad[i]));
+    for (size_t i = 0; i < multi_ws.size(); ++i)
+        backward_grids.push_back(gauss_psf(multi_ws[i].w, multi_ws[i].h, multi_rad[i]));
+
+    // Background means // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    auto& bg_vec = bg_result.bgs[multi_ws[0].w];
+    std::vector<float> bg_means(nb_imgs);
+    for (int n = 0; n < nb_imgs; ++n)
+        bg_means[n] = bg_vec[n * multi_ws[0].w * multi_ws[0].h];
+
+    // Initial parameters for Guo regression
+    float p0[6] = {1.5f, 0.0f, 1.5f, 0.0f, 0.0f, 0.5f}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+    // Result
+    LocalizationResult result;
+    result.coords.resize(nb_imgs);
+    result.pdfs.resize(nb_imgs);
+    result.infos.resize(nb_imgs);
+
+    // FORWARD PASS — same as localize() // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    {
+        auto& ws0 = single_ws[0];
+        auto& grid0 = forward_grids[0];
+
+        int nb_crops = 0;
+        auto crop_imgs = image_cropping(ext_imgs, nb_imgs, ext_rows, ext_cols,
+                                         extend, ws0.w, ws0.h, shift, nb_crops);
+
+        std::vector<float> bg_sq_sums(nb_imgs);
+        for (int n = 0; n < nb_imgs; ++n)
+            bg_sq_sums[n] = ws0.w * ws0.h * bg_means[n] * bg_means[n];
+
+        auto lik = likelihood(crop_imgs, grid0, bg_sq_sums, bg_means,
+                              nb_imgs, nb_crops, ws0.h, ws0.w);
+
+        auto h_map = mapping(lik, nb_imgs, rows, cols, shift);
+        auto& thresholds = bg_result.thresholds;
+
+        // NMS detection — identical to localize() // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        int r_half = (shift == 0) ? ws0.h / 2 : shift;
+        int c_half = (shift == 0) ? ws0.w / 2 : shift;
+        struct CandInfo { int frame; int r; int c; float score; };
+        std::vector<std::vector<CandInfo>> per_frame_cands(nb_imgs);
+
+        for (int n = 0; n < nb_imgs; ++n) {
+            float thresh = thresholds[n];
+            for (int r = 0; r < rows; ++r) {
+                for (int c = 0; c < cols; ++c) {
+                    int idx = n * rows * cols + r * cols + c;
+                    if (h_map[idx] <= thresh) continue;
+                    int r0 = std::max(0, r - r_half);
+                    int r1 = std::min(rows, r + r_half + 1);
+                    int c0 = std::max(0, c - c_half);
+                    int c1 = std::min(cols, c + c_half + 1);
+                    float local_max = 0.0f;
+                    for (int ri = r0; ri < r1; ++ri)
+                        for (int ci = c0; ci < c1; ++ci)
+                            local_max = std::max(local_max, h_map[n * rows * cols + ri * cols + ci]);
+                    if (h_map[idx] == local_max)
+                        per_frame_cands[n].push_back({n, r, c, h_map[idx]});
+                }
+            }
+        }
+
+        std::vector<DetIndex> indices; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int n = 0; n < nb_imgs; ++n) {
+            auto& cands = per_frame_cands[n];
+            std::sort(cands.begin(), cands.end(),
+                      [](const CandInfo& a, const CandInfo& b) { return a.score > b.score; });
+            std::vector<std::vector<uint8_t>> mask(rows, std::vector<uint8_t>(cols, 0));
+            int ext_nms = (shift == 0) ? (ws0.w - 1) / 2 : shift;
+            for (auto& cand : cands) {
+                if (mask[cand.r][cand.c] != 0) continue;
+                indices.push_back({n, cand.r, cand.c});
+                int r0 = std::max(0, cand.r - ext_nms);
+                int r1 = std::min(rows - 1, cand.r + ext_nms);
+                int c0 = std::max(0, cand.c - ext_nms);
+                int c1 = std::min(cols - 1, cand.c + ext_nms);
+                for (int ri = r0; ri < r1; ++ri)
+                    for (int ci = c0; ci < c1; ++ci)
+                        mask[ri][ci] = 1;
+            }
+        }
+
+        if (!indices.empty()) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            int ws = ws0.w;
+            int win_area = ws * ws;
+            int nb_det = static_cast<int>(indices.size());
+            std::vector<float> regress_imgs(nb_det * win_area);
+            std::vector<float> bg_regress(nb_det * win_area);
+            std::vector<int> ns(nb_det), det_rs(nb_det), det_cs(nb_det);
+
+            for (int d = 0; d < nb_det; ++d) {
+                int n = indices[d].frame;
+                int r = indices[d].row;
+                int c = indices[d].col;
+                ns[d] = n; det_rs[d] = r; det_cs[d] = c;
+                int crop_idx = (r / shift) * (cols / shift) + (c / shift);
+                int nb_crops_total = nb_crops;
+                if (crop_idx < nb_crops_total) {
+                    for (int p = 0; p < win_area; ++p)
+                        regress_imgs[d * win_area + p] = crop_imgs[n * nb_crops_total * win_area + crop_idx * win_area + p];
+                }
+                auto& bg_for_ws = bg_result.bgs[ws];
+                for (int p = 0; p < win_area; ++p)
+                    bg_regress[d * win_area + p] = bg_for_ws[n * win_area + p];
+            }
+
+            auto reg = image_regression(regress_imgs, bg_regress, nb_det, ws, ws, p0, 5);
+
+            std::vector<int> err_indices;
+            for (int d = 0; d < nb_det; ++d) {
+                if (reg.x_vars[d] < 0 || reg.y_vars[d] < 0 ||
+                    reg.x_vars[d] > 3 * ws || reg.y_vars[d] > 3 * ws ||
+                    reg.rhos[d] > 1 || reg.rhos[d] < -1)
+                    err_indices.push_back(d);
+            }
+
+            std::vector<std::array<int, 3>> del_indices;
+            for (int d = 0; d < nb_det; ++d) {
+                if (std::find(err_indices.begin(), err_indices.end(), d) != err_indices.end())
+                    continue;
+                int n = ns[d];
+                float r_f = det_rs[d] + reg.ys[d];
+                float c_f = det_cs[d] + reg.xs[d];
+                if (r_f <= -1 || r_f >= rows || c_f <= -1 || c_f >= cols)
+                    continue;
+                float x_coord = std::max(0.0f, std::min(r_f, static_cast<float>(rows - 1)));
+                float y_coord = std::max(0.0f, std::min(c_f, static_cast<float>(cols - 1)));
+                result.coords[n].push_back({x_coord, y_coord, 0.0f});
+                result.pdfs[n].push_back(reg.pdfs[d]);
+                result.infos[n].push_back({reg.x_vars[d], reg.y_vars[d], reg.rhos[d], reg.amps[d]});
+                del_indices.push_back({n,
+                    static_cast<int>(std::round(det_rs[d] + reg.ys[d])),
+                    static_cast<int>(std::round(det_cs[d] + reg.xs[d]))});
+            }
+
+            if (!del_indices.empty()) {
+                std::vector<std::vector<float>> valid_pdfs;
+                int valid_idx = 0;
+                for (int d = 0; d < nb_det; ++d) {
+                    if (std::find(err_indices.begin(), err_indices.end(), d) != err_indices.end())
+                        continue;
+                    int n = ns[d];
+                    float r_f = det_rs[d] + reg.ys[d];
+                    float c_f = det_cs[d] + reg.xs[d];
+                    if (r_f <= -1 || r_f >= rows || c_f <= -1 || c_f >= cols)
+                        continue;
+                    valid_pdfs.push_back(reg.pdfs[d]);
+                }
+                subtract_pdf(ext_imgs, nb_imgs, ext_rows, ext_cols,
+                             valid_pdfs, del_indices, ws, ws, bg_means, extend);
+            }
+        }
+    }
+
+    return result; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+}
+
+// ============================================================
+// Top-level run
+// ============================================================
+
+bool run(const std::string& input_video_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
          const std::string& output_path,
          int window_size,
          float threshold,
          int shift,
-         bool verbose)
+         bool verbose,
+         const std::string& ext_imgs_path)
 {
     int nb_frames, height, width;
     auto images = read_tiff(input_video_path, nb_frames, height, width);
@@ -291,76 +1162,85 @@ bool run(const std::string& input_video_path,
     if (verbose)
         std::cout << "Loaded " << nb_frames << " frames (" << height << "x" << width << ")" << std::endl;
 
-    // Generate window params
-    std::vector<WinParams> single_ws, multi_ws;
-    std::vector<float> single_rad, multi_rad;
-    params_gen(window_size, single_ws, single_rad, multi_ws, multi_rad);
-
-    // Compute background
-    std::vector<WinParams> all_ws = single_ws;
-    all_ws.insert(all_ws.end(), multi_ws.begin(), multi_ws.end());
-    auto bg_result = compute_background(images, nb_frames, height, width, all_ws, threshold);
+    // Batch size matching Python: DIV_Q = min(50, int(2.7 * 4194304 / rows / cols * (49 / ws^2))) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    int ws2 = window_size * window_size;
+    int div_q = std::min(50, static_cast<int>(2.7 * 4194304.0 / height / width * (49.0 / ws2)));
+    div_q = std::max(div_q, 1);
 
     if (verbose)
-        std::cout << "Background computed. Starting localization..." << std::endl;
+        std::cout << "Batch size: " << div_q << std::endl;
 
-    // Generate Gaussian PSFs
-    std::vector<Image2D> forward_grids, backward_grids;
-    for (size_t i = 0; i < single_ws.size(); ++i)
-        forward_grids.push_back(gauss_psf(single_ws[i].w, single_ws[i].h, single_rad[i]));
-    for (size_t i = 0; i < multi_ws.size(); ++i)
-        backward_grids.push_back(gauss_psf(multi_ws[i].w, multi_ws[i].h, multi_rad[i]));
-
-    // --- Simplified localization pipeline ---
-    // Full pipeline (forward detection + backward refinement) would follow
-    // the Python Localization.localization() function.
-    // For now: forward pass only with single window size.
-
-    int extend = multi_ws.back().w * 4;
-    int ext_rows = height + extend;
-    int ext_cols = width + extend;
-    int half_ext = extend / 2;
-
-    // Create extended images with zero padding
-    std::vector<float> ext_imgs(nb_frames * ext_rows * ext_cols, 0.0f);
-    for (int n = 0; n < nb_frames; ++n)
-        for (int r = 0; r < height; ++r)
-            for (int c = 0; c < width; ++c)
-                ext_imgs[n * ext_rows * ext_cols + (r + half_ext) * ext_cols + (c + half_ext)] =
-                    images[n * height * width + r * width + c];
-
-    // Likelihood computation for each window size
-    auto& ws0 = single_ws[0];
-    auto& grid0 = forward_grids[0];
-    auto& bg_means_vec = bg_result.bgs[ws0.w];
-
-    // Extract per-frame bg means
-    std::vector<float> bg_means(nb_frames);
-    for (int n = 0; n < nb_frames; ++n)
-        bg_means[n] = bg_means_vec[n * ws0.w * ws0.h]; // all values same per frame
-
-    // Crop images
-    int nb_crops = 0;
-    auto crop_imgs = image_cropping(ext_imgs, nb_frames, ext_rows, ext_cols,
-                                     extend, ws0.w, ws0.h, shift, nb_crops);
-
-    // Compute bg_squared_sums
-    std::vector<float> bg_sq_sums(nb_frames);
-    for (int n = 0; n < nb_frames; ++n)
-        bg_sq_sums[n] = ws0.w * ws0.h * bg_means[n] * bg_means[n];
-
-    // Likelihood (simplified — uses the already-ported image_pad functions)
-    // For full implementation, the likelihood() function from image_pad needs to be ported
-    // This is a placeholder for the detection pipeline
-
-    if (verbose)
-        std::cout << "Localization pipeline (C++ skeleton) completed." << std::endl;
-
-    // Placeholder result
+    // Process in batches, matching Python's batch loop
     LocalizationResult result;
     result.coords.resize(nb_frames);
     result.pdfs.resize(nb_frames);
     result.infos.resize(nb_frames);
+
+    // Compute extend for ext_imgs loading // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<WinParams> tmp_single, tmp_multi;
+    std::vector<float> tmp_sr, tmp_mr;
+    params_gen(window_size, tmp_single, tmp_sr, tmp_multi, tmp_mr);
+    int extend = tmp_multi.back().w * 4; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    int ext_rows = height + extend;
+    int ext_cols = width + extend;
+
+    // Load pre-computed extended images if path provided // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<float> loaded_ext_imgs;
+    if (!ext_imgs_path.empty()) {
+        std::ifstream efile(ext_imgs_path, std::ios::binary); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (!efile.is_open()) {
+            std::cerr << "Failed to open ext_imgs: " << ext_imgs_path << std::endl;
+            return false;
+        }
+        efile.seekg(0, std::ios::end);
+        size_t file_size = efile.tellg(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        efile.seekg(0, std::ios::beg);
+        loaded_ext_imgs.resize(file_size / sizeof(float));
+        efile.read(reinterpret_cast<char*>(loaded_ext_imgs.data()), file_size); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (verbose)
+            std::cout << "Loaded ext_imgs: " << loaded_ext_imgs.size() << " floats from " << ext_imgs_path << std::endl;
+    }
+
+    int frame_size = height * width;
+    int ext_frame_size = ext_rows * ext_cols; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    for (int batch_start = 0; batch_start < nb_frames; batch_start += div_q) {
+        int batch_end = std::min(batch_start + div_q, nb_frames);
+        int batch_n = batch_end - batch_start;
+
+        LocalizationResult batch_result; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        if (!ext_imgs_path.empty()) {
+            // Use pre-computed extended images // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            std::vector<float> batch_ext(batch_n * ext_frame_size);
+            for (int i = 0; i < batch_n * ext_frame_size; ++i)
+                batch_ext[i] = loaded_ext_imgs[batch_start * ext_frame_size + i]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            batch_result = localize_from_ext(batch_ext, batch_n, height, width,
+                                             ext_rows, ext_cols, window_size, threshold, shift, extend); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        } else {
+            // Normal path: generate noise internally // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            std::vector<float> batch_imgs(batch_n * frame_size);
+            for (int i = 0; i < batch_n * frame_size; ++i)
+                batch_imgs[i] = images[batch_start * frame_size + i];
+            batch_result = localize(batch_imgs, batch_n, height, width,
+                                     window_size, threshold, shift, /*deflation_loop_backward=*/0); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        }
+
+        // Merge results with correct frame offset
+        for (int i = 0; i < batch_n; ++i) {
+            int global_frame = batch_start + i;
+            result.coords[global_frame] = std::move(batch_result.coords[i]);
+            result.pdfs[global_frame] = std::move(batch_result.pdfs[i]);
+            result.infos[global_frame] = std::move(batch_result.infos[i]);
+        }
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+    // Count total detections
+    int total = 0;
+    for (auto& frame_coords : result.coords) total += frame_coords.size();
+
+    if (verbose)
+        std::cout << "Localization complete: " << total << " detections across "
+                  << nb_frames << " frames." << std::endl;
 
     // Write output
     std::string loc_output = output_path + "/" +
@@ -369,9 +1249,9 @@ bool run(const std::string& input_video_path,
     write_localization_csv(loc_output, result);
 
     if (verbose)
-        std::cout << "Localization written to " << loc_output << "_loc.csv" << std::endl;
+        std::cout << "Written to " << loc_output << "_loc.csv" << std::endl;
 
     return true;
-} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11 13:30
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
 } // namespace freetrace
