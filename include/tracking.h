@@ -68,6 +68,7 @@ struct TrackingConfig {
     int dimension = 2; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     float loc_precision_err = 1.0f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     bool verbose = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    bool post_process = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     int img_rows = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11 (0 = auto from loc data)
     int img_cols = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 };
@@ -192,6 +193,10 @@ void make_trajectory_image(const std::string& output_path, // Modified by Claude
                            const std::vector<TrajectoryObj>& trajectories,
                            const Localizations& locs,
                            int img_rows, int img_cols);
+
+// --- PostProcessing --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+std::vector<TrajectoryObj> post_processing(const std::vector<TrajectoryObj>& trajectory_list, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                                            const Localizations& locs, int cutoff, bool verbose = false);
 
 // --- Top-level tracking entry point --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
