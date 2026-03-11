@@ -69,6 +69,7 @@ struct TrackingConfig {
     float loc_precision_err = 1.0f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     bool verbose = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     bool post_process = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    bool use_nn = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     int img_rows = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11 (0 = auto from loc data)
     int img_cols = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 };
