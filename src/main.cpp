@@ -1,12 +1,51 @@
 #include <iostream> // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 #include <string>
+#include <cstring>
 #include "image_pad.h"
 #include "regression.h"
 #include "cost_function.h"
 #include "localization.h" // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+#include "tracking.h" // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
 int main(int argc, char* argv[]) {
-    if (argc >= 3) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Tracking mode: freetrace track <loc.csv> <output_dir> <nb_frames> [options] // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (argc >= 5 && std::string(argv[1]) == "track") {
+        std::string loc_csv = argv[2]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::string output = argv[3]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        int nb_frames = std::stoi(argv[4]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        freetrace::TrackingConfig config; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        config.verbose = true;
+        std::string tiff_path; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        // Parse optional args // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int i = 5; i < argc; i++) {
+            if (std::strcmp(argv[i], "--depth") == 0 && i + 1 < argc) config.graph_depth = std::stoi(argv[++i]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            else if (std::strcmp(argv[i], "--cutoff") == 0 && i + 1 < argc) config.cutoff = std::stoi(argv[++i]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            else if (std::strcmp(argv[i], "--jump") == 0 && i + 1 < argc) config.jump_threshold = std::stof(argv[++i]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            else if (std::strcmp(argv[i], "--tiff") == 0 && i + 1 < argc) tiff_path = argv[++i]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        }
+
+        // Read TIFF dimensions if provided // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (!tiff_path.empty()) {
+            int tiff_frames, tiff_h, tiff_w;
+            freetrace::read_tiff(tiff_path, tiff_frames, tiff_h, tiff_w); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            config.img_rows = tiff_h;
+            config.img_cols = tiff_w;
+        }
+
+        std::cout << "FreeTrace C++ — Tracking" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::cout << "  Loc CSV:   " << loc_csv << std::endl;
+        std::cout << "  Output:    " << output << std::endl;
+        std::cout << "  Nb frames: " << nb_frames << std::endl;
+        std::cout << "  Depth:     " << config.graph_depth << ", Cutoff: " << config.cutoff << std::endl;
+        if (config.jump_threshold > 0) std::cout << "  Jump threshold: " << config.jump_threshold << " px" << std::endl;
+        if (config.img_rows > 0) std::cout << "  Image: " << config.img_cols << "x" << config.img_rows << " (from TIFF)" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+        bool ok = freetrace::run_tracking(loc_csv, output, nb_frames, config); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        return ok ? 0 : 1;
+    }
+
+    if (argc >= 3 && std::string(argv[1]) != "track") { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         // Localization mode: freetrace <input.tiff> <output_dir> [window_size] [threshold] [shift]
         std::string input = argv[1];
         std::string output = argv[2];
