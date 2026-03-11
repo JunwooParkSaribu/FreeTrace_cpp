@@ -1247,11 +1247,156 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
         input_video_path.substr(input_video_path.find_last_of('/') + 1);
     loc_output = loc_output.substr(0, loc_output.find(".tif"));
     write_localization_csv(loc_output, result);
+    make_loc_depth_image(loc_output, result, /*multiplier=*/4, /*winsize=*/window_size, /*resolution=*/2); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
     if (verbose)
-        std::cout << "Written to " << loc_output << "_loc.csv" << std::endl;
+        std::cout << "Written to " << loc_output << "_loc.csv and _loc_2d_density.png" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
     return true;
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+// ============================================================ // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// 2D density image (matching Python make_loc_depth_image)
+// ============================================================
+
+// Matplotlib 'hot' colormap LUT (256 entries, RGB) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+static void hot_colormap(float t, uint8_t& r, uint8_t& g, uint8_t& b) {
+    // t in [0, 1]
+    t = std::max(0.0f, std::min(1.0f, t));
+    // Red: ramps 0->1 over [0, 0.375]
+    float rf = std::min(1.0f, t / 0.375f);
+    // Green: ramps 0->1 over [0.375, 0.75]
+    float gf = (t < 0.375f) ? 0.0f : std::min(1.0f, (t - 0.375f) / 0.375f);
+    // Blue: ramps 0->1 over [0.75, 1.0]
+    float bf = (t < 0.75f) ? 0.0f : (t - 0.75f) / 0.25f;
+    r = static_cast<uint8_t>(rf * 255.0f);
+    g = static_cast<uint8_t>(gf * 255.0f);
+    b = static_cast<uint8_t>(bf * 255.0f);
+}
+
+#ifdef USE_LIBPNG // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+#include <png.h>
+static bool write_png(const std::string& path, const uint8_t* data, int width, int height) {
+    FILE* fp = fopen(path.c_str(), "wb");
+    if (!fp) return false;
+    png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+    png_infop info = png_create_info_struct(png);
+    if (setjmp(png_jmpbuf(png))) { fclose(fp); return false; }
+    png_init_io(png, fp);
+    png_set_IHDR(png, info, width, height, 8, PNG_COLOR_TYPE_RGB,
+                 PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+    png_write_info(png, info);
+    for (int y = 0; y < height; ++y)
+        png_write_row(png, data + y * width * 3);
+    png_write_end(png, nullptr);
+    png_destroy_write_struct(&png, &info);
+    fclose(fp);
+    return true;
+}
+#else // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// Fallback: write PPM (no dependencies)
+static bool write_png(const std::string& path, const uint8_t* data, int width, int height) {
+    std::string ppm_path = path.substr(0, path.rfind('.')) + ".ppm";
+    std::ofstream f(ppm_path, std::ios::binary);
+    if (!f.is_open()) return false;
+    f << "P6\n" << width << " " << height << "\n255\n";
+    f.write(reinterpret_cast<const char*>(data), width * height * 3);
+    return true;
+}
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+void make_loc_depth_image( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    const std::string& output_path,
+    const LocalizationResult& result,
+    int multiplier, int winsize, int resolution
+) {
+    resolution = std::max(1, std::min(3, resolution));
+    if (multiplier % 2 == 1) multiplier -= 1;
+    winsize += multiplier * resolution;
+    int cov_std = multiplier * resolution;
+    int amp = 1;
+    float amp_ = static_cast<float>(std::pow(10, amp));
+    float margin_pixel = 2.0f * 10.0f * amp_;
+    amp_ *= resolution;
+
+    // Collect all coords (Python stores as [y_row, x_col, z]) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<std::array<float, 3>> all_coords;
+    for (auto& frame_coords : result.coords)
+        for (auto& c : frame_coords)
+            all_coords.push_back(c);
+
+    if (all_coords.empty()) return;
+
+    // In Python: coords are [row, col, z], CSV writes x=col, y=row
+    // all_coords[i] = {row, col, z} from result.coords
+    // Python does: all_coords[:,1] -= x_min (col), all_coords[:,0] -= y_min (row) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    float x_min = 1e30f, x_max = -1e30f; // x = col = [1]
+    float y_min = 1e30f, y_max = -1e30f; // y = row = [0]
+    for (auto& c : all_coords) {
+        x_min = std::min(x_min, c[1]); x_max = std::max(x_max, c[1]);
+        y_min = std::min(y_min, c[0]); y_max = std::max(y_max, c[0]);
+    }
+    for (auto& c : all_coords) {
+        c[1] -= x_min;
+        c[0] -= y_min;
+    }
+
+    // Image dimensions // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    int img_h = static_cast<int>((y_max - y_min) * amp_ + margin_pixel);
+    int img_w = static_cast<int>((x_max - x_min) * amp_ + margin_pixel);
+
+    // Build Gaussian template // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<float> templ(winsize * winsize);
+    int half = winsize / 2;
+    float inv_cov = 1.0f / static_cast<float>(cov_std);
+    for (int r = 0; r < winsize; ++r) {
+        for (int c = 0; c < winsize; ++c) {
+            float y = static_cast<float>(r - half);
+            float x = static_cast<float>(c - half);
+            templ[r * winsize + c] = std::exp(-0.5f * (x * x + y * y) * inv_cov);
+        }
+    }
+
+    // Accumulate density // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<float> image(img_h * img_w, 0.0f);
+    int margin_half = static_cast<int>(margin_pixel) / 2;
+
+    for (auto& c : all_coords) {
+        int coord_col = static_cast<int>(std::round(c[1] * amp_)) + margin_half;
+        int coord_row = static_cast<int>(std::round(c[0] * amp_)) + margin_half;
+        int row = std::min(std::max(0, coord_row), img_h - 1);
+        int col = std::min(std::max(0, coord_col), img_w - 1);
+
+        for (int ri = 0; ri < winsize; ++ri) {
+            int ir = row - half + ri;
+            if (ir < 0 || ir >= img_h) continue;
+            for (int ci = 0; ci < winsize; ++ci) {
+                int ic = col - half + ci;
+                if (ic < 0 || ic >= img_w) continue;
+                image[ir * img_w + ic] += templ[ri * winsize + ci];
+            }
+        }
+    }
+
+    // Normalize: quantile over ALL pixels (including zeros), matching Python np.quantile // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<float> sorted_vals(image.begin(), image.end());
+    std::sort(sorted_vals.begin(), sorted_vals.end());
+    float img_max = sorted_vals[static_cast<int>(sorted_vals.size() * 0.995)];
+    if (img_max <= 0.0f) return;
+
+    for (auto& v : image)
+        v = std::min(v, img_max);
+    float global_max = *std::max_element(image.begin(), image.end());
+    if (global_max > 0.0f)
+        for (auto& v : image) v /= global_max;
+
+    // Apply colormap and write PNG // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<uint8_t> rgb(img_h * img_w * 3);
+    for (int i = 0; i < img_h * img_w; ++i)
+        hot_colormap(image[i], rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
+
+    std::string png_path = output_path + "_loc_2d_density.png";
+    write_png(png_path, rgb.data(), img_w, img_h);
+}
 
 } // namespace freetrace

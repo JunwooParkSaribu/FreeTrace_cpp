@@ -125,4 +125,9 @@ bool run(const std::string& input_video_path,
          bool verbose = false,
          const std::string& ext_imgs_path = ""); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
+// --- 2D density image generation --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+void make_loc_depth_image(const std::string& output_path,
+                          const LocalizationResult& result,
+                          int multiplier = 4, int winsize = 7, int resolution = 2);
+
 } // namespace freetrace
