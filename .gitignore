@@ -18,3 +18,16 @@ freetrace
 # OS
 .DS_Store
 Thumbs.db
+
+# ONNX models (export from Keras with tf2onnx)
+models/*.onnx
+
+# ONNX Runtime (downloaded separately)
+onnxruntime-*/
+
+# Test data and outputs
+test_*/
+inputs/
+outputs_*/
+*.bin
+!models/qt_99.bin

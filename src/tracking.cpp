@@ -1,5 +1,6 @@
 // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 #include "tracking.h"
+#include "nn_inference.h" // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 #include <algorithm>
 #include <numeric>
 #include <queue>
@@ -27,6 +28,9 @@ static std::vector<double> g_qt_alpha_arr; // Modified by Claude (claude-opus-4-
 static std::vector<double> g_qt_k_arr; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 static std::vector<double> g_qt_mean; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11 [n_alpha * n_k, row-major]
 static bool g_qt_loaded = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+// Global NN models for alpha/k inference // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+static NNModels g_nn_models; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
 static bool load_qt_data(const std::string& path) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     std::ifstream f(path, std::ios::binary);
@@ -1448,8 +1452,23 @@ SelectResult select_opt_graph2(const std::set<Node>& final_graph_node_set_hashed
     if (!first_step) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         prev_paths = find_paths_as_list(saved_graph, source_node);
         for (auto& pp : prev_paths) {
-            alpha_values[pp] = config.init_alpha; // fixed
-            k_values[pp] = config.init_k; // fixed
+            if (config.use_nn && g_nn_models.loaded) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                // Extract trajectory positions (last ALPHA_MAX_LENGTH=10 points) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                std::vector<float> xs, ys; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                int start = std::max(1, (int)pp.size() - 10); // skip source node // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                for (int i = start; i < (int)pp.size(); i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    auto lit = locs.find(pp[i].first); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    if (lit != locs.end() && pp[i].second < (int)lit->second.size()) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                        xs.push_back(lit->second[pp[i].second][0]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                        ys.push_back(lit->second[pp[i].second][1]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                    }
+                }
+                alpha_values[pp] = predict_alpha_nn(g_nn_models, xs, ys); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                k_values[pp] = predict_k_nn(g_nn_models, xs, ys); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            } else { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                alpha_values[pp] = config.init_alpha;
+                k_values[pp] = config.init_k;
+            }
         }
     }
 
@@ -2261,6 +2280,22 @@ bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude
         }
     }
 
+    // Load NN models if requested // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (config.use_nn) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<std::string> nn_dirs = {"models", "../models"}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        auto nn_slash = loc_csv_path.rfind('/'); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (nn_slash != std::string::npos) nn_dirs.push_back(loc_csv_path.substr(0, nn_slash) + "/../models"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (const auto& nd : nn_dirs) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            if (load_nn_models(g_nn_models, nd)) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                if (config.verbose) std::cerr << "Loaded NN models from " << nd << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                break; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            }
+        }
+        if (!g_nn_models.loaded && config.verbose) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            std::cerr << "Warning: ONNX models not found, using fixed alpha/k" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        }
+    }
+
     // Run forecast // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     if (config.verbose) std::cerr << "Starting trajectory inference..." << std::endl;
     auto trajectories = forecast(loc, t_avail_steps, max_jumps, nb_frames, config);
@@ -2305,6 +2340,9 @@ bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude
     std::string out_img = output_path + "/" + base + "_traces.png"; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     make_trajectory_image(out_img, trajectories, loc, img_rows, img_cols);
     if (config.verbose) std::cerr << "Written: " << out_img << " (" << img_cols << "x" << img_rows << " * upscale)" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+    // Cleanup NN models // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (g_nn_models.loaded) free_nn_models(g_nn_models); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
     return true;
 }

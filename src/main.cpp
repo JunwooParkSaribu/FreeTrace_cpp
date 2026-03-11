@@ -24,6 +24,7 @@ int main(int argc, char* argv[]) {
             else if (std::strcmp(argv[i], "--jump") == 0 && i + 1 < argc) config.jump_threshold = std::stof(argv[++i]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
             else if (std::strcmp(argv[i], "--tiff") == 0 && i + 1 < argc) tiff_path = argv[++i]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
             else if (std::strcmp(argv[i], "--postprocess") == 0) config.post_process = true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            else if (std::strcmp(argv[i], "--nn") == 0) config.use_nn = true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         }
 
         // Read TIFF dimensions if provided // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -41,6 +42,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  Depth:     " << config.graph_depth << ", Cutoff: " << config.cutoff << std::endl;
         if (config.jump_threshold > 0) std::cout << "  Jump threshold: " << config.jump_threshold << " px" << std::endl;
         if (config.post_process) std::cout << "  Post-processing: enabled" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (config.use_nn) std::cout << "  NN inference: enabled" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         if (config.img_rows > 0) std::cout << "  Image: " << config.img_cols << "x" << config.img_rows << " (from TIFF)" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
         bool ok = freetrace::run_tracking(loc_csv, output, nb_frames, config); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
