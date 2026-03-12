@@ -932,25 +932,26 @@ std::vector<DiGraph> split_to_subgraphs(const DiGraph& G, const Node& source_nod
 // Terminal check
 // ============================================================
 
-bool is_terminal_node(const Node& node, const Localizations& locs, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+bool is_terminal_node(const Node& node, const Localizations& locs, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
                       float max_jump_d, const DiGraph& selected_graph,
-                      const std::set<Node>& final_graph_nodes) {
-    int node_t = node.first; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    // Check if any future node is reachable
-    auto node_loc = locs.at(node_t)[node.second]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    for (const auto& [t, particles] : locs) {
-        if (t <= node_t) continue;
-        if (t - node_t > 5) break; // limit search range
+                      const std::set<Node>& final_graph_nodes,
+                      int time_forecast) {
+    int node_t = node.first; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    // Check TIME_FORECAST frames ahead (matching Python: range(node_t+1, node_t+TIME_FORECAST+1))
+    for (int next_t = node_t + 1; next_t <= node_t + time_forecast; next_t++) {
+        auto it = locs.find(next_t);
+        if (it == locs.end()) continue;
+        const auto& particles = it->second;
+        auto node_loc = locs.at(node_t)[node.second];
         for (int idx = 0; idx < (int)particles.size(); idx++) {
-            if (particles.empty()) continue;
-            Node next_node = {t, idx};
+            Node next_node = {next_t, idx};
             if (final_graph_nodes.count(next_node)) continue;
             if (selected_graph.has_node(next_node)) continue;
             float d = euclidean_displacement_single(node_loc, particles[idx]);
-            if (d < max_jump_d) return false; // can still connect
+            if (d < max_jump_d) return false;
         }
     }
-    return true; // no reachable future nodes // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    return true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 }
 
 // ============================================================
@@ -1093,7 +1094,7 @@ PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (cla
     }
 
     // Terminal check // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    bool terminal = is_terminal_node(next_path.back(), locs, jump_threshold, selected_graph, final_graph_nodes);
+    bool terminal = is_terminal_node(next_path.back(), locs, jump_threshold, selected_graph, final_graph_nodes, time_forecast); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     presult.terminal = terminal ? 1 : 0;
 
     // Check for excessive time gaps // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -1213,7 +1214,7 @@ PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (cla
 // Used by both the NB_TO_OPTIMUM probing passes and the final pass
 // ============================================================
 
-static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     DiGraph& sub_graph,
     DiGraph& out_graph,
     const Node& source_node,
@@ -1228,6 +1229,7 @@ static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropi
     const std::map<Path, float>* alpha_values_ptr,
     const std::map<Path, float>* k_values_ptr,
     std::map<Path, int>& hashed_prev_next,
+    const std::set<Node>& last_nodes_set, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     int initial_pick_idx,
     float& cost_sum)
 {
@@ -1389,12 +1391,12 @@ static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropi
             }
         }
 
-        // Reconnect orphaned nodes to source // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        // Reconnect orphaned nodes to source (skip last_nodes, matching Python) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
         for (const auto& sn : std::set<Node>(sub_graph.get_nodes())) {
-            if (sn != source_node && !sub_graph.has_path(source_node, sn)) {
+            if (sn != source_node && !last_nodes_set.count(sn) && !sub_graph.has_path(source_node, sn)) {
                 sub_graph.add_edge(source_node, sn);
             }
-        }
+        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 
         float pop_cost = trajectories_costs.count(lowest_cost_traj) ? trajectories_costs[lowest_cost_traj] : 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         cost_sum += pop_cost;
@@ -1478,6 +1480,9 @@ SelectResult select_opt_graph2(const std::set<Node>& final_graph_node_set_hashed
     next_graph = gen_result.graph;
     auto& last_nodes = gen_result.last_nodes;
 
+    // Build last_nodes set for orphan reconnection check (matching Python) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    std::set<Node> last_nodes_set(last_nodes.begin(), last_nodes.end());
+
     // Split into connected subgraphs // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     auto subgraphs = split_to_subgraphs(next_graph, source_node);
 
@@ -1491,13 +1496,14 @@ SelectResult select_opt_graph2(const std::set<Node>& final_graph_node_set_hashed
             tmp_graph.add_node(source_node);
             std::map<Path, int> hpn_copy = hashed_prev_next;
 
-            greedy_assign_pass(sub_copy, tmp_graph, source_node, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            greedy_assign_pass(sub_copy, tmp_graph, source_node, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
                               final_graph_node_set_hashed, locs, next_times,
                               distribution, first_step, last_time, config,
                               first_step ? nullptr : &prev_paths,
                               first_step ? nullptr : &alpha_values,
                               first_step ? nullptr : &k_values,
-                              hpn_copy, lowest_idx, cost_sums[lowest_idx]);
+                              hpn_copy, last_nodes_set, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+                              lowest_idx, cost_sums[lowest_idx]);
         }
 
         // Find best starting index // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -1511,14 +1517,15 @@ SelectResult select_opt_graph2(const std::set<Node>& final_graph_node_set_hashed
         DiGraph sub_copy2 = sub_graph_.copy();
         std::map<Path, int> hpn2 = hashed_prev_next;
         float dummy_cost = -1e-5f;
-        greedy_assign_pass(sub_copy2, selected_graph, source_node, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        greedy_assign_pass(sub_copy2, selected_graph, source_node, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
                           final_graph_node_set_hashed, locs, next_times,
                           distribution, first_step, last_time, config,
                           first_step ? nullptr : &prev_paths,
                           first_step ? nullptr : &alpha_values,
                           first_step ? nullptr : &k_values,
-                          hpn2, lowest_cost_idx, dummy_cost);
-    }
+                          hpn2, last_nodes_set, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+                          lowest_cost_idx, dummy_cost);
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 
     // Check for orphan nodes // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     std::vector<Node> orphans;
@@ -1609,6 +1616,7 @@ std::vector<TrajectoryObj> forecast(const Localizations& locs, // Modified by Cl
         light_prev_graph.add_node(source_node);
 
         auto selected_paths = find_paths_as_list(selected_sub_graph, source_node); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
 
         // Check if we're at the end // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         bool last_time_in_sel = false;
