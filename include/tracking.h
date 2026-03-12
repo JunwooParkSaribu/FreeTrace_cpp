@@ -141,9 +141,10 @@ GenerateResult generate_next_paths(DiGraph next_graph, // Modified by Claude (cl
                                    const Node& source_node);
 
 // --- Terminal check --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-bool is_terminal_node(const Node& node, const Localizations& locs, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+bool is_terminal_node(const Node& node, const Localizations& locs, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
                       float max_jump_d, const DiGraph& selected_graph,
-                      const std::set<Node>& final_graph_nodes);
+                      const std::set<Node>& final_graph_nodes,
+                      int time_forecast); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 
 // --- Path matching --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 const Path* match_prev_next(const std::vector<Path>& prev_paths, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
