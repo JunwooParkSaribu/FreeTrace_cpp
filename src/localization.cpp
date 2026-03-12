@@ -7,6 +7,7 @@
 #include <iostream>
 #include <cassert>
 #include <random>
+#include <iomanip>
 
 #ifdef USE_OPENCV
 #include <opencv2/imgcodecs.hpp>
@@ -140,7 +141,8 @@ void write_localization_csv(
     const std::string& output_path,
     const LocalizationResult& result
 ) {
-    std::ofstream ofs(output_path + "_loc.csv");
+    std::ofstream ofs(output_path + "_loc.csv"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 11:00
+    ofs << std::setprecision(15);  // Match Python's full float precision output
     ofs << "frame,x,y,z,xvar,yvar,rho,norm_cst,intensity,window_size\n";
     for (int frame = 0; frame < static_cast<int>(result.coords.size()); ++frame) {
         for (int p = 0; p < static_cast<int>(result.coords[frame].size()); ++p) {
@@ -156,7 +158,7 @@ void write_localization_csv(
                 << info[3] << "," << intensity << "," << ws << "\n";
         }
     }
-}
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 11:00
 
 // ============================================================
 // Background estimation
@@ -177,7 +179,7 @@ BackgroundResult compute_background(
                 norm_imgs[base + i] = imgs[base + i] / fmax;
     }
 
-    const float bins = 0.01f;
+    const double bins = 0.01; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 11:00
     std::vector<float> bg_means(nb_imgs, 0.0f);
     std::vector<float> bg_stds(nb_imgs, 0.0f);
 
@@ -185,52 +187,71 @@ BackgroundResult compute_background(
         int base = n * rows * cols;
         int pixel_count = rows * cols;
 
-        std::vector<float> bg_int(pixel_count);
-        for (int i = 0; i < pixel_count; ++i)
-            bg_int[i] = static_cast<int>(norm_imgs[base + i] * 100) / 100.0f;
+        // Match Python: (norm * 100).astype(np.uint8) / 100
+        // Python uint8/int division yields float64; use integer bin indices to avoid
+        // float division rounding issues (int(0.29/0.01)==28, but np.histogram gives 29)
+        std::vector<int> bg_ibin(pixel_count);       // integer bin index (0-100)
+        std::vector<double> bg_val(pixel_count);     // float64 value = ibin / 100.0
+        for (int i = 0; i < pixel_count; ++i) {
+            int ival = static_cast<int>(norm_imgs[base + i] * 100);
+            bg_ibin[i] = ival;
+            bg_val[i] = ival / 100.0;               // same as Python uint8(x)/100 → float64
+        }
 
         std::vector<int> args(pixel_count);
         std::iota(args.begin(), args.end(), 0);
         std::vector<int> post_mask = args;
 
-        float mode_val = 0.0f, mask_std = 0.0f;
+        double mode_val = 0.0, mask_std = 0.0;
         for (int iter = 0; iter < 3; ++iter) {
             if (post_mask.empty()) break;
-            float max_val = 0.0f;
+            double max_val_d = 0.0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 11:30
             for (int idx : post_mask)
-                max_val = std::max(max_val, bg_int[idx]);
+                max_val_d = std::max(max_val_d, bg_val[idx]);
 
-            int nb_bins = static_cast<int>((max_val + bins) / bins);
-            if (nb_bins < 1) break;
+            // Build bin edges exactly like np.arange(0, max_val + 0.01, 0.01):
+            // np.arange computes each edge as start + k * step in float64
+            int nb_edges = static_cast<int>((max_val_d + bins) / bins + 0.5);
+            if (nb_edges < 2) nb_edges = 2;
+            int nb_bins = nb_edges - 1;
+            std::vector<double> bin_edges(nb_edges);
+            for (int k = 0; k < nb_edges; ++k)
+                bin_edges[k] = k * bins;  // matches np.arange float64 arithmetic
+
             std::vector<int> hist(nb_bins, 0);
             for (int idx : post_mask) {
-                int bin = std::min(static_cast<int>(bg_int[idx] / bins), nb_bins - 1);
+                // np.histogram: bin i contains values where edge[i] <= v < edge[i+1]
+                // Last bin is right-inclusive: edge[n-1] <= v <= edge[n]
+                auto it = std::upper_bound(bin_edges.begin(), bin_edges.end(), bg_val[idx]);
+                int bin = static_cast<int>(it - bin_edges.begin()) - 1;
+                bin = std::max(0, std::min(bin, nb_bins - 1));
                 hist[bin]++;
-            }
+            } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 11:30
             int mode_bin = std::distance(hist.begin(), std::max_element(hist.begin(), hist.end()));
-            mode_val = mode_bin * bins + bins / 2.0f;
+            mode_val = mode_bin * bins + bins / 2.0;
 
-            float sum = 0.0f, sum2 = 0.0f;
-            for (int idx : post_mask) { sum += bg_int[idx]; sum2 += bg_int[idx] * bg_int[idx]; }
-            float mean_tmp = sum / post_mask.size();
-            mask_std = std::sqrt(std::max(0.0f, sum2 / post_mask.size() - mean_tmp * mean_tmp));
+            double sum = 0.0, sum2 = 0.0;
+            for (int idx : post_mask) { sum += bg_val[idx]; sum2 += bg_val[idx] * bg_val[idx]; }
+            double mean_tmp = sum / post_mask.size();
+            mask_std = std::sqrt(std::max(0.0, sum2 / post_mask.size() - mean_tmp * mean_tmp));
 
             std::vector<int> new_mask;
-            float lo = mode_val - 3.0f * mask_std;
-            float hi = mode_val + 3.0f * mask_std;
+            double lo = mode_val - 3.0 * mask_std;
+            double hi = mode_val + 3.0 * mask_std;
             for (int idx : args)
-                if (bg_int[idx] > lo && bg_int[idx] < hi)
+                if (bg_val[idx] > lo && bg_val[idx] < hi)
                     new_mask.push_back(idx);
             post_mask = new_mask;
         }
 
         if (!post_mask.empty()) {
-            float sum = 0.0f, sum2 = 0.0f;
-            for (int idx : post_mask) { sum += bg_int[idx]; sum2 += bg_int[idx] * bg_int[idx]; }
-            bg_means[n] = sum / post_mask.size();
-            bg_stds[n] = std::sqrt(std::max(0.0f, sum2 / post_mask.size() - bg_means[n] * bg_means[n]));
+            double sum = 0.0, sum2 = 0.0;
+            for (int idx : post_mask) { sum += bg_val[idx]; sum2 += bg_val[idx] * bg_val[idx]; }
+            double mean_d = sum / post_mask.size();
+            bg_means[n] = static_cast<float>(mean_d);
+            bg_stds[n] = static_cast<float>(std::sqrt(std::max(0.0, sum2 / post_mask.size() - mean_d * mean_d)));
         }
-    }
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 11:00
 
     BackgroundResult result;
     for (auto& ws : window_sizes) {
@@ -771,6 +792,7 @@ LocalizationResult localize(
                     bg_regress[d * win_area + p] = bg_for_ws[n * win_area + p];
             }
 
+
             // Run image regression
             auto reg = image_regression(regress_imgs, bg_regress, nb_det, ws, ws, p0, 5);
 
@@ -1018,6 +1040,7 @@ LocalizationResult localize_from_ext( // Modified by Claude (claude-opus-4-6, An
 
         auto h_map = mapping(lik, nb_imgs, rows, cols, shift);
         auto& thresholds = bg_result.thresholds;
+
 
         // NMS detection — identical to localize() // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         int r_half = (shift == 0) ? ws0.h / 2 : shift;
