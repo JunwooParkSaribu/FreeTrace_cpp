@@ -292,56 +292,129 @@ std::vector<std::array<double, 6>> guo_algorithm( // Modified by Claude (claude-
         bool converged = true;
         std::vector<std::array<double, 6>> new_coefs(nb_imgs);
 
-        for (int n = 0; n < nb_imgs; ++n) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 10:00
-            // Python precision behavior per iteration:
-            //   iter 0: yk_2 is float32 (from imgs.copy()), so coef_matrix elements are float32,
-            //           accumulated via np.sum in float32, then assigned to float64 a_mat
-            //   iter 1+: yk_2 is float64 (from exp(double_coefs * grid)), so coef_matrix is float64,
-            //            accumulated in float64
-            // b vector (ans_matrix): always forced to float32 via dtype=np.float32
+        for (int n = 0; n < nb_imgs; ++n) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 18:00
+            // Match Python's EXACT multiplication order for coefficient products.
+            // Python builds 15 intermediate coef arrays with specific left-to-right
+            // evaluation, then assembles them into a 6x6 symmetric matrix.
+            // b vector (ans_matrix): always forced to float32 via dtype=np.float32.
             double Ad[6][6] = {};
             float bf[6] = {};
 
             if (k == 0) {
-                // Iteration 0: accumulate A in float32, then upcast to double (matching Python)
+                // Iteration 0: accumulate A in float32 (matching Python numpy float32)
                 float Af[6][6] = {};
                 for (int p = 0; p < win_area; ++p) {
                     float w = static_cast<float>(yk_2d[n * win_area + p]);
-                    float xf = xgrid[p], yf = ygrid[p];
+                    float x = xgrid[p], y = ygrid[p];
                     float lg = log_imgs[n * win_area + p];
-                    float xf2 = xf * xf, yf2 = yf * yf, xyf = xf * yf;
-                    float fbasis[6] = {xf2, xf, yf2, yf, xyf, 1.0f};
-                    for (int i = 0; i < 6; ++i) {
-                        for (int j = 0; j < 6; ++j)
-                            Af[i][j] += w * fbasis[i] * fbasis[j];
-                        bf[i] += w * fbasis[i] * lg;
-                    }
+
+                    // 15 coefficient products — exact Python multiplication order
+                    // Python: coef1  = yk_2 * xgrid * xgrid * xgrid * xgrid
+                    float c1  = w * x * x * x * x;
+                    // Python: coef2  = yk_2 * xgrid * xgrid * xgrid
+                    float c2  = w * x * x * x;
+                    // Python: coef3  = yk_2 * xgrid**2 * ygrid**2
+                    float c3  = w * (x * x) * (y * y);
+                    // Python: coef4  = yk_2 * xgrid**2 * ygrid
+                    float c4  = w * (x * x) * y;
+                    // Python: coef5  = yk_2 * xgrid * xgrid * xgrid * ygrid
+                    float c5  = w * x * x * x * y;
+                    // Python: coef6  = yk_2 * xgrid**2
+                    float c6  = w * (x * x);
+                    // Python: coef7  = yk_2 * xgrid * ygrid**2
+                    float c7  = w * x * (y * y);
+                    // Python: coef8  = yk_2 * xgrid * ygrid
+                    float c8  = w * x * y;
+                    // Python: coef9  = yk_2 * xgrid
+                    float c9  = w * x;
+                    // Python: coef10 = yk_2 * ygrid * ygrid * ygrid * ygrid
+                    float c10 = w * y * y * y * y;
+                    // Python: coef11 = yk_2 * ygrid * ygrid * ygrid
+                    float c11 = w * y * y * y;
+                    // Python: coef12 = yk_2 * xgrid * ygrid * ygrid * ygrid
+                    float c12 = w * x * y * y * y;
+                    // Python: coef13 = yk_2 * ygrid**2
+                    float c13 = w * (y * y);
+                    // Python: coef14 = yk_2 * ygrid
+                    float c14 = w * y;
+                    // Python: coef15 = yk_2
+                    float c15 = w;
+
+                    // A matrix layout matching Python exactly
+                    Af[0][0] += c1;  Af[0][1] += c2;  Af[0][2] += c3;
+                    Af[0][3] += c4;  Af[0][4] += c5;  Af[0][5] += c6;
+                    Af[1][0] += c2;  Af[1][1] += c6;  Af[1][2] += c7;
+                    Af[1][3] += c8;  Af[1][4] += c4;  Af[1][5] += c9;
+                    Af[2][0] += c3;  Af[2][1] += c7;  Af[2][2] += c10;
+                    Af[2][3] += c11; Af[2][4] += c12; Af[2][5] += c13;
+                    Af[3][0] += c4;  Af[3][1] += c8;  Af[3][2] += c11;
+                    Af[3][3] += c13; Af[3][4] += c7;  Af[3][5] += c14;
+                    Af[4][0] += c5;  Af[4][1] += c4;  Af[4][2] += c12;
+                    Af[4][3] += c7;  Af[4][4] += c3;  Af[4][5] += c8;
+                    Af[5][0] += c6;  Af[5][1] += c9;  Af[5][2] += c13;
+                    Af[5][3] += c14; Af[5][4] += c8;  Af[5][5] += c15;
+
+                    // b vector — matching Python: xgrid**2 * yk_2 * log(imgs), etc.
+                    bf[0] += (x * x) * w * lg;
+                    bf[1] += x * w * lg;
+                    bf[2] += (y * y) * w * lg;
+                    bf[3] += y * w * lg;
+                    bf[4] += x * y * w * lg;
+                    bf[5] += w * lg;
                 }
-                // Upcast to double for solve (matches Python: float32 values in float64 a_mat)
+                // Upcast to double for solve
                 for (int i = 0; i < 6; ++i)
                     for (int j = 0; j < 6; ++j)
                         Ad[i][j] = Af[i][j];
             } else {
-                // Iteration 1+: accumulate A in double (yk_2 is float64 in Python)
+                // Iteration 1+: A in double, b products in double then cast to float32
                 for (int p = 0; p < win_area; ++p) {
                     double w = yk_2d[n * win_area + p];
                     float xf = xgrid[p], yf = ygrid[p];
                     float lg = log_imgs[n * win_area + p];
-                    double x = xf, y = yf;
-                    double x2 = x * x, y2 = y * y, xy = x * y;
-                    double dbasis[6] = {x2, x, y2, y, xy, 1.0};
-                    for (int i = 0; i < 6; ++i) {
-                        for (int j = 0; j < 6; ++j)
-                            Ad[i][j] += w * dbasis[i] * dbasis[j];
-                    }
-                    // b: float32 accumulation
-                    float wf = static_cast<float>(w);
-                    float xf2 = xf * xf, yf2 = yf * yf, xyf = xf * yf;
-                    float fbasis[6] = {xf2, xf, yf2, yf, xyf, 1.0f};
-                    for (int i = 0; i < 6; ++i)
-                        bf[i] += wf * fbasis[i] * lg;
+
+                    // A matrix: Python uses float64 products (yk_2 is float64, xgrid promoted)
+                    // Match Python's left-to-right order
+                    double c1  = w * xf * xf * xf * xf;
+                    double c2  = w * xf * xf * xf;
+                    double c3  = w * double(xf * xf) * double(yf * yf);
+                    double c4  = w * double(xf * xf) * yf;
+                    double c5  = w * xf * xf * xf * yf;
+                    double c6  = w * double(xf * xf);
+                    double c7  = w * xf * double(yf * yf);
+                    double c8  = w * xf * yf;
+                    double c9  = w * xf;
+                    double c10 = w * yf * yf * yf * yf;
+                    double c11 = w * yf * yf * yf;
+                    double c12 = w * xf * yf * yf * yf;
+                    double c13 = w * double(yf * yf);
+                    double c14 = w * yf;
+                    double c15 = w;
+
+                    Ad[0][0] += c1;  Ad[0][1] += c2;  Ad[0][2] += c3;
+                    Ad[0][3] += c4;  Ad[0][4] += c5;  Ad[0][5] += c6;
+                    Ad[1][0] += c2;  Ad[1][1] += c6;  Ad[1][2] += c7;
+                    Ad[1][3] += c8;  Ad[1][4] += c4;  Ad[1][5] += c9;
+                    Ad[2][0] += c3;  Ad[2][1] += c7;  Ad[2][2] += c10;
+                    Ad[2][3] += c11; Ad[2][4] += c12; Ad[2][5] += c13;
+                    Ad[3][0] += c4;  Ad[3][1] += c8;  Ad[3][2] += c11;
+                    Ad[3][3] += c13; Ad[3][4] += c7;  Ad[3][5] += c14;
+                    Ad[4][0] += c5;  Ad[4][1] += c4;  Ad[4][2] += c12;
+                    Ad[4][3] += c7;  Ad[4][4] += c3;  Ad[4][5] += c8;
+                    Ad[5][0] += c6;  Ad[5][1] += c9;  Ad[5][2] += c13;
+                    Ad[5][3] += c14; Ad[5][4] += c8;  Ad[5][5] += c15;
+
+                    // b: Python computes product in float64, then np.sum(dtype=float32)
+                    // casts each element to float32 before accumulating
+                    double x2w = double(xf * xf) * w;
+                    bf[0] += static_cast<float>(x2w * double(lg));
+                    bf[1] += static_cast<float>(double(xf) * w * double(lg));
+                    bf[2] += static_cast<float>(double(yf * yf) * w * double(lg));
+                    bf[3] += static_cast<float>(double(yf) * w * double(lg));
+                    bf[4] += static_cast<float>(double(xf) * double(yf) * w * double(lg));
+                    bf[5] += static_cast<float>(w * double(lg));
                 }
-            } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 10:00
+            } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 18:00
 
             double sol[6];
             if (solve_6x6_lstsq(Ad, bf, sol)) {
