@@ -471,196 +471,417 @@ SegmentationResult segmentation(const Localizations& loc, const std::vector<int>
 
 // Fit 1D GMM with n_components using Expectation-Maximization // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 // Returns (weights, means, variances, log_likelihood)
-struct GMM1DResult { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    std::vector<double> weights; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    std::vector<double> means; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    std::vector<double> variances; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    double log_likelihood; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+struct GMM1DResult { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    std::vector<double> weights;
+    std::vector<double> means;
+    std::vector<double> variances;
+    double log_likelihood;
 };
 
-static double gauss_pdf_1d(double x, double mean, double var) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    double d = x - mean; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    return std::exp(-0.5 * d * d / var) / std::sqrt(2.0 * M_PI * var); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// Digamma function (Stirling series approximation, matches scipy.special.digamma) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+static double digamma(double x) {
+    double result = 0.0;
+    // Shift argument to x >= 6 for series accuracy
+    while (x < 6.0) { result -= 1.0 / x; x += 1.0; }
+    // Asymptotic series: psi(x) ~ ln(x) - 1/(2x) - 1/(12x^2) + 1/(120x^4) - ...
+    double inv_x = 1.0 / x;
+    double inv_x2 = inv_x * inv_x;
+    result += std::log(x) - 0.5 * inv_x
+            - inv_x2 * (1.0/12.0 - inv_x2 * (1.0/120.0 - inv_x2 * (1.0/252.0)));
+    return result;
 }
 
-static GMM1DResult fit_gmm_1d(const std::vector<double>& data, int n_comp, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                               int max_iter = 100, int n_init = 3,
-                               bool use_mean_prior = false,
-                               double mean_prior = 0.0,
-                               double mean_precision_prior = 1e7) {
-    int n = (int)data.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    if (n == 0) return {{}, {}, {}, -1e30}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+static double gauss_pdf_1d(double x, double mean, double var) {
+    double d = x - mean;
+    return std::exp(-0.5 * d * d / var) / std::sqrt(2.0 * M_PI * var);
+}
 
-    GMM1DResult best_result; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    best_result.log_likelihood = -1e30; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// numpy-compatible linear interpolation quantile // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+static double numpy_quantile(const std::vector<double>& sorted_data, double q) {
+    int n = (int)sorted_data.size();
+    double idx = q * (n - 1);
+    int lo = (int)std::floor(idx);
+    int hi = lo + 1;
+    if (hi >= n) return sorted_data[n - 1];
+    double frac = idx - lo;
+    return sorted_data[lo] * (1.0 - frac) + sorted_data[hi] * frac;
+}
 
-    // Compute data variance for initialization // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    double data_mean = 0, data_var = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    for (double x : data) data_mean += x; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    data_mean /= n; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    for (double x : data) data_var += (x - data_mean) * (x - data_mean); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    data_var /= n; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    if (data_var < 1e-10) data_var = 1e-10; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// Standard EM GMM for BIC model selection (used in GridSearchCV) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+static GMM1DResult fit_gmm_1d(const std::vector<double>& data, int n_comp,
+                               int max_iter = 100, int n_init = 3) {
+    int n = (int)data.size();
+    if (n == 0) return {{}, {}, {}, -1e30};
 
-    std::mt19937 rng(42); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    GMM1DResult best_result;
+    best_result.log_likelihood = -1e30;
 
-    for (int init = 0; init < n_init; init++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        // Initialize: all means at 0 (matching Python's means_init=[[0],[0],...]) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::vector<double> weights(n_comp, 1.0 / n_comp); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::vector<double> means(n_comp, 0.0); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::vector<double> vars(n_comp, data_var); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    double data_mean = 0;
+    for (double x : data) data_mean += x;
+    data_mean /= n;
+    double data_var = 0;
+    for (double x : data) data_var += (x - data_mean) * (x - data_mean);
+    data_var /= n;
+    if (data_var < 1e-10) data_var = 1e-10;
 
-        // Add small perturbation for multi-init // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        if (init > 0) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            std::normal_distribution<double> nd(0, std::sqrt(data_var) * 0.1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            for (int k = 0; k < n_comp; k++) means[k] = nd(rng); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::mt19937 rng(42);
+
+    for (int init = 0; init < n_init; init++) {
+        std::vector<double> weights(n_comp, 1.0 / n_comp);
+        std::vector<double> means(n_comp, 0.0);  // means_init=[[0],...] like Python
+        std::vector<double> vars(n_comp, data_var);
+
+        if (init > 0) {
+            std::normal_distribution<double> nd(0, std::sqrt(data_var) * 0.1);
+            for (int k = 0; k < n_comp; k++) means[k] = nd(rng);
         }
 
-        // Responsibilities matrix // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::vector<std::vector<double>> resp(n, std::vector<double>(n_comp)); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<std::vector<double>> resp(n, std::vector<double>(n_comp));
+        double prev_ll = -1e30;
 
-        double prev_ll = -1e30; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        for (int iter = 0; iter < max_iter; iter++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            // E-step // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            double ll = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            for (int i = 0; i < n; i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                double total = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                for (int k = 0; k < n_comp; k++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                    resp[i][k] = weights[k] * gauss_pdf_1d(data[i], means[k], vars[k]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                    total += resp[i][k]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int iter = 0; iter < max_iter; iter++) {
+            // E-step
+            double ll = 0;
+            for (int i = 0; i < n; i++) {
+                double total = 0;
+                for (int k = 0; k < n_comp; k++) {
+                    resp[i][k] = weights[k] * gauss_pdf_1d(data[i], means[k], vars[k]);
+                    total += resp[i][k];
                 }
-                if (total < 1e-300) total = 1e-300; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                ll += std::log(total); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                for (int k = 0; k < n_comp; k++) resp[i][k] /= total; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                if (total < 1e-300) total = 1e-300;
+                ll += std::log(total);
+                for (int k = 0; k < n_comp; k++) resp[i][k] /= total;
             }
+            if (std::abs(ll - prev_ll) < 1e-6) break;
+            prev_ll = ll;
 
-            // Check convergence // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            if (std::abs(ll - prev_ll) < 1e-6) break; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            prev_ll = ll; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-
-            // M-step // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            for (int k = 0; k < n_comp; k++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                double nk = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                for (int i = 0; i < n; i++) nk += resp[i][k]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                if (nk < 1e-10) nk = 1e-10; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-
-                weights[k] = nk / n; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-
-                // Mean update with optional Bayesian prior // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                double sum_x = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                for (int i = 0; i < n; i++) sum_x += resp[i][k] * data[i]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                if (use_mean_prior) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                    means[k] = (sum_x + mean_precision_prior * mean_prior) / (nk + mean_precision_prior); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                } else {
-                    means[k] = sum_x / nk; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            // M-step (standard ML)
+            for (int k = 0; k < n_comp; k++) {
+                double nk = 0;
+                for (int i = 0; i < n; i++) nk += resp[i][k];
+                if (nk < 1e-10) nk = 1e-10;
+                weights[k] = nk / n;
+                double sum_x = 0;
+                for (int i = 0; i < n; i++) sum_x += resp[i][k] * data[i];
+                means[k] = sum_x / nk;
+                double sum_var = 0;
+                for (int i = 0; i < n; i++) {
+                    double d = data[i] - means[k];
+                    sum_var += resp[i][k] * d * d;
                 }
-
-                double sum_var = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                for (int i = 0; i < n; i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                    double d = data[i] - means[k]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                    sum_var += resp[i][k] * d * d; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                }
-                vars[k] = sum_var / nk; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                if (vars[k] < 1e-10) vars[k] = 1e-10; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                vars[k] = sum_var / nk;
+                if (vars[k] < 1e-10) vars[k] = 1e-10;
             }
         }
 
-        // Compute final log-likelihood // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        double ll = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        for (int i = 0; i < n; i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            double total = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            for (int k = 0; k < n_comp; k++) total += weights[k] * gauss_pdf_1d(data[i], means[k], vars[k]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            if (total < 1e-300) total = 1e-300; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            ll += std::log(total); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double ll = 0;
+        for (int i = 0; i < n; i++) {
+            double total = 0;
+            for (int k = 0; k < n_comp; k++) total += weights[k] * gauss_pdf_1d(data[i], means[k], vars[k]);
+            if (total < 1e-300) total = 1e-300;
+            ll += std::log(total);
         }
-
-        if (ll > best_result.log_likelihood) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            best_result.weights = weights; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            best_result.means = means; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            best_result.variances = vars; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            best_result.log_likelihood = ll; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (ll > best_result.log_likelihood) {
+            best_result.weights = weights;
+            best_result.means = means;
+            best_result.variances = vars;
+            best_result.log_likelihood = ll;
         }
     }
-    return best_result; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    return best_result;
 }
 
-// BIC score for 1D GMM: -2*LL + k*log(n) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-static double gmm_bic(const GMM1DResult& result, int n_comp, int n_data) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    int n_params = 3 * n_comp - 1; // weights(k-1) + means(k) + vars(k) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    return -2.0 * result.log_likelihood + n_params * std::log((double)n_data); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// BIC score matching sklearn: -2*LL + k*log(n) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+static double gmm_bic(const GMM1DResult& result, int n_comp, int n_data) {
+    int n_params = 3 * n_comp - 1;
+    return -2.0 * result.log_likelihood + n_params * std::log((double)n_data);
 }
 
-// approx_gauss: full GMM-based jump threshold estimation (matches Python) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-static float approx_gauss(const std::vector<std::vector<float>>& distributions) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float min_euclid = 5.0f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    std::vector<float> max_xyz; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// Compute BIC of a fitted model on test data (for cross-validation) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+static double gmm_bic_on_data(const GMM1DResult& model, int n_comp,
+                               const std::vector<double>& test_data) {
+    int n_test = (int)test_data.size();
+    if (n_test == 0) return 1e30;
+    double ll = 0;
+    for (int i = 0; i < n_test; i++) {
+        double total = 0;
+        for (int k = 0; k < n_comp; k++)
+            total += model.weights[k] * gauss_pdf_1d(test_data[i], model.means[k], model.variances[k]);
+        if (total < 1e-300) total = 1e-300;
+        ll += std::log(total);
+    }
+    int n_params = 3 * n_comp - 1;
+    return -2.0 * ll + n_params * std::log((double)n_test);
+}
 
-    for (const auto& raw_dist : distributions) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        if (raw_dist.empty()) continue; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// 5-fold CV BIC model selection (matches sklearn GridSearchCV) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+static int select_n_components_cv(const std::vector<double>& data, int n_folds = 5) {
+    int n = (int)data.size();
+    int best_nc = 1;
+    double best_avg_bic = 1e30;
 
-        // Check variance // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        double mean_v = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        for (float x : raw_dist) mean_v += x; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        mean_v /= raw_dist.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        double var_v = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        for (float x : raw_dist) var_v += (x - mean_v) * (x - mean_v); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        var_v /= raw_dist.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        if (var_v <= 1e-5) continue; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-
-        // Quantile filter (2.5% - 97.5%) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::vector<float> sorted_dist = raw_dist; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::sort(sorted_dist.begin(), sorted_dist.end()); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        int n = (int)sorted_dist.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        float q025 = sorted_dist[(int)(0.025 * (n - 1))]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        float q975 = sorted_dist[(int)(0.975 * (n - 1))]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::vector<double> filtered; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        for (float x : raw_dist) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            if (x > q025 && x < q975) filtered.push_back((double)x); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    for (int nc = 1; nc <= 3; nc++) {
+        double bic_sum = 0;
+        for (int fold = 0; fold < n_folds; fold++) {
+            // Split: fold-th portion is test, rest is train
+            std::vector<double> train, test;
+            for (int i = 0; i < n; i++) {
+                if (i % n_folds == fold) test.push_back(data[i]);
+                else train.push_back(data[i]);
+            }
+            auto model = fit_gmm_1d(train, nc, 100, 3);
+            bic_sum += gmm_bic_on_data(model, nc, test);
         }
-        if (filtered.empty()) continue; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double avg_bic = bic_sum / n_folds;
+        if (avg_bic < best_avg_bic) {
+            best_avg_bic = avg_bic;
+            best_nc = nc;
+        }
+    }
+    return best_nc;
+}
 
-        // Recheck variance after filtering // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        double fmean = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        for (double x : filtered) fmean += x; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        fmean /= filtered.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        double fvar = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        for (double x : filtered) fvar += (x - fmean) * (x - fmean); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        fvar /= filtered.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        if (fvar <= 1e-5) continue; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// Variational Bayesian GMM matching sklearn BayesianGaussianMixture // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+// Implements Dirichlet Process weights, Normal-Wishart conjugate priors.
+static GMM1DResult fit_bayesian_gmm_1d(const std::vector<double>& data, int n_comp,
+                                        int max_iter = 100, int n_init = 3,
+                                        double mean_prior_val = 0.0,
+                                        double mean_precision_prior = 1e7) {
+    int n = (int)data.size();
+    if (n == 0) return {{}, {}, {}, -1e30};
 
-        // GridSearch: fit GMM with 1,2,3 components, select by BIC // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        int best_n_comp = 1; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        double best_bic = 1e30; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        for (int nc = 1; nc <= 3; nc++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            auto result = fit_gmm_1d(filtered, nc, 100, 3, false); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            double bic = gmm_bic(result, nc, (int)filtered.size()); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            if (bic < best_bic) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                best_bic = bic; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                best_n_comp = nc; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Compute priors from data (matching sklearn defaults)
+    double data_mean = 0;
+    for (double x : data) data_mean += x;
+    data_mean /= n;
+    // covariance_prior = np.cov(X.T) for 1D = sample variance with ddof=1
+    double cov_prior = 0;
+    for (double x : data) cov_prior += (x - data_mean) * (x - data_mean);
+    cov_prior /= (n - 1);  // Bessel correction (ddof=1)
+    if (cov_prior < 1e-10) cov_prior = 1e-10;
+
+    double dof_prior = 1.0;  // n_features = 1
+    double weight_conc_prior = 1.0 / n_comp;  // sklearn default
+
+    GMM1DResult best_result;
+    best_result.log_likelihood = -1e30;
+
+    double data_var = cov_prior * (n - 1.0) / n;  // population variance for init
+
+    std::mt19937 rng(42);
+
+    for (int init = 0; init < n_init; init++) {
+        // Initialize parameters
+        std::vector<double> means(n_comp, 0.0);
+        std::vector<double> covars(n_comp, data_var);  // W_k / dof_k (normalized)
+        std::vector<double> mean_prec(n_comp, mean_precision_prior);
+        std::vector<double> dof(n_comp, dof_prior + (double)n / n_comp);
+
+        // Dirichlet Process: two-parameter beta representation
+        std::vector<double> wc_a(n_comp, 1.0);
+        std::vector<double> wc_b(n_comp, weight_conc_prior);
+
+        if (init > 0) {
+            std::normal_distribution<double> nd(0, std::sqrt(data_var) * 0.1);
+            for (int k = 0; k < n_comp; k++) means[k] = nd(rng);
+        }
+
+        std::vector<std::vector<double>> resp(n, std::vector<double>(n_comp));
+        double prev_lb = -1e30;
+
+        for (int iter = 0; iter < max_iter; iter++) {
+            // E-step: compute responsibilities using variational expectations
+            // E[log π_k] from Dirichlet Process (stick-breaking)
+            std::vector<double> log_weights(n_comp, 0.0);
+            double cumsum_digamma_b = 0.0;
+            for (int k = 0; k < n_comp; k++) {
+                double dg_sum = digamma(wc_a[k] + wc_b[k]);
+                double dg_a = digamma(wc_a[k]);
+                double dg_b = digamma(wc_b[k]);
+                log_weights[k] = dg_a - dg_sum + cumsum_digamma_b;
+                cumsum_digamma_b += dg_b - dg_sum;
+            }
+
+            // E[log |Λ_k|] for 1D Wishart: digamma((dof_k+1)/2) + log(2) - log(W_k)
+            // where W_k = covars[k] * dof[k] (un-normalized)
+            std::vector<double> log_det_prec(n_comp);
+            for (int k = 0; k < n_comp; k++) {
+                double Wk = covars[k] * dof[k];
+                log_det_prec[k] = digamma(0.5 * (dof[k] + 1.0)) + std::log(2.0) - std::log(Wk);
+            }
+
+            double lb = 0;
+            for (int i = 0; i < n; i++) {
+                double max_log = -1e30;
+                for (int k = 0; k < n_comp; k++) {
+                    double d = data[i] - means[k];
+                    // Expected Mahalanobis: d/mean_prec_k + dof_k * d^2 / W_k
+                    // = 1/mean_prec_k + d^2 / covars_k  (since covars_k = W_k/dof_k)
+                    double mahal = 1.0 / mean_prec[k] + d * d / covars[k];
+                    resp[i][k] = log_weights[k] + 0.5 * log_det_prec[k]
+                               - 0.5 * std::log(2.0 * M_PI) - 0.5 * mahal;
+                    // Subtract 0.5 * log(dof_k) because covars is normalized (sklearn line 769)
+                    resp[i][k] -= 0.5 * std::log(dof[k]);
+                    if (resp[i][k] > max_log) max_log = resp[i][k];
+                }
+                // Log-sum-exp for numerical stability
+                double total = 0;
+                for (int k = 0; k < n_comp; k++) {
+                    resp[i][k] = std::exp(resp[i][k] - max_log);
+                    total += resp[i][k];
+                }
+                if (total < 1e-300) total = 1e-300;
+                lb += std::log(total) + max_log;
+                for (int k = 0; k < n_comp; k++) resp[i][k] /= total;
+            }
+
+            if (std::abs(lb - prev_lb) < 1e-6) break;
+            prev_lb = lb;
+
+            // M-step: update variational parameters
+            std::vector<double> nk(n_comp, 0.0);
+            std::vector<double> xk(n_comp, 0.0);
+            std::vector<double> sk(n_comp, 0.0);
+
+            for (int k = 0; k < n_comp; k++) {
+                for (int i = 0; i < n; i++) nk[k] += resp[i][k];
+                if (nk[k] < 1e-10) nk[k] = 1e-10;
+                for (int i = 0; i < n; i++) xk[k] += resp[i][k] * data[i];
+                xk[k] /= nk[k];  // weighted mean x_bar_k
+                for (int i = 0; i < n; i++) {
+                    double d = data[i] - xk[k];
+                    sk[k] += resp[i][k] * d * d;
+                }
+                sk[k] /= nk[k];  // weighted variance S_k (normalized by nk)
+            }
+
+            // Update weights (Dirichlet Process stick-breaking)
+            // wc_a[k] = 1 + nk[k]
+            // wc_b[k] = weight_conc_prior + sum(nk[k+1:])
+            for (int k = 0; k < n_comp; k++) {
+                wc_a[k] = 1.0 + nk[k];
+                double tail_sum = 0;
+                for (int j = k + 1; j < n_comp; j++) tail_sum += nk[j];
+                wc_b[k] = weight_conc_prior + tail_sum;
+            }
+
+            // Update means (Normal conjugate)
+            // mean_precision_k = mean_precision_prior + nk
+            // mean_k = (mean_precision_prior * mean_prior + nk * x_bar) / mean_precision_k
+            for (int k = 0; k < n_comp; k++) {
+                mean_prec[k] = mean_precision_prior + nk[k];
+                means[k] = (mean_precision_prior * mean_prior_val + nk[k] * xk[k]) / mean_prec[k];
+            }
+
+            // Update covariances (Wishart conjugate)
+            // dof_k = dof_prior + nk
+            // W_k = cov_prior + nk*S_k + nk*beta0/beta_k * (x_bar_k - m0)^2
+            // covars_k = W_k / dof_k (normalized, matching sklearn line 628)
+            for (int k = 0; k < n_comp; k++) {
+                dof[k] = dof_prior + nk[k];
+                double diff = xk[k] - mean_prior_val;
+                double Wk = cov_prior + nk[k] * sk[k]
+                          + nk[k] * mean_precision_prior / mean_prec[k] * diff * diff;
+                covars[k] = Wk / dof[k];
+                if (covars[k] < 1e-10) covars[k] = 1e-10;
             }
         }
 
-        // Bayesian GMM with optimal components and mean prior at 0 // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        auto cluster = fit_gmm_1d(filtered, best_n_comp, 100, 3, true, 0.0, 1e7); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        // Compute weights from DP parameters (matching sklearn _set_parameters)
+        std::vector<double> weights(n_comp);
+        {
+            std::vector<double> stick_remaining(n_comp);
+            for (int k = 0; k < n_comp; k++) {
+                double sum_ab = wc_a[k] + wc_b[k];
+                double ratio_b = wc_b[k] / sum_ab;
+                double ratio_a = wc_a[k] / sum_ab;
+                stick_remaining[k] = ratio_b;
+                weights[k] = ratio_a;
+                if (k > 0) {
+                    double prod = 1.0;
+                    for (int j = 0; j < k; j++) prod *= stick_remaining[j];
+                    weights[k] *= prod;
+                }
+            }
+            double wsum = 0;
+            for (int k = 0; k < n_comp; k++) wsum += weights[k];
+            if (wsum > 0) for (int k = 0; k < n_comp; k++) weights[k] /= wsum;
+        }
 
-        // Select components near zero with weight > 0.05 // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::vector<double> selec_var; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        for (int k = 0; k < best_n_comp; k++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            if (cluster.means[k] > -1.0 && cluster.means[k] < 1.0 && cluster.weights[k] > 0.05) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                selec_var.push_back(cluster.variances[k]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        // Use lower bound as comparison metric across inits
+        double lb = prev_lb;
+        if (lb > best_result.log_likelihood) {
+            best_result.weights = weights;
+            best_result.means = means;
+            best_result.variances = covars;  // These are W_k/dof_k = actual covariances
+            best_result.log_likelihood = lb;
+        }
+    }
+    return best_result; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+}
+
+// approx_gauss: GMM-based jump threshold (matches Python sklearn pipeline) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+static float approx_gauss(const std::vector<std::vector<float>>& distributions) {
+    float min_euclid = 5.0f;
+    std::vector<float> max_xyz;
+
+    for (const auto& raw_dist : distributions) {
+        if (raw_dist.empty()) continue;
+
+        // Check variance
+        double mean_v = 0;
+        for (float x : raw_dist) mean_v += x;
+        mean_v /= raw_dist.size();
+        double var_v = 0;
+        for (float x : raw_dist) var_v += (x - mean_v) * (x - mean_v);
+        var_v /= raw_dist.size();
+        if (var_v <= 1e-5) continue;
+
+        // Quantile filter (2.5% - 97.5%) with numpy-compatible interpolation
+        std::vector<double> sorted_dist(raw_dist.begin(), raw_dist.end());
+        std::sort(sorted_dist.begin(), sorted_dist.end());
+        double q025 = numpy_quantile(sorted_dist, 0.025);
+        double q975 = numpy_quantile(sorted_dist, 0.975);
+        std::vector<double> filtered;
+        for (float x : raw_dist) {
+            if ((double)x > q025 && (double)x < q975) filtered.push_back((double)x);
+        }
+        if (filtered.empty()) continue;
+
+        // Recheck variance after filtering
+        double fmean = 0;
+        for (double x : filtered) fmean += x;
+        fmean /= filtered.size();
+        double fvar = 0;
+        for (double x : filtered) fvar += (x - fmean) * (x - fmean);
+        fvar /= filtered.size();
+        if (fvar <= 1e-5) continue;
+
+        // 5-fold CV BIC model selection (matches sklearn GridSearchCV)
+        int best_n_comp = select_n_components_cv(filtered, 5);
+        fprintf(stderr, "  GMM dim: n=%d, CV best_nc=%d\n", (int)filtered.size(), best_n_comp);
+
+        // Bayesian GMM with Wishart/DP priors (matches sklearn BayesianGaussianMixture)
+        auto cluster = fit_bayesian_gmm_1d(filtered, best_n_comp, 100, 3, 0.0, 1e7);
+
+        // Select components near zero with weight > 0.05
+        std::vector<double> selec_var;
+        for (int k = 0; k < best_n_comp; k++) {
+            fprintf(stderr, "    comp[%d]: mean=%.6f, var=%.6f, weight=%.6f\n",
+                    k, cluster.means[k], cluster.variances[k], cluster.weights[k]);
+            if (cluster.means[k] > -1.0 && cluster.means[k] < 1.0 && cluster.weights[k] > 0.05) {
+                selec_var.push_back(cluster.variances[k]);
             }
         }
-        if (selec_var.empty()) continue; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (selec_var.empty()) { fprintf(stderr, "    NO components selected!\n"); continue; }
 
-        // Take the component with largest variance // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        double max_var = *std::max_element(selec_var.begin(), selec_var.end()); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        max_xyz.push_back((float)(std::sqrt(max_var) * 2.5)); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double max_var = *std::max_element(selec_var.begin(), selec_var.end());
+        max_xyz.push_back((float)(std::sqrt(max_var) * 2.5));
     }
 
-    // Compute Euclidean norm across dimensions // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float max_euclid_sq = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    for (float v : max_xyz) max_euclid_sq += v * v; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    return std::max(std::sqrt(max_euclid_sq), min_euclid); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    float max_euclid_sq = 0;
+    for (float v : max_xyz) max_euclid_sq += v * v;
+    return std::max(std::sqrt(max_euclid_sq), min_euclid); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 }
 
 std::map<int, float> approximation(const std::vector<float>& dist_x, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
