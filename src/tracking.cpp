@@ -1468,23 +1468,28 @@ std::vector<DiGraph> split_to_subgraphs(const DiGraph& G, const Node& source_nod
             }
         }
 
-        // Build directed subgraph preserving original edge insertion order // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-        // Python does: sub_graph_ = graph_copy.subgraph(component).copy()
-        // This preserves the original graph's edge insertion order.
-        // We iterate the original graph's nodes in insertion order and copy
-        // edges whose both endpoints are in the BFS component.
+        // Build directed subgraph matching Python's edge insertion order exactly. // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        // Python iterates bfs_nodes, for each gets undirected edges, and adds
+        // directed edges based on time ordering (edge[0][0] < edge[1][0]).
+        // This insertion order determines successor ordering in the subgraph,
+        // which affects cpython_set_order hash collision resolution, DFS path
+        // enumeration, and ultimately the greedy path selection.
         DiGraph sub_graph;
         std::set<Node> component_set_tmp(bfs_nodes.begin(), bfs_nodes.end());
-        for (const auto& node : G.get_nodes_ordered()) {
-            if (node == source_node) continue;
-            if (!component_set_tmp.count(node)) continue;
-            for (const auto& succ : G.successors(node)) {
-                if (succ == source_node) continue;
-                if (component_set_tmp.count(succ)) {
-                    sub_graph.add_edge(node, succ, G.get_edge_data(node, succ));
+        for (const auto& node : bfs_nodes) {
+            if (undirected.count(node)) {
+                for (const auto& neighbor : undirected[node]) {
+                    if (!component_set_tmp.count(neighbor)) continue;
+                    // Add directed edge: earlier time -> later time
+                    if (node.first < neighbor.first) {
+                        sub_graph.add_edge(node, neighbor, G.get_edge_data(node, neighbor));
+                    } else if (neighbor.first < node.first) {
+                        sub_graph.add_edge(neighbor, node, G.get_edge_data(neighbor, node));
+                    }
+                    // If same time (shouldn't happen in tracking), skip
                 }
             }
-        }
+        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
         // Remove processed nodes from remaining list
         std::set<Node> component_set(bfs_nodes.begin(), bfs_nodes.end());
