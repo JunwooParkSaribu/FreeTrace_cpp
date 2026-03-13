@@ -9,8 +9,66 @@
 #include <algorithm>
 #include <numeric>
 #include <iostream>
+#include <fstream>
 
 namespace freetrace {
+
+// ============================================================ // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+// Direct k model: load weights and compute without ONNX Runtime
+// Architecture: input(1) → dense(256) → dense(128) → dense(1), no activations
+// ============================================================
+
+static bool load_k_direct(KModelDirect& km, const std::string& models_dir) {
+    std::string path = models_dir + "/k_model_weights.bin";
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) return false;
+
+    int dims[6];
+    f.read(reinterpret_cast<char*>(dims), sizeof(dims));
+    // dims: {1, 256, 256, 128, 128, 1}
+    int w1_size = dims[0] * dims[1]; // 256
+    int b1_size = dims[1];           // 256
+    int w2_size = dims[2] * dims[3]; // 32768
+    int b2_size = dims[3];           // 128
+    int w3_size = dims[4] * dims[5]; // 128
+    int b3_size = dims[5];           // 1
+
+    km.W1.resize(w1_size); f.read(reinterpret_cast<char*>(km.W1.data()), w1_size * sizeof(float));
+    km.b1.resize(b1_size); f.read(reinterpret_cast<char*>(km.b1.data()), b1_size * sizeof(float));
+    km.W2.resize(w2_size); f.read(reinterpret_cast<char*>(km.W2.data()), w2_size * sizeof(float));
+    km.b2.resize(b2_size); f.read(reinterpret_cast<char*>(km.b2.data()), b2_size * sizeof(float));
+    km.W3.resize(w3_size); f.read(reinterpret_cast<char*>(km.W3.data()), w3_size * sizeof(float));
+    float b3_val; f.read(reinterpret_cast<char*>(&b3_val), sizeof(float));
+    km.b3 = b3_val;
+    km.loaded = f.good();
+    return km.loaded;
+}
+
+// Direct computation: x -> W1*x+b1 -> W2*h+b2 -> W3*h+b3
+static float k_direct_predict(const KModelDirect& km, float input) {
+    // Layer 1: h1 = W1 * input + b1  (1 → 256)
+    // W1 is (1, 256) so h1[i] = W1[i] * input + b1[i]
+    float h1[256];
+    for (int i = 0; i < 256; i++)
+        h1[i] = km.W1[i] * input + km.b1[i];
+
+    // Layer 2: h2 = W2^T * h1 + b2  (256 → 128)
+    // W2 is (256, 128), h2[j] = sum_i(W2[i*128+j] * h1[i]) + b2[j]
+    float h2[128];
+    for (int j = 0; j < 128; j++) {
+        float sum = km.b2[j];
+        for (int i = 0; i < 256; i++)
+            sum += km.W2[i * 128 + j] * h1[i];
+        h2[j] = sum;
+    }
+
+    // Layer 3: out = W3^T * h2 + b3  (128 → 1)
+    float out = km.b3;
+    for (int i = 0; i < 128; i++)
+        out += km.W3[i] * h2[i];
+
+    return out;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 // ============================================================
 // Preprocessing helpers — double precision to match Python/NumPy
@@ -162,13 +220,14 @@ static int model_selection(const NNModels& models, int length) {
 
 #ifdef USE_ONNXRUNTIME
 
-bool load_nn_models(NNModels& models, const std::string& models_dir) {
+bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     try {
         auto* env = new Ort::Env(ORT_LOGGING_LEVEL_ERROR, "freetrace");
         models.env = env;
 
         Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(1);
+        opts.SetIntraOpNumThreads(1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
         bool gpu_enabled = false;
         try {
@@ -182,29 +241,47 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) {
         models.reg_model_nums = {3, 5, 8};
         models.crits = {3, 5, 8, 8192};
 
+        // Cache RunOptions and MemoryInfo (reused for every inference call)
+        models.run_options = new Ort::RunOptions();
+        models.mem_info = new Ort::MemoryInfo(
+            Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
+
+        Ort::AllocatorWithDefaultOptions alloc;
+
         for (int n : models.reg_model_nums) {
             std::string path = models_dir + "/reg_model_" + std::to_string(n) + ".onnx";
             auto* session = new Ort::Session(*env, path.c_str(), opts);
             models.alpha_sessions[n] = session;
+            // Cache input/output names
+            models.alpha_input_names[n] = std::string(session->GetInputNameAllocated(0, alloc).get());
+            models.alpha_output_names[n] = std::string(session->GetOutputNameAllocated(0, alloc).get());
         }
 
         std::string k_path = models_dir + "/reg_k_model.onnx";
-        models.k_session = new Ort::Session(*env, k_path.c_str(), opts);
+        auto* k_sess = new Ort::Session(*env, k_path.c_str(), opts);
+        models.k_session = k_sess;
+        models.k_input_name = std::string(k_sess->GetInputNameAllocated(0, alloc).get());
+        models.k_output_name = std::string(k_sess->GetOutputNameAllocated(0, alloc).get());
 
-        models.loaded = true;
-        if (gpu_enabled) {
-            std::cout << "NN inference: GPU (CUDA) enabled" << std::endl;
-        } else {
-            std::cout << "NN inference: CPU mode" << std::endl;
+        // Load direct k model weights (fast path, bypasses ONNX for k predictions) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        if (load_k_direct(models.k_direct, models_dir)) {
+            std::cout << "Loaded direct k model weights (fast path)" << std::endl;
         }
-        return true;
+
+        models.loaded = true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        if (gpu_enabled) {
+            std::cout << "\n  NN inference: GPU (CUDA) — fast\n" << std::endl;
+        } else {
+            std::cout << "\n  NN inference: CPU — this may be slower than GPU\n" << std::endl;
+        }
+        return true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     } catch (const Ort::Exception& e) {
         std::cerr << "ONNX load error: " << e.what() << std::endl;
         return false;
     }
-}
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
-void free_nn_models(NNModels& models) {
+void free_nn_models(NNModels& models) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     for (auto& [n, session] : models.alpha_sessions) {
         delete static_cast<Ort::Session*>(session);
     }
@@ -213,16 +290,26 @@ void free_nn_models(NNModels& models) {
         delete static_cast<Ort::Session*>(models.k_session);
         models.k_session = nullptr;
     }
+    if (models.run_options) {
+        delete static_cast<Ort::RunOptions*>(models.run_options);
+        models.run_options = nullptr;
+    }
+    if (models.mem_info) {
+        delete static_cast<Ort::MemoryInfo*>(models.mem_info);
+        models.mem_info = nullptr;
+    }
     if (models.env) {
         delete static_cast<Ort::Env*>(models.env);
         models.env = nullptr;
     }
     models.loaded = false;
-}
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+
 
 float predict_alpha_nn(const NNModels& models,
                        const std::vector<float>& xs,
                        const std::vector<float>& ys) {
+
     if (!models.loaded || xs.size() < 3) return 1.0f;
 
     int n = (int)xs.size();
@@ -255,22 +342,19 @@ float predict_alpha_nn(const NNModels& models,
         for (int i = 0; i < model_num * 3; i++) input_data[offset_y + i] = y_sig[i];
     }
 
-    try {
-        Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    try { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        auto& mem_info = *static_cast<Ort::MemoryInfo*>(models.mem_info);
         std::vector<int64_t> shape = {batch_size, model_num, 1, 3};
         Ort::Value input_tensor = Ort::Value::CreateTensor<float>(mem_info, input_data.data(),
                                                                    input_data.size(), shape.data(), shape.size());
 
-        Ort::AllocatorWithDefaultOptions alloc;
-        auto in_name = session->GetInputNameAllocated(0, alloc);
-        auto out_name = session->GetOutputNameAllocated(0, alloc);
-        const char* input_names[] = {in_name.get()};
-        const char* output_names[] = {out_name.get()};
+        const char* input_names[] = {models.alpha_input_names.at(model_num).c_str()};
+        const char* output_names[] = {models.alpha_output_names.at(model_num).c_str()};
 
-        auto outputs = session->Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1, output_names, 1);
+        auto outputs = session->Run(*static_cast<Ort::RunOptions*>(models.run_options),
+                                    input_names, &input_tensor, 1, output_names, 1);
 
         float* pred_data = outputs[0].GetTensorMutableData<float>();
-        // Use double for postprocessing (IQR mean)
         std::vector<double> preds(batch_size);
         for (int i = 0; i < batch_size; i++) preds[i] = (double)pred_data[i];
 
@@ -279,18 +363,106 @@ float predict_alpha_nn(const NNModels& models,
     } catch (const Ort::Exception& e) {
         std::cerr << "Alpha predict error: " << e.what() << std::endl;
         return 1.0f;
-    }
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 }
 
-float predict_k_nn(const NNModels& models,
+std::vector<float> predict_alpha_nn_batch(const NNModels& models, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+                                          const std::vector<std::vector<float>>& xs_batch,
+                                          const std::vector<std::vector<float>>& ys_batch) {
+
+    int N = (int)xs_batch.size();
+    std::vector<float> results(N, 1.0f);
+    if (!models.loaded || N == 0) return results;
+
+    // Group trajectories by model_num for batched inference
+    // model_num -> list of (index_in_batch, preprocessed_windows_count)
+    struct TrajectoryInfo {
+        int orig_idx;
+        int num_windows;  // 2 * actual windows (x + y)
+    };
+    std::map<int, std::vector<TrajectoryInfo>> groups;
+    std::map<int, std::vector<float>> group_input_data;
+
+    for (int idx = 0; idx < N; idx++) {
+        if (xs_batch[idx].size() < 3) continue;
+        int n = (int)xs_batch[idx].size();
+        int model_num = model_selection(models, n);
+        if (models.alpha_sessions.find(model_num) == models.alpha_sessions.end()) continue;
+
+        // Recoupe into windows
+        std::vector<std::vector<double>> windows_x, windows_y;
+        for (int i = 0; i + model_num <= n; i++) {
+            windows_x.push_back(std::vector<double>(xs_batch[idx].begin() + i,
+                                                     xs_batch[idx].begin() + i + model_num));
+            windows_y.push_back(std::vector<double>(ys_batch[idx].begin() + i,
+                                                     ys_batch[idx].begin() + i + model_num));
+        }
+        if (windows_x.empty()) continue;
+
+        int batch_size = 2 * (int)windows_x.size();
+        groups[model_num].push_back({idx, batch_size});
+
+        // Preprocess and append to group input data
+        auto& data = group_input_data[model_num];
+        for (int w = 0; w < (int)windows_x.size(); w++) {
+            std::vector<float> x_sig, y_sig;
+            cvt_2_signal(windows_x[w], windows_y[w], x_sig, y_sig);
+            data.insert(data.end(), x_sig.begin(), x_sig.end());
+            data.insert(data.end(), y_sig.begin(), y_sig.end());
+        }
+    }
+
+    // Run one ONNX call per model_num (typically 1-3 calls instead of N)
+    for (auto& [model_num, infos] : groups) {
+        auto it = models.alpha_sessions.find(model_num);
+        if (it == models.alpha_sessions.end()) continue;
+        auto* session = static_cast<Ort::Session*>(it->second);
+        auto& data = group_input_data[model_num];
+
+        int total_batch = 0;
+        for (auto& info : infos) total_batch += info.num_windows;
+        if (total_batch == 0) continue;
+
+        try {
+            auto& mem_info = *static_cast<Ort::MemoryInfo*>(models.mem_info);
+            std::vector<int64_t> shape = {total_batch, model_num, 1, 3};
+            Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+                mem_info, data.data(), data.size(), shape.data(), shape.size());
+            const char* input_names[] = {models.alpha_input_names.at(model_num).c_str()};
+            const char* output_names[] = {models.alpha_output_names.at(model_num).c_str()};
+
+            auto outputs = session->Run(*static_cast<Ort::RunOptions*>(models.run_options),
+                                        input_names, &input_tensor, 1, output_names, 1);
+
+            float* pred_data = outputs[0].GetTensorMutableData<float>();
+
+            // Unpack: each trajectory gets its num_windows predictions
+            int offset = 0;
+            for (auto& info : infos) {
+                std::vector<double> preds(info.num_windows);
+                for (int i = 0; i < info.num_windows; i++)
+                    preds[i] = (double)pred_data[offset + i];
+                offset += info.num_windows;
+
+                if (preds.size() <= 4)
+                    results[info.orig_idx] = (float)vec_mean_d(preds);
+                else
+                    results[info.orig_idx] = (float)iqr_mean_d(preds);
+            }
+        } catch (const Ort::Exception& e) {
+            std::cerr << "Alpha batch predict error: " << e.what() << std::endl;
+        }
+    }
+    return results;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+
+float predict_k_nn(const NNModels& models, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
                    const std::vector<float>& xs,
                    const std::vector<float>& ys) {
+
     if (!models.loaded || xs.size() < 2) return 0.5f;
 
-    auto* session = static_cast<Ort::Session*>(models.k_session);
-    if (!session) return 0.5f;
-
-    // Compute displacements in double precision
+    // Compute log displacement (shared preprocessing)
     std::vector<double> xd(xs.begin(), xs.end()), yd(ys.begin(), ys.end());
     auto disps = displacement_d(xd, yd);
     if (disps.empty()) return 0.5f;
@@ -303,28 +475,101 @@ float predict_k_nn(const NNModels& models,
     }
     if (std::isnan(log_disp) || std::isinf(log_disp)) return 0.5f;
 
+    // Fast path: direct computation (no ONNX overhead)
+    if (models.k_direct.loaded) {
+        float k = k_direct_predict(models.k_direct, (float)log_disp);
+        return std::isnan(k) ? 1.0f : k;
+    }
+
+    // Fallback: ONNX Runtime
+    auto* session = static_cast<Ort::Session*>(models.k_session);
+    if (!session) return 0.5f;
     try {
-        Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-        std::vector<float> input_data = {(float)log_disp};
+        auto& mem_info = *static_cast<Ort::MemoryInfo*>(models.mem_info);
+        float input_val = (float)log_disp;
         std::vector<int64_t> shape = {1, 1};
-        Ort::Value input_tensor = Ort::Value::CreateTensor<float>(mem_info, input_data.data(), 1, shape.data(), 2);
-
-        Ort::AllocatorWithDefaultOptions alloc;
-        auto in_name = session->GetInputNameAllocated(0, alloc);
-        auto out_name = session->GetOutputNameAllocated(0, alloc);
-        const char* input_names[] = {in_name.get()};
-        const char* output_names[] = {out_name.get()};
-
-        auto outputs = session->Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1, output_names, 1);
-
+        Ort::Value input_tensor = Ort::Value::CreateTensor<float>(mem_info, &input_val, 1, shape.data(), 2);
+        const char* input_names[] = {models.k_input_name.c_str()};
+        const char* output_names[] = {models.k_output_name.c_str()};
+        auto outputs = session->Run(*static_cast<Ort::RunOptions*>(models.run_options),
+                                    input_names, &input_tensor, 1, output_names, 1);
         float k = outputs[0].GetTensorMutableData<float>()[0];
-        if (std::isnan(k)) return 1.0f;
-        return k;
+        return std::isnan(k) ? 1.0f : k;
     } catch (const Ort::Exception& e) {
         std::cerr << "K predict error: " << e.what() << std::endl;
         return 0.5f;
     }
-}
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+
+std::vector<float> predict_k_nn_batch(const NNModels& models, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+                                      const std::vector<std::vector<float>>& xs_batch,
+                                      const std::vector<std::vector<float>>& ys_batch) {
+
+    int N = (int)xs_batch.size();
+    std::vector<float> results(N, 0.5f);
+    if (!models.loaded || N == 0) return results;
+
+    auto* session = static_cast<Ort::Session*>(models.k_session);
+    if (!session) return results;
+
+    // Compute all log_displacements
+    std::vector<float> input_data;
+    std::vector<int> valid_indices;
+    input_data.reserve(N);
+
+    for (int i = 0; i < N; i++) {
+        if (xs_batch[i].size() < 2) continue;
+        std::vector<double> xd(xs_batch[i].begin(), xs_batch[i].end());
+        std::vector<double> yd(ys_batch[i].begin(), ys_batch[i].end());
+        auto disps = displacement_d(xd, yd);
+        if (disps.empty()) continue;
+
+        double log_disp;
+        if ((int)xs_batch[i].size() < 10) {
+            log_disp = std::log10(vec_mean_d(disps));
+        } else {
+            log_disp = std::log10(iqr_mean_d(disps));
+        }
+        if (std::isnan(log_disp) || std::isinf(log_disp)) continue;
+        input_data.push_back((float)log_disp);
+        valid_indices.push_back(i);
+    }
+
+    if (input_data.empty()) return results;
+
+    // Fast path: direct computation // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    if (models.k_direct.loaded) {
+        for (int i = 0; i < (int)input_data.size(); i++) {
+            float k = k_direct_predict(models.k_direct, input_data[i]);
+            results[valid_indices[i]] = std::isnan(k) ? 1.0f : k;
+        }
+        return results;
+    }
+
+    // Fallback: ONNX Runtime batched
+    try {
+        auto& mem_info = *static_cast<Ort::MemoryInfo*>(models.mem_info);
+        int batch = (int)input_data.size();
+        std::vector<int64_t> shape = {batch, 1};
+        Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+            mem_info, input_data.data(), input_data.size(), shape.data(), 2);
+
+        const char* input_names[] = {models.k_input_name.c_str()};
+        const char* output_names[] = {models.k_output_name.c_str()};
+
+        auto outputs = session->Run(*static_cast<Ort::RunOptions*>(models.run_options),
+                                    input_names, &input_tensor, 1, output_names, 1);
+
+        float* pred_data = outputs[0].GetTensorMutableData<float>();
+        for (int i = 0; i < batch; i++) {
+            float k = pred_data[i];
+            results[valid_indices[i]] = std::isnan(k) ? 1.0f : k;
+        }
+    } catch (const Ort::Exception& e) {
+        std::cerr << "K batch predict error: " << e.what() << std::endl;
+    }
+    return results; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 #else // No ONNX Runtime
 
@@ -344,6 +589,18 @@ float predict_k_nn(const NNModels& /*models*/,
                    const std::vector<float>& /*xs*/,
                    const std::vector<float>& /*ys*/) {
     return 0.5f;
+}
+
+std::vector<float> predict_alpha_nn_batch(const NNModels& /*models*/,
+                                          const std::vector<std::vector<float>>& xs_batch,
+                                          const std::vector<std::vector<float>>& /*ys_batch*/) {
+    return std::vector<float>(xs_batch.size(), 1.0f);
+}
+
+std::vector<float> predict_k_nn_batch(const NNModels& /*models*/,
+                                      const std::vector<std::vector<float>>& xs_batch,
+                                      const std::vector<std::vector<float>>& /*ys_batch*/) {
+    return std::vector<float>(xs_batch.size(), 0.5f);
 }
 
 #endif // USE_ONNXRUNTIME

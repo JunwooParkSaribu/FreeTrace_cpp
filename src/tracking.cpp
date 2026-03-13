@@ -11,6 +11,7 @@
 #include <cassert>
 #include <random>
 #include <iomanip>
+#include <charconv>
 // Platform-specific includes for get_exe_dir() // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 #ifdef _WIN32
 #include <windows.h>
@@ -166,9 +167,11 @@ static std::vector<int> numpy_argsort(const std::vector<double>& costs) {
     for (int i = 0; i < n; i++) idx[i] = (int)result[i];
     return idx;
 #else
+    // Fallback: stable sort preserving insertion order for ties (approximates // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    // NumPy's x86-simd-sort behavior for small arrays)
     std::vector<int> idx(n);
     for (int i = 0; i < n; i++) idx[i] = i;
-    std::sort(idx.begin(), idx.end(), [&](int a, int b) {
+    std::stable_sort(idx.begin(), idx.end(), [&](int a, int b) {
         return costs[a] < costs[b];
     });
     return idx;
@@ -495,7 +498,18 @@ Localizations read_localization_csv(const std::string& path, int nb_frames) { //
     return locs;
 }
 
-void write_trajectory_csv(const std::string& path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// Format a double like Python's repr(): shortest representation that round-trips exactly // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+static std::string fmt_double(double v) {
+    if (v == 0.0) return "0.0";
+    char buf[32];
+    auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v);
+    std::string s(buf, ptr);
+    // Ensure decimal point exists (like Python's repr, never bare integer form)
+    if (s.find('.') == std::string::npos && s.find('e') == std::string::npos) s += ".0";
+    return s;
+}
+
+void write_trajectory_csv(const std::string& path,
                           const std::vector<TrajectoryObj>& trajectories,
                           const Localizations& locs) {
     std::ofstream f(path);
@@ -503,15 +517,14 @@ void write_trajectory_csv(const std::string& path, // Modified by Claude (claude
         std::cerr << "Error: cannot write to " << path << std::endl;
         return;
     }
-    f << std::setprecision(17); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
-    f << "traj_idx,frame,x,y,z\n"; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    f << "traj_idx,frame,x,y,z\n";
     for (const auto& traj : trajectories) {
         for (const auto& [frame, idx] : traj.tuples) {
-            const auto& pos = locs.at(frame)[idx]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            f << traj.index << "," << frame << "," << pos[0] << "," << pos[1] << "," << pos[2] << "\n";
+            const auto& pos = locs.at(frame)[idx];
+            f << traj.index << "," << frame << "," << fmt_double(pos[0]) << "," << fmt_double(pos[1]) << "," << fmt_double(pos[2]) << "\n";
         }
     }
-}
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 // ============================================================
 // Greedy shortest matching (segmentation helper)
@@ -1332,13 +1345,13 @@ static double regularization(double numer, double denom, double expect) { // Mod
 // Cauchy cost (tracking version)
 // ============================================================
 
-CauchyResult predict_cauchy_tracking(const std::array<double,3>& next_vec, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+CauchyResult predict_cauchy_tracking(const std::array<double,3>& next_vec, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
                                      const std::array<double,3>& prev_vec,
-                                     float k, float alpha,
+                                     double k, double alpha,
                                      int before_lag, int lag,
-                                     float precision, int dimension) {
+                                     double precision, int dimension) {
     CauchyResult result = {0.0, false};
-    double d_alpha = (double)alpha;
+    double d_alpha = alpha; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     double delta_s = (double)(before_lag + 1);
     double delta_t = (double)(lag + 1);
 
@@ -1373,9 +1386,9 @@ CauchyResult predict_cauchy_tracking(const std::array<double,3>& next_vec, // Mo
 
     // qt_fetch-based abnormal check
     if (g_qt_loaded) {
-        auto [ai, ki] = indice_fetch(d_alpha, (double)k);
+        auto [ai, ki] = indice_fetch(d_alpha, k);
         double qt_val = qt_fetch(ai, ki);
-        double jump_mag = std::sqrt((double)next_vec[0]*next_vec[0] + (double)next_vec[1]*next_vec[1] + (double)next_vec[2]*next_vec[2]);
+        double jump_mag = std::sqrt(next_vec[0]*next_vec[0] + next_vec[1]*next_vec[1] + next_vec[2]*next_vec[2]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
         if (jump_mag - qt_val * 2.5 > 0) {
             result.abnormal = true;
         }
@@ -1683,14 +1696,14 @@ const Path* match_prev_next(const std::vector<Path>& prev_paths, // Modified by 
 
 static const double UNCOMPUTED = -999999.0; // sentinel for uncomputed cost // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 
-PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
                                std::map<Path, double>& trajectories_costs,
                                const Localizations& locs,
-                               float prev_alpha, float prev_k,
+                               double prev_alpha, double prev_k,
                                const std::vector<int>& next_times,
                                const Path* prev_path_ptr,
                                std::map<Path, int>& start_indice,
-                               int last_time, float jump_threshold,
+                               int last_time, double jump_threshold,
                                const DiGraph& selected_graph,
                                const std::set<Node>& final_graph_nodes,
                                int time_forecast, int dimension,
@@ -1764,7 +1777,7 @@ PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (cla
 
             // Re-estimate k after abnormal detections // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
             if (!ab_index.empty()) {
-                prev_alpha = 1.0f;
+                prev_alpha = 1.0;
                 if (use_nn && g_nn_models.loaded) {
                     // Accumulate positions for NN k prediction (matching Python)
                     if (tmpx.empty()) {
@@ -1782,7 +1795,7 @@ PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (cla
                     for (int ni = 0; ni < nn_len; ni++) { tx[ni] = (float)tmpx[ni]; ty[ni] = (float)tmpy[ni]; }
                     prev_k = predict_k_nn(g_nn_models, tx, ty);
                 } else {
-                    prev_k = 0.5f; // predict_ks returns 0.5 when TF=False
+                    prev_k = 0.5; // predict_ks returns 0.5 when TF=False
                 }
             }
 
@@ -1860,8 +1873,8 @@ static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropi
     int last_time,
     const TrackingConfig& config,
     const std::vector<Path>* prev_paths_ptr,
-    const std::map<Path, float>* alpha_values_ptr,
-    const std::map<Path, float>* k_values_ptr,
+    const std::map<Path, double>* alpha_values_ptr, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    const std::map<Path, double>* k_values_ptr,
     std::map<Path, int>& hashed_prev_next,
     int initial_pick_idx,
     double& cost_sum,
@@ -1911,8 +1924,8 @@ static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropi
         // Compute costs // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         for (auto& np : next_paths) {
             const Path* pp = nullptr;
-            float use_alpha = config.init_alpha; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            float use_k = config.init_k; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            double use_alpha = config.init_alpha; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+            double use_k = config.init_k; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
             if (!first_step && prev_paths_ptr) {
                 pp = match_prev_next(*prev_paths_ptr, np, hashed_prev_next);
@@ -1962,6 +1975,7 @@ static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropi
         } else {
             lowest_cost_traj = next_paths[cost_idx_vec[0].second];
         }
+
 
         // Abnormal trajectory cutting // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         if (ab_indice.count(lowest_cost_traj) && !ab_indice[lowest_cost_traj].empty()) {
@@ -2094,31 +2108,43 @@ SelectResult select_opt_graph2(const std::set<Node>& final_graph_node_set_hashed
 
     // Get prev paths and their alpha/k values (all fixed) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     std::vector<Path> prev_paths;
-    std::map<Path, float> alpha_values, k_values;
+    std::map<Path, double> alpha_values, k_values; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     std::map<Path, int> hashed_prev_next;
 
-    if (!first_step) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (!first_step) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
         prev_paths = find_paths_as_list(saved_graph, source_node);
-        for (auto& pp : prev_paths) {
-            if (config.use_nn && g_nn_models.loaded) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                // Extract trajectory positions (last ALPHA_MAX_LENGTH=10 points) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                std::vector<float> xs, ys; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                int start = std::max(1, (int)pp.size() - 10); // skip source node // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                for (int i = start; i < (int)pp.size(); i++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                    auto lit = locs.find(pp[i].first); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                    if (lit != locs.end() && pp[i].second < (int)lit->second.size()) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                        xs.push_back(lit->second[pp[i].second][0]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                        ys.push_back(lit->second[pp[i].second][1]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (config.use_nn && g_nn_models.loaded) {
+            // Collect all trajectory coordinates for batched NN prediction
+            std::vector<std::vector<float>> all_xs, all_ys;
+            all_xs.reserve(prev_paths.size());
+            all_ys.reserve(prev_paths.size());
+            for (auto& pp : prev_paths) {
+                std::vector<float> xs, ys;
+                int start = std::max(1, (int)pp.size() - 10);
+                for (int i = start; i < (int)pp.size(); i++) {
+                    auto lit = locs.find(pp[i].first);
+                    if (lit != locs.end() && pp[i].second < (int)lit->second.size()) {
+                        xs.push_back(lit->second[pp[i].second][0]);
+                        ys.push_back(lit->second[pp[i].second][1]);
                     }
                 }
-                alpha_values[pp] = predict_alpha_nn(g_nn_models, xs, ys); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                k_values[pp] = predict_k_nn(g_nn_models, xs, ys); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            } else { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                all_xs.push_back(std::move(xs));
+                all_ys.push_back(std::move(ys));
+            }
+            // Batched alpha + k prediction (few ONNX calls instead of N) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+            auto alpha_batch = predict_alpha_nn_batch(g_nn_models, all_xs, all_ys);
+            auto k_batch = predict_k_nn_batch(g_nn_models, all_xs, all_ys);
+            for (int i = 0; i < (int)prev_paths.size(); i++) {
+                alpha_values[prev_paths[i]] = alpha_batch[i];
+                k_values[prev_paths[i]] = k_batch[i];
+            } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        } else {
+            for (auto& pp : prev_paths) {
                 alpha_values[pp] = config.init_alpha;
                 k_values[pp] = config.init_k;
             }
         }
-    }
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
     auto gen_result = generate_next_paths(next_graph, final_graph_node_set_hashed,
                                           locs, next_times, distribution, source_node);
@@ -2148,12 +2174,12 @@ SelectResult select_opt_graph2(const std::set<Node>& final_graph_node_set_hashed
                               last_nodes);
         }
 
-        // Find best starting index // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 21:30
+        // Find best starting index — strict comparison like Python's np.argmin // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
         for (auto& cs : cost_sums) { if (cs < 0) cs = 99999.0; }
         int lowest_cost_idx = 0;
         for (int i = 1; i < (int)cost_sums.size(); i++) {
             if (cost_sums[i] < cost_sums[lowest_cost_idx]) lowest_cost_idx = i;
-        }
+        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
         // Phase 2: rebuild with best starting index into selected_graph // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         DiGraph sub_copy2 = sub_graph_.copy();
@@ -2895,8 +2921,13 @@ void write_hk_csv(const std::string& path, // Modified by Claude (claude-opus-4-
         std::cerr << "Error: cannot write to " << path << std::endl;
         return;
     }
-    f << std::setprecision(17);
+    f << std::setprecision(17); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     f << "traj_idx,H,K\n";
+
+    // Collect all trajectory coordinates for batched prediction
+    std::vector<std::vector<float>> all_xs, all_ys;
+    all_xs.reserve(trajectories.size());
+    all_ys.reserve(trajectories.size());
     for (const auto& traj : trajectories) {
         std::vector<float> xs, ys;
         for (const auto& [frame, idx] : traj.tuples) {
@@ -2904,11 +2935,20 @@ void write_hk_csv(const std::string& path, // Modified by Claude (claude-opus-4-
             xs.push_back((float)pos[0]);
             ys.push_back((float)pos[1]);
         }
-        float alpha = predict_alpha_nn(g_nn_models, xs, ys);
-        float log_k = predict_k_nn(g_nn_models, xs, ys);
+        all_xs.push_back(std::move(xs));
+        all_ys.push_back(std::move(ys));
+    }
+
+    // Batched alpha + k prediction (few ONNX calls instead of N) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    auto alpha_batch = predict_alpha_nn_batch(g_nn_models, all_xs, all_ys);
+    auto k_batch = predict_k_nn_batch(g_nn_models, all_xs, all_ys);
+
+    for (int i = 0; i < (int)trajectories.size(); i++) {
+        float alpha = alpha_batch[i];
+        float log_k = k_batch[i]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
         double H = (double)alpha / 2.0;
         double K = std::pow(10.0, (double)log_k);
-        f << traj.index << "," << H << "," << K << "\n";
+        f << trajectories[i].index << "," << H << "," << K << "\n";
         out_H.push_back(H);
         out_K.push_back(K);
     }
@@ -3445,16 +3485,19 @@ static const char PATH_SEP = '/';
 #endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 // Helper: build model search paths (CWD, parent, loc_csv dir, exe dir) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
-static std::vector<std::string> model_search_dirs(const std::string& loc_csv_path) {
+static std::vector<std::string> model_search_dirs(const std::string& loc_csv_path) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     std::string sep(1, PATH_SEP);
     std::vector<std::string> dirs = {"models", ".." + sep + "models"};
     auto slash = rfind_path_sep(loc_csv_path);
     if (slash != std::string::npos)
         dirs.push_back(loc_csv_path.substr(0, slash) + sep + ".." + sep + "models");
     std::string ed = get_exe_dir();
-    if (!ed.empty()) dirs.push_back(ed + sep + "models");
+    if (!ed.empty()) {
+        dirs.push_back(ed + sep + "models");
+        dirs.push_back(ed + sep + ".." + sep + "models");
+    }
     return dirs;
-}
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 // Helper: derive output base name from tiff_path or loc_csv_path // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 // Python uses: input_video_path.split("/")[-1].split(".tif")[0]

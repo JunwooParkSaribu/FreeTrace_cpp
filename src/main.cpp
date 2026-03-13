@@ -36,18 +36,10 @@ static TrackingOpts parse_tracking_opts(int argc, char* argv[], int start_idx) {
     return opts;
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
-static void print_gpu_notice(bool gpu_avail, bool fbm_mode, bool verbose) {
-    if (!gpu_avail && verbose) {
-        if (fbm_mode) {
-            std::cout << "\n  ** Note: No GPU detected. FreeTrace is running on CPU with NN inference — this will be slow. **\n" << std::endl;
-        } else {
-            std::cout << "\n  ** Note: No GPU detected. FreeTrace is running on CPU. **\n" << std::endl;
-        }
-    }
-}
+// GPU notice is now printed by nn_inference.cpp after ONNX Runtime loads // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
-static void print_tracking_banner(const std::string& loc_csv, const std::string& output,
-                                  int nb_frames, const freetrace::TrackingConfig& config, bool gpu_avail) {
+static void print_tracking_banner(const std::string& loc_csv, const std::string& output, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+                                  int nb_frames, const freetrace::TrackingConfig& config) {
     std::cout << "FreeTrace C++ — Tracking" << std::endl;
     std::cout << "  Loc CSV:   " << loc_csv << std::endl;
     std::cout << "  Output:    " << output << std::endl;
@@ -57,9 +49,8 @@ static void print_tracking_banner(const std::string& loc_csv, const std::string&
         std::cout << "  Jump threshold: " << config.jump_threshold << " px" << std::endl;
     else
         std::cout << "  Jump threshold: auto (inferred from data)" << std::endl;
-    std::cout << "  fBm mode: " << (config.fbm_mode ? "ON (NN inference + H-K output)" : "OFF (fixed alpha/K)") << std::endl;
+    std::cout << "  fBm mode: " << (config.fbm_mode ? "ON (NN inference + H-K output)" : "OFF (fixed alpha/K)") << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     if (config.post_process) std::cout << "  Post-processing: enabled" << std::endl;
-    if (gpu_avail) std::cout << "  GPU: available" << std::endl;
     if (config.img_rows > 0) std::cout << "  Image: " << config.img_cols << "x" << config.img_rows << " (from TIFF)" << std::endl;
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
@@ -137,9 +128,7 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
             config.img_cols = tiff_w;
         }
 
-        bool gpu_avail = freetrace::gpu::is_available();
-        print_gpu_notice(gpu_avail, config.fbm_mode, config.verbose);
-        print_tracking_banner(loc_csv, output, nb_frames, config, gpu_avail);
+        print_tracking_banner(loc_csv, output, nb_frames, config); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
         return freetrace::run_tracking(loc_csv, output, nb_frames, config) ? 0 : 1;
     }
@@ -201,10 +190,8 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
         // Build loc CSV path (matches localization output naming)
         std::string loc_csv = build_loc_csv_path(input, output);
 
-        std::cout << "\n=== Step 2: Tracking ===" << std::endl;
-        bool gpu_avail = freetrace::gpu::is_available();
-        print_gpu_notice(gpu_avail, config.fbm_mode, verbose);
-        print_tracking_banner(loc_csv, output, nb_frames, config, gpu_avail);
+        std::cout << "\n=== Step 2: Tracking ===" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        print_tracking_banner(loc_csv, output, nb_frames, config);
 
         return freetrace::run_tracking(loc_csv, output, nb_frames, config) ? 0 : 1;
     }
