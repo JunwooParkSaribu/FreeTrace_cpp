@@ -11,7 +11,22 @@
 #include <cassert>
 #include <random>
 #include <iomanip>
-#include "../x86-simd-sort/src/x86simdsort-static-incl.h" // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+// Platform-specific includes for get_exe_dir() // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+// x86-simd-sort: only available on x86/x64 with AVX2 // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+#if defined(__AVX2__) || defined(__AVX512F__)
+#include "../x86-simd-sort/src/x86simdsort-static-incl.h"
+#define HAS_X86_SIMD_SORT 1
+#else
+#define HAS_X86_SIMD_SORT 0
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 namespace freetrace {
 
@@ -132,10 +147,11 @@ static void cpython_set_order(std::vector<Node>& nodes) {
     }
 }
 
-// ============================================================ // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-// NumPy-compatible argsort using x86-simd-sort (AVX2)
-// numpy 2.0+ dispatches np.argsort(kind='quicksort') to x86-simd-sort.
-// Using the same library guarantees identical tie-breaking behavior.
+// ============================================================ // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+// NumPy-compatible argsort.
+// On x86 with AVX2: uses x86-simd-sort (same library NumPy 2.0+ uses),
+//   guaranteeing identical tie-breaking behavior.
+// On other platforms (ARM/Apple Silicon): falls back to std::sort.
 // ============================================================
 static std::vector<int> numpy_argsort(const std::vector<double>& costs) {
     int n = (int)costs.size();
@@ -144,12 +160,20 @@ static std::vector<int> numpy_argsort(const std::vector<double>& costs) {
         if (n == 1) idx[0] = 0;
         return idx;
     }
+#if HAS_X86_SIMD_SORT
     auto result = x86simdsortStatic::argsort(costs.data(), (size_t)n);
-    // Convert size_t indices to int
     std::vector<int> idx(n);
     for (int i = 0; i < n; i++) idx[i] = (int)result[i];
     return idx;
-} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+#else
+    std::vector<int> idx(n);
+    for (int i = 0; i < n; i++) idx[i] = i;
+    std::sort(idx.begin(), idx.end(), [&](int a, int b) {
+        return costs[a] < costs[b];
+    });
+    return idx;
+#endif
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 // ============================================================
 // Global state for empirical PDF (matches Python module globals)
@@ -479,6 +503,7 @@ void write_trajectory_csv(const std::string& path, // Modified by Claude (claude
         std::cerr << "Error: cannot write to " << path << std::endl;
         return;
     }
+    f << std::setprecision(17); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     f << "traj_idx,frame,x,y,z\n"; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     for (const auto& traj : trajectories) {
         for (const auto& [frame, idx] : traj.tuples) {
@@ -1541,7 +1566,7 @@ bool is_terminal_node(const Node& node, const Localizations& locs, // Modified b
             if (d < max_jump_d) return false;
         }
     }
-    return true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    return true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 }
 
 // ============================================================
@@ -1841,7 +1866,7 @@ static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropi
     int initial_pick_idx,
     double& cost_sum,
     const std::vector<Node>& last_nodes,
-    bool debug_phase1 = true) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    bool reconnect_orphans = true) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 {
     int nb_to_optimum = 1 << config.graph_depth; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     (void)nb_to_optimum;
@@ -2009,7 +2034,7 @@ static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropi
         }
 
         // Reconnect orphaned nodes to source — only in phase 1 (matching Python) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
-        if (debug_phase1) { // phase 1 only — Python phase 2 has no orphan reconnection // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        if (reconnect_orphans) { // phase 1 only — Python phase 2 has no orphan reconnection // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
             std::set<Node> last_nodes_set(last_nodes.begin(), last_nodes.end());
             auto orphan_check_nodes = sub_graph.get_nodes_ordered(); // use insertion order like Python
             for (const auto& sn : orphan_check_nodes) {
@@ -2855,39 +2880,156 @@ static std::vector<int> get_sorted_time_steps(const Localizations& loc) { // Mod
 }
 
 // ============================================================
+// H-K (diffusion) output: compute and write H, K per trajectory
+// ============================================================
+
+void write_hk_csv(const std::string& path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+                  const std::vector<TrajectoryObj>& trajectories,
+                  const Localizations& locs,
+                  bool use_nn) {
+    std::ofstream f(path);
+    if (!f.is_open()) {
+        std::cerr << "Error: cannot write to " << path << std::endl;
+        return;
+    }
+    f << std::setprecision(17);
+    f << "traj_idx,H,K\n";
+    for (const auto& traj : trajectories) {
+        // Extract x, y positions from trajectory
+        std::vector<float> xs, ys;
+        for (const auto& [frame, idx] : traj.tuples) {
+            const auto& pos = locs.at(frame)[idx];
+            xs.push_back((float)pos[0]);
+            ys.push_back((float)pos[1]);
+        }
+        float alpha = predict_alpha_nn(g_nn_models, xs, ys); // returns 1.0 if !use_nn
+        float log_k = predict_k_nn(g_nn_models, xs, ys);     // returns 0.5 if !use_nn
+        double H = (double)alpha / 2.0;
+        double K = std::pow(10.0, (double)log_k);
+        f << traj.index << "," << H << "," << K << "\n";
+    }
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+
+void make_hk_distribution_image(const std::string& path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+                                const std::vector<double>& H_vals,
+                                const std::vector<double>& K_vals) {
+    // H-K distribution plot requires seaborn/matplotlib (Python only).
+    // For C++ we skip the distribution image and just log a note.
+    (void)path; (void)H_vals; (void)K_vals;
+    std::cerr << "Note: H-K distribution image generation not yet supported in C++ "
+              << "(requires matplotlib/seaborn). Use the _diffusion.csv to plot externally." << std::endl;
+}
+
+// ============================================================
 // run_tracking: top-level entry point
 // ============================================================
 
-bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// Helper: get directory of current executable (Linux, macOS, Windows) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+static std::string get_exe_dir() {
+    char buf[4096];
+#ifdef _WIN32
+    DWORD len = GetModuleFileNameA(NULL, buf, sizeof(buf));
+    if (len > 0 && len < sizeof(buf)) {
+        std::string p(buf);
+        auto sl = p.rfind('\\');
+        if (sl == std::string::npos) sl = p.rfind('/');
+        if (sl != std::string::npos) return p.substr(0, sl);
+    }
+#elif defined(__APPLE__)
+    uint32_t size = sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) == 0) {
+        std::string p(buf);
+        auto sl = p.rfind('/');
+        if (sl != std::string::npos) return p.substr(0, sl);
+    }
+#else
+    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (len > 0) {
+        buf[len] = '\0';
+        std::string p(buf);
+        auto sl = p.rfind('/');
+        if (sl != std::string::npos) return p.substr(0, sl);
+    }
+#endif
+    return "";
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+
+// Helper: find last path separator (handles both '/' and '\\' for Windows) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+static std::string::size_type rfind_path_sep(const std::string& path) {
+    auto fwd = path.rfind('/');
+    auto bwd = path.rfind('\\');
+    if (fwd == std::string::npos) return bwd;
+    if (bwd == std::string::npos) return fwd;
+    return std::max(fwd, bwd);
+}
+
+// Helper: platform path separator
+#ifdef _WIN32
+static const char PATH_SEP = '\\';
+#else
+static const char PATH_SEP = '/';
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+
+// Helper: build model search paths (CWD, parent, loc_csv dir, exe dir) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+static std::vector<std::string> model_search_dirs(const std::string& loc_csv_path) {
+    std::string sep(1, PATH_SEP);
+    std::vector<std::string> dirs = {"models", ".." + sep + "models"};
+    auto slash = rfind_path_sep(loc_csv_path);
+    if (slash != std::string::npos)
+        dirs.push_back(loc_csv_path.substr(0, slash) + sep + ".." + sep + "models");
+    std::string ed = get_exe_dir();
+    if (!ed.empty()) dirs.push_back(ed + sep + "models");
+    return dirs;
+}
+
+// Helper: derive output base name from tiff_path or loc_csv_path // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+// Python uses: input_video_path.split("/")[-1].split(".tif")[0]
+static std::string derive_output_base(const TrackingConfig& config, const std::string& loc_csv_path) {
+    std::string src = config.tiff_path.empty() ? loc_csv_path : config.tiff_path;
+    auto slash = rfind_path_sep(src);
+    std::string fname = (slash != std::string::npos) ? src.substr(slash + 1) : src;
+    // Strip .tif/.tiff extension
+    auto tif_pos = fname.find(".tif");
+    if (tif_pos != std::string::npos) return fname.substr(0, tif_pos);
+    // Strip _loc.csv for loc-based naming
+    auto loc_pos = fname.find("_loc.csv");
+    if (loc_pos != std::string::npos) return fname.substr(0, loc_pos);
+    // Strip .csv
+    auto csv_pos = fname.rfind(".csv");
+    if (csv_pos != std::string::npos) return fname.substr(0, csv_pos);
+    return fname;
+}
+
+bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
                   const std::string& output_path,
                   int nb_frames,
                   const TrackingConfig& config) {
-    if (config.verbose) std::cerr << "Reading localization CSV: " << loc_csv_path << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (config.verbose) std::cerr << "Reading localization CSV: " << loc_csv_path << std::endl;
     auto loc = read_localization_csv(loc_csv_path, nb_frames);
     if (loc.empty()) {
         std::cerr << "Error: no localization data" << std::endl;
         return false;
     }
 
-    // Get available time steps (frames with particles) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Get available time steps (frames with particles)
     auto all_steps = get_sorted_time_steps(loc);
     std::vector<int> t_avail_steps;
     for (int t : all_steps) {
         if (!loc[t].empty()) t_avail_steps.push_back(t);
     }
 
-    if (t_avail_steps.size() < 2) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (t_avail_steps.size() < 2) {
         std::cerr << "Error: need at least 2 frames with particles" << std::endl;
         return false;
     }
 
-    int time_forecast = std::max(1, std::min(5, config.graph_depth)); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    int time_forecast = std::max(1, std::min(5, config.graph_depth));
 
-    // Segmentation // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Segmentation
     if (config.verbose) std::cerr << "Running segmentation..." << std::endl;
     auto seg = segmentation(loc, t_avail_steps, time_forecast);
 
-    // Approximation (jump thresholds) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Approximation (jump thresholds)
     if (config.verbose) std::cerr << "Computing jump thresholds..." << std::endl;
     auto max_jumps = approximation(seg.dist_x, seg.dist_y, seg.dist_z,
                                    time_forecast, config.jump_threshold);
@@ -2896,64 +3038,55 @@ bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude
         std::cerr << "Jump threshold: " << max_jumps[0] << " px" << std::endl;
     }
 
-    // Build empirical PDF // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    std::vector<double> emp_bins_edges(41); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-    for (int i = 0; i <= 40; i++) emp_bins_edges[i] = 20.0 * i / 40;
+    // Build empirical PDF
     build_emp_pdf(seg.seg_distribution[0], 40, 20.0f);
 
-    // Count particles per frame // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Count particles per frame
     if (config.verbose) {
         int total = 0;
         for (const auto& [t, ps] : loc) total += (int)ps.size();
-        double mean_nb = (double)total / all_steps.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        double mean_nb = (double)total / all_steps.size();
         std::cerr << "Mean particles/frame: " << mean_nb << std::endl;
     }
 
-    // Load qt_99 data for abnormal detection // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Build model search directories
+    auto mdirs = model_search_dirs(loc_csv_path); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    std::string psep(1, PATH_SEP); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+
+    // Load qt_99 data for abnormal detection
     {
-        // Try multiple paths for qt_99.bin // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::vector<std::string> qt_paths = {"models/qt_99.bin", "../models/qt_99.bin"};
-        // Also try relative to loc_csv_path directory
-        auto slash = loc_csv_path.rfind('/');
-        if (slash != std::string::npos) {
-            qt_paths.push_back(loc_csv_path.substr(0, slash) + "/../models/qt_99.bin");
-        }
-        for (const auto& qp : qt_paths) {
-            if (load_qt_data(qp)) {
-                if (config.verbose) std::cerr << "Loaded qt_99 data from " << qp << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (const auto& md : mdirs) {
+            if (load_qt_data(md + psep + "qt_99.bin")) {
+                if (config.verbose) std::cerr << "Loaded qt_99 data from " << md << psep << "qt_99.bin" << std::endl;
                 break;
             }
         }
         if (!g_qt_loaded && config.verbose) {
-            std::cerr << "Warning: qt_99.bin not found, abnormal detection will be limited" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            std::cerr << "Warning: qt_99.bin not found, abnormal detection will be limited" << std::endl;
         }
     }
 
-    // Load trajectory color table // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    // Load trajectory color table
     {
-        std::vector<std::string> color_paths = {"models/traj_colors.bin", "../models/traj_colors.bin"};
-        for (const auto& cp : color_paths) {
-            if (load_traj_colors(cp)) break;
+        for (const auto& md : mdirs) {
+            if (load_traj_colors(md + psep + "traj_colors.bin")) break;
         }
-    }
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
-    // Load NN models if requested // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    if (config.use_nn) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::vector<std::string> nn_dirs = {"models", "../models"}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        auto nn_slash = loc_csv_path.rfind('/'); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        if (nn_slash != std::string::npos) nn_dirs.push_back(loc_csv_path.substr(0, nn_slash) + "/../models"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        for (const auto& nd : nn_dirs) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            if (load_nn_models(g_nn_models, nd)) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                if (config.verbose) std::cerr << "Loaded NN models from " << nd << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                break; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Load NN models if requested (fBm mode or explicit --nn)
+    if (config.use_nn) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        for (const auto& md : mdirs) {
+            if (load_nn_models(g_nn_models, md)) {
+                if (config.verbose) std::cerr << "Loaded NN models from " << md << std::endl;
+                break;
             }
         }
-        if (!g_nn_models.loaded && config.verbose) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            std::cerr << "Warning: ONNX models not found, using fixed alpha/k" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (!g_nn_models.loaded && config.verbose) {
+            std::cerr << "Warning: ONNX models not found, using fixed alpha/k" << std::endl;
         }
     }
 
-    // Run forecast // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Run forecast
     if (config.verbose) std::cerr << "Starting trajectory inference..." << std::endl;
     auto trajectories = forecast(loc, t_avail_steps, max_jumps, nb_frames, config);
 
@@ -2961,30 +3094,27 @@ bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude
         std::cerr << "Found " << trajectories.size() << " trajectories" << std::endl;
     }
 
-    // PostProcessing (optional) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    if (config.post_process) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        if (config.verbose) std::cerr << "Running post-processing..." << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        trajectories = post_processing(trajectories, loc, config.cutoff, config.verbose); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        if (config.verbose) std::cerr << "After post-processing: " << trajectories.size() << " trajectories" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // PostProcessing (optional)
+    if (config.post_process) {
+        if (config.verbose) std::cerr << "Running post-processing..." << std::endl;
+        trajectories = post_processing(trajectories, loc, config.cutoff, config.verbose);
+        if (config.verbose) std::cerr << "After post-processing: " << trajectories.size() << " trajectories" << std::endl;
     }
 
-    // Extract output filename from loc_csv_path // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    std::string base = loc_csv_path;
-    auto slash_pos = base.rfind('/');
-    if (slash_pos != std::string::npos) base = base.substr(slash_pos + 1);
-    auto loc_pos = base.find("_loc.csv");
-    if (loc_pos != std::string::npos) base = base.substr(0, loc_pos);
+    // Derive output base name (from tiff_path if available, else loc_csv)
+    std::string base = derive_output_base(config, loc_csv_path); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    std::string sep(1, PATH_SEP); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
-    std::string out_csv = output_path + "/" + base + "_traces.csv"; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Write trajectory CSV
+    std::string out_csv = output_path + sep + base + "_traces.csv";
     write_trajectory_csv(out_csv, trajectories, loc);
-    if (config.verbose) std::cerr << "Written: " << out_csv << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (config.verbose) std::cerr << "Written: " << out_csv << std::endl;
 
-    // Image dimensions for trajectory visualization // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Trajectory visualization image
     int img_rows = config.img_rows;
     int img_cols = config.img_cols;
-    if (img_rows <= 0 || img_cols <= 0) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        // Infer from localization data
-        double max_x = 0, max_y = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    if (img_rows <= 0 || img_cols <= 0) {
+        double max_x = 0, max_y = 0;
         for (const auto& [t, particles] : loc) {
             for (const auto& p : particles) {
                 if (p[0] > max_x) max_x = p[0];
@@ -2994,14 +3124,24 @@ bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude
         img_rows = (int)std::ceil(max_y) + 2;
         img_cols = (int)std::ceil(max_x) + 2;
     }
-    std::string out_img = output_path + "/" + base + "_traces.png"; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::string out_img = output_path + sep + base + "_traces.png";
     make_trajectory_image(out_img, trajectories, loc, img_rows, img_cols);
-    if (config.verbose) std::cerr << "Written: " << out_img << " (" << img_cols << "x" << img_rows << " * upscale)" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (config.verbose) std::cerr << "Written: " << out_img << " (" << img_cols << "x" << img_rows << " * upscale)" << std::endl;
 
-    // Cleanup NN models // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    if (g_nn_models.loaded) free_nn_models(g_nn_models); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // H-K (diffusion) output when fBm mode is on // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    if (config.hk_output) {
+        std::string out_hk_csv = output_path + sep + base + "_diffusion.csv";
+        write_hk_csv(out_hk_csv, trajectories, loc, config.use_nn);
+        if (config.verbose) std::cerr << "Written: " << out_hk_csv << std::endl;
+
+        std::string out_hk_img = output_path + sep + base + "_diffusion_distribution.png";
+        make_hk_distribution_image(out_hk_img, {}, {}); // C++ does not yet generate the KDE plot
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+
+    // Cleanup NN models
+    if (g_nn_models.loaded) free_nn_models(g_nn_models);
 
     return true;
-}
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 } // namespace freetrace

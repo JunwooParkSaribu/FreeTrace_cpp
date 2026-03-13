@@ -1339,9 +1339,15 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
         std::cout << "Localization complete: " << total << " detections across "
                   << nb_frames << " frames." << std::endl;
 
-    // Write output
-    std::string loc_output = output_path + "/" +
-        input_video_path.substr(input_video_path.find_last_of('/') + 1);
+    // Write output // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    auto last_sep = input_video_path.find_last_of("/\\");
+    std::string vid_fname = (last_sep != std::string::npos)
+        ? input_video_path.substr(last_sep + 1) : input_video_path;
+#ifdef _WIN32
+    std::string loc_output = output_path + "\\" + vid_fname;
+#else
+    std::string loc_output = output_path + "/" + vid_fname;
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     loc_output = loc_output.substr(0, loc_output.find(".tif"));
     write_localization_csv(loc_output, result);
     make_loc_depth_image(loc_output, result, /*multiplier=*/4, /*winsize=*/window_size, /*resolution=*/2); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11

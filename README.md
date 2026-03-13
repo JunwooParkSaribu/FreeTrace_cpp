@@ -4,6 +4,32 @@ A high-performance C++ port of [FreeTrace](https://github.com/JunwooParkSaribu/F
 
 This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic AI), ported from the original Python/Cython project authored by **Junwoo PARK** (junwoo.park@sorbonne-universite.fr, Sorbonne Université).
 
+## Quick Reference — Tracking Modes
+
+| | **fBm mode ON** (`--fbm`) | **fBm mode OFF** (default) |
+|---|---|---|
+| **NN models** | Loaded (alpha & K inferred per trajectory) | Not loaded |
+| **Alpha / K** | Predicted by ConvLSTM / Dense NN | Fixed: alpha=1.0, K=0.3 |
+| **H-K output** | `_diffusion.csv` + `_diffusion_distribution.png` | Not produced |
+| **With GPU** | NN runs on GPU (fast) | No difference |
+| **Without GPU** | NN runs on CPU via ONNX Runtime (slow) | No difference |
+
+**Defaults:**
+- Graph depth: **3** (evaluates 2^3 = 8 alternatives per subgraph)
+- Cutoff: **3** (minimum trajectory length)
+- Jump threshold: **auto** (inferred from data; use `--jump` to override)
+
+**GPU behavior:** FreeTrace automatically detects GPU availability. If no GPU is found, it prints a notification and runs on CPU. In fBm mode without GPU, NN inference still works but is significantly slower.
+
+**Quick start:**
+```bash
+# Basic tracking (no fBm, auto jump threshold)
+./freetrace track loc.csv output/ 100 --tiff video.tiff
+
+# fBm mode (NN inference + H-K output)
+./freetrace track loc.csv output/ 100 --tiff video.tiff --fbm
+```
+
 ## About
 
 FreeTrace localizes and tracks fluorescent particles in microscopy video data (TIFF stacks). // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -94,24 +120,67 @@ FreeTrace_cpp/
 
 ## Build
 
-### Requirements
-- C++17 compiler (GCC 7+, Clang 5+, MSVC 2017+)
-- libtiff **or** OpenCV for TIFF I/O
+FreeTrace C++ supports **Linux**, **macOS**, and **Windows**. You can build with either **CMake** or a **direct compiler command**.
 
-### Basic build (no NN) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+### Requirements
+
+| Dependency | Required? | Purpose |
+|---|---|---|
+| C++17 compiler | **Yes** | GCC 7+, Clang 5+, or MSVC 2019+ |
+| libtiff | **Yes** (or OpenCV) | Reading TIFF microscopy stacks |
+| libpng | Recommended | Trajectory visualization images |
+| ONNX Runtime | Optional | NN inference for fBm mode (`--fbm`) |
+| NVIDIA GPU + CUDA 12.x | Optional | GPU-accelerated NN inference |
+
+---
+
+### Linux (Ubuntu / Debian)
+
+#### Step 1: Install dependencies
+
 ```bash
-g++ -std=c++17 -O2 -DUSE_LIBTIFF -DUSE_LIBPNG -Iinclude src/*.cpp -o freetrace -ltiff -lpng
+sudo apt update
+sudo apt install -y build-essential cmake libtiff-dev libpng-dev
 ```
 
-### With NN support (ONNX Runtime GPU — recommended) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+#### Step 2a: Build without fBm (basic tracking only)
 
-1. Download ONNX Runtime GPU:
+**Using CMake:**
 ```bash
+cd FreeTrace_cpp
+mkdir build && cd build
+cmake ..
+make -j$(nproc)
+```
+
+**Or direct compile:**
+```bash
+cd FreeTrace_cpp
+g++ -std=c++17 -O2 -mavx2 -DUSE_LIBTIFF -DUSE_LIBPNG -Iinclude \
+    src/main.cpp src/image_pad.cpp src/regression.cpp src/cost_function.cpp \
+    src/localization.cpp src/tracking.cpp src/nn_inference_stub.cpp src/gpu_module_stub.cpp \
+    -o freetrace -ltiff -lpng
+```
+
+#### Step 2b: Build with fBm support (ONNX Runtime GPU — recommended)
+
+1. Download ONNX Runtime GPU (bundles cuDNN 9, no separate install needed):
+```bash
+cd FreeTrace_cpp
 wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-linux-x64-gpu-1.24.3.tgz
 tar xzf onnxruntime-linux-x64-gpu-1.24.3.tgz
 ```
 
-2. Build with GPU NN support:
+2. Build:
+
+**Using CMake:**
+```bash
+mkdir build && cd build
+cmake .. -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=$(pwd)/../onnxruntime-linux-x64-gpu-1.24.3
+make -j$(nproc)
+```
+
+**Or direct compile:**
 ```bash
 ORT=onnxruntime-linux-x64-gpu-1.24.3
 g++ -std=c++17 -O2 -mavx2 \
@@ -119,20 +188,37 @@ g++ -std=c++17 -O2 -mavx2 \
     -Iinclude -I$ORT/include \
     src/main.cpp src/image_pad.cpp src/regression.cpp src/cost_function.cpp \
     src/localization.cpp src/tracking.cpp src/nn_inference.cpp src/gpu_module_stub.cpp \
-    -o freetrace_nn \
-    -ltiff -lpng -L$ORT/lib -lonnxruntime \
+    -o freetrace -ltiff -lpng -L$ORT/lib -lonnxruntime \
     -Wl,-rpath,\$ORIGIN/$ORT/lib
 ```
 
-3. Run with GPU (set `LD_LIBRARY_PATH` so the CUDA provider can find cuDNN):
+3. Run (set library path for CUDA provider):
 ```bash
 export LD_LIBRARY_PATH=$(pwd)/onnxruntime-linux-x64-gpu-1.24.3/lib:$LD_LIBRARY_PATH
-./freetrace_nn track loc.csv output/ 100 --depth 2 --cutoff 2 --jump 10 --nn
+./freetrace track loc.csv output/ 100 --tiff video.tiff --fbm
 ```
 
-**Requirements**: NVIDIA GPU with CUDA 12.x. The GPU ONNX Runtime package bundles cuDNN 9, so no separate cuDNN installation is needed. If no GPU is available, it falls back to CPU automatically.
+> **Note**: Requires NVIDIA GPU with CUDA 12.x. If no GPU is detected, FreeTrace automatically falls back to CPU and prints a notification.
 
-### With NN support (ONNX Runtime CPU only)
+#### Step 2c: Build with fBm support (ONNX Runtime CPU only — no GPU needed)
+
+1. Download ONNX Runtime CPU:
+```bash
+cd FreeTrace_cpp
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-linux-x64-1.24.3.tgz
+tar xzf onnxruntime-linux-x64-1.24.3.tgz
+```
+
+2. Build:
+
+**Using CMake:**
+```bash
+mkdir build && cd build
+cmake .. -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=$(pwd)/../onnxruntime-linux-x64-1.24.3
+make -j$(nproc)
+```
+
+**Or direct compile:**
 ```bash
 ORT=onnxruntime-linux-x64-1.24.3
 g++ -std=c++17 -O2 -mavx2 \
@@ -140,16 +226,211 @@ g++ -std=c++17 -O2 -mavx2 \
     -Iinclude -I$ORT/include \
     src/main.cpp src/image_pad.cpp src/regression.cpp src/cost_function.cpp \
     src/localization.cpp src/tracking.cpp src/nn_inference.cpp src/gpu_module_stub.cpp \
-    -o freetrace_nn \
-    -ltiff -lpng -L$ORT/lib -lonnxruntime \
+    -o freetrace -ltiff -lpng -L$ORT/lib -lonnxruntime \
     -Wl,-rpath,\$ORIGIN/$ORT/lib
 ```
 
-### With OpenCV (no NN)
+3. Run:
 ```bash
-g++ -std=c++17 -O2 -DUSE_OPENCV -Iinclude src/*.cpp -o freetrace \
-    $(pkg-config --cflags --libs opencv4)
-``` // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+export LD_LIBRARY_PATH=$(pwd)/onnxruntime-linux-x64-1.24.3/lib:$LD_LIBRARY_PATH
+./freetrace track loc.csv output/ 100 --tiff video.tiff --fbm
+```
+
+---
+
+### macOS
+
+#### Step 1: Install dependencies
+
+Using [Homebrew](https://brew.sh/):
+```bash
+brew install cmake libtiff libpng
+```
+
+#### Step 2a: Build without fBm (basic tracking only)
+
+**Using CMake:**
+```bash
+cd FreeTrace_cpp
+mkdir build && cd build
+cmake ..
+make -j$(sysctl -n hw.ncpu)
+```
+
+**Or direct compile:**
+```bash
+cd FreeTrace_cpp
+clang++ -std=c++17 -O2 -DUSE_LIBTIFF -DUSE_LIBPNG -Iinclude \
+    -I$(brew --prefix libtiff)/include -I$(brew --prefix libpng)/include \
+    src/main.cpp src/image_pad.cpp src/regression.cpp src/cost_function.cpp \
+    src/localization.cpp src/tracking.cpp src/nn_inference_stub.cpp src/gpu_module_stub.cpp \
+    -o freetrace \
+    -L$(brew --prefix libtiff)/lib -ltiff \
+    -L$(brew --prefix libpng)/lib -lpng
+```
+
+> **Note**: Apple Silicon Macs (M1/M2/M3/M4) do not support AVX2. Do **not** add `-mavx2` — the code automatically falls back to `std::sort`. In rare cases where multiple trajectories have identical costs, tie-breaking order may differ slightly from the x86 build, but tracking results are functionally equivalent.
+
+#### Step 2b: Build with fBm support (ONNX Runtime CPU)
+
+macOS does not support CUDA, so fBm mode runs on CPU via ONNX Runtime.
+
+1. Download ONNX Runtime for macOS:
+```bash
+cd FreeTrace_cpp
+# Apple Silicon (M1/M2/M3/M4):
+curl -LO https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-osx-arm64-1.24.3.tgz
+tar xzf onnxruntime-osx-arm64-1.24.3.tgz
+ORT=onnxruntime-osx-arm64-1.24.3
+
+# Intel Mac:
+# curl -LO https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-osx-x86_64-1.24.3.tgz
+# tar xzf onnxruntime-osx-x86_64-1.24.3.tgz
+# ORT=onnxruntime-osx-x86_64-1.24.3
+```
+
+2. Build:
+
+**Using CMake:**
+```bash
+mkdir build && cd build
+cmake .. -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=$(pwd)/../$ORT
+make -j$(sysctl -n hw.ncpu)
+```
+
+**Or direct compile:**
+```bash
+clang++ -std=c++17 -O2 \
+    -DUSE_LIBTIFF -DUSE_LIBPNG -DUSE_ONNXRUNTIME \
+    -Iinclude -I$ORT/include \
+    -I$(brew --prefix libtiff)/include -I$(brew --prefix libpng)/include \
+    src/main.cpp src/image_pad.cpp src/regression.cpp src/cost_function.cpp \
+    src/localization.cpp src/tracking.cpp src/nn_inference.cpp src/gpu_module_stub.cpp \
+    -o freetrace \
+    -L$(brew --prefix libtiff)/lib -ltiff \
+    -L$(brew --prefix libpng)/lib -lpng \
+    -L$ORT/lib -lonnxruntime \
+    -Wl,-rpath,@executable_path/$ORT/lib
+```
+
+3. Run:
+```bash
+export DYLD_LIBRARY_PATH=$(pwd)/$ORT/lib:$DYLD_LIBRARY_PATH
+./freetrace track loc.csv output/ 100 --tiff video.tiff --fbm
+```
+
+---
+
+### Windows
+
+#### Step 1: Install prerequisites
+
+1. Install **Visual Studio 2019 or later** with the "Desktop development with C++" workload, or install **Build Tools for Visual Studio**.
+2. Install **CMake** (https://cmake.org/download/) — select "Add to PATH" during installation.
+3. Install **vcpkg** for dependency management:
+```powershell
+cd C:\
+git clone https://github.com/microsoft/vcpkg.git
+cd vcpkg
+.\bootstrap-vcpkg.bat
+```
+
+4. Install dependencies via vcpkg:
+```powershell
+.\vcpkg install tiff:x64-windows libpng:x64-windows
+```
+
+#### Step 2a: Build without fBm (basic tracking only)
+
+Open **Developer Command Prompt for VS** (or **x64 Native Tools Command Prompt**):
+
+```powershell
+cd FreeTrace_cpp
+mkdir build
+cd build
+cmake .. -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+cmake --build . --config Release
+```
+
+The output binary is at `build\Release\freetrace.exe`.
+
+#### Step 2b: Build with fBm support (ONNX Runtime GPU)
+
+1. Download ONNX Runtime GPU for Windows:
+```powershell
+cd FreeTrace_cpp
+curl -LO https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-gpu-1.24.3.zip
+tar -xf onnxruntime-win-x64-gpu-1.24.3.zip
+```
+
+2. Build:
+```powershell
+mkdir build
+cd build
+cmake .. -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake ^
+         -DUSE_ONNXRUNTIME=ON ^
+         -DONNXRUNTIME_DIR=..\onnxruntime-win-x64-gpu-1.24.3
+cmake --build . --config Release
+```
+
+3. Run (copy ONNX Runtime DLLs next to the executable, or add to PATH):
+```powershell
+copy ..\onnxruntime-win-x64-gpu-1.24.3\lib\*.dll Release\
+cd Release
+freetrace.exe track loc.csv output\ 100 --tiff video.tiff --fbm
+```
+
+> **Note**: Requires NVIDIA GPU with CUDA 12.x. If no GPU is detected, it falls back to CPU automatically.
+
+#### Step 2c: Build with fBm support (ONNX Runtime CPU only)
+
+Same steps as above, but download the CPU package:
+```powershell
+curl -LO https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-1.24.3.zip
+tar -xf onnxruntime-win-x64-1.24.3.zip
+```
+Then use `-DONNXRUNTIME_DIR=..\onnxruntime-win-x64-1.24.3` in the cmake command.
+
+---
+
+### Build with OpenCV (alternative to libtiff, any platform)
+
+If you prefer OpenCV for TIFF I/O instead of libtiff:
+```bash
+# Linux/macOS
+g++ -std=c++17 -O2 -DUSE_OPENCV -Iinclude \
+    src/main.cpp src/image_pad.cpp src/regression.cpp src/cost_function.cpp \
+    src/localization.cpp src/tracking.cpp src/nn_inference_stub.cpp src/gpu_module_stub.cpp \
+    -o freetrace $(pkg-config --cflags --libs opencv4)
+```
+
+---
+
+### Verify the build
+
+After building, verify FreeTrace runs correctly:
+```bash
+./freetrace --help
+```
+
+Expected output:
+```
+FreeTrace C++
+Usage:
+  Tracking:
+    freetrace track <loc.csv> <output_dir> <nb_frames> [options]
+  Options:
+    --depth N        Graph depth (default: 3)
+    --cutoff N       Cutoff (default: 3)
+    --jump F         Maximum jump distance in px (default: auto)
+    --tiff PATH      TIFF file for image dimensions and output naming
+    --fbm            Enable fBm mode (NN inference + H-K output)
+    --postprocess    Enable post-processing
+    --quiet          Suppress status messages
+
+  Localization:
+    freetrace <input.tiff> <output_dir> [window_size] [threshold] [shift]
+```
 
 ## Usage
 
@@ -167,28 +448,37 @@ This reads the TIFF stack, runs localization with window size 7, threshold multi
 
 **Output columns**: `frame, x, y, z, xvar, yvar, rho, norm_cst, intensity, window_size` — identical to the Python FreeTrace output format.
 
-### Tracking // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+### Tracking // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 ```bash
-./freetrace track <loc.csv> <output_dir> <nb_frames> [--depth 2] [--cutoff 2] [--jump 5.0] [--tiff input.tiff]
+./freetrace track <loc.csv> <output_dir> <nb_frames> [options]
 ```
 
-**Example:** // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+**Example:** // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 ```bash
 # Run localization first
 ./freetrace video.tiff results/
 
-# Then run tracking on the localization output
-./freetrace track results/video_loc.csv results/ 100 --depth 2 --tiff video.tiff
+# Basic tracking (auto jump threshold, depth=3, cutoff=3)
+./freetrace track results/video_loc.csv results/ 100 --tiff video.tiff
+
+# fBm mode with custom jump threshold
+./freetrace track results/video_loc.csv results/ 100 --tiff video.tiff --fbm --jump 10.0
 ```
 
-**Options:** // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-- `--depth N` — graph search depth (default: 2, evaluates 2^N alternatives per subgraph) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-- `--cutoff N` — minimum trajectory length to keep (default: 2) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-- `--jump F` — fixed jump threshold in pixels (default: auto-estimated from data) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-- `--tiff path` — read TIFF for exact image dimensions in trajectory visualization
-- `--nn` — enable NN-based alpha/K estimation (requires ONNX Runtime build) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+**Options:** // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+- `--depth N` — graph search depth (default: 3, evaluates 2^N alternatives per subgraph)
+- `--cutoff N` — minimum trajectory length to keep (default: 3)
+- `--jump F` — maximum jump distance in pixels (default: auto-inferred from data)
+- `--tiff path` — TIFF file for image dimensions and output naming
+- `--fbm` — enable fBm mode: NN inference for alpha/K + H-K diffusion output
+- `--postprocess` — enable post-processing of trajectories
+- `--quiet` — suppress status messages
 
-**Outputs**: `_traces.csv` and `_traces.png` (trajectory visualization) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+**Outputs:** // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+- `{name}_traces.csv` — trajectory CSV (always)
+- `{name}_traces.png` — trajectory visualization (always)
+- `{name}_diffusion.csv` — H and K values per trajectory (fBm mode only)
+- `{name}_diffusion_distribution.png` — H-K distribution plot (fBm mode only)
 
 ### As a library
 ```cpp
@@ -202,10 +492,13 @@ freetrace::run("input.tiff", "output_dir/",
                /*shift=*/1,
                /*verbose=*/true);
 
-// Tracking // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-freetrace::TrackingConfig config; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-config.graph_depth = 2; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-freetrace::run_tracking("output_dir/input_loc.csv", "output_dir/", 100, config); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// Tracking (uses defaults: depth=3, cutoff=3, jump=auto, no fBm) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+freetrace::TrackingConfig config;
+config.tiff_path = "input.tiff";       // for output naming + image dimensions
+config.fbm_mode = true;                // enable fBm mode (NN + H-K output)
+config.use_nn = true;                  // load NN models
+config.hk_output = true;               // write diffusion CSV
+freetrace::run_tracking("output_dir/input_loc.csv", "output_dir/", 100, config);
 ```
 
 ## Original Project
