@@ -211,7 +211,9 @@ std::vector<TrajectoryObj> post_processing(const std::vector<TrajectoryObj>& tra
 void write_hk_csv(const std::string& path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
                   const std::vector<TrajectoryObj>& trajectories,
                   const Localizations& locs,
-                  bool use_nn);
+                  bool use_nn,
+                  std::vector<double>& out_H,
+                  std::vector<double>& out_K);
 void make_hk_distribution_image(const std::string& path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
                                 const std::vector<double>& H_vals,
                                 const std::vector<double>& K_vals);
