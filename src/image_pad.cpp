@@ -1,6 +1,9 @@
 #include "image_pad.h" // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11 13:20
 #include <cmath>
 #include <numeric>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace freetrace {
 
@@ -102,15 +105,20 @@ std::vector<float> image_cropping(
     for (int r = start_row; r < end_row; r += shift) row_indices.push_back(r);
     for (int c = start_col; c < end_col; c += shift) col_indices.push_back(c);
 
-    int nb_crops = row_indices.size() * col_indices.size();
+    int nb_crops = row_indices.size() * col_indices.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     out_nb_crops = nb_crops;
     int patch_size = window_size0 * window_size1;
+    int n_rows = row_indices.size();
+    int n_cols = col_indices.size();
     std::vector<float> cropped(nb_imgs * nb_crops * patch_size, 0.0f);
 
+    #pragma omp parallel for schedule(static)
     for (int n = 0; n < nb_imgs; ++n) {
-        int crop_idx = 0;
-        for (int r : row_indices) {
-            for (int c : col_indices) {
+        for (int ri_idx = 0; ri_idx < n_rows; ++ri_idx) {
+            int r = row_indices[ri_idx];
+            for (int ci_idx = 0; ci_idx < n_cols; ++ci_idx) {
+                int c = col_indices[ci_idx];
+                int crop_idx = ri_idx * n_cols + ci_idx;
                 int flat_idx = 0;
                 for (int ri = 0; ri < window_size1; ++ri) {
                     for (int ci = 0; ci < window_size0; ++ci) {
@@ -120,11 +128,10 @@ std::vector<float> image_cropping(
                         flat_idx++;
                     }
                 }
-                crop_idx++;
             }
         }
     }
-    return cropped;
+    return cropped; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 }
 
 std::vector<float> likelihood( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -149,9 +156,10 @@ std::vector<float> likelihood( // Modified by Claude (claude-opus-4-6, Anthropic
     for (int i = 0; i < surface_window; ++i)
         g_squared_sum += g_bar[i] * g_bar[i];
 
-    // Result: [nb_imgs * nb_crops]
+    // Result: [nb_imgs * nb_crops] // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     std::vector<float> L(nb_imgs * nb_crops, 0.0f);
 
+    #pragma omp parallel for schedule(static)
     for (int n = 0; n < nb_imgs; ++n) {
         float bg_mean = bg_means[n];
         float denom = bg_squared_sums[n] - surface_window * bg_mean;
