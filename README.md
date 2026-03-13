@@ -29,17 +29,27 @@ The backward pass (multi-scale deflation for overlapping particles) is structura
 
 **Localization**: 930/930 detections match, max position error 0.0005 px, max rho error 1.6e-6. // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
-**Tracking**: // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-- sample0 (100 frames, 108×102): 1770/1773 Python points in C++ (99.8%) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-- sample1 (350 frames, 110×120): 1382/1384 Python points in C++ (99.9%) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-- Minor differences from greedy tie-breaking order (std::map vs Python dict iteration) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+**Tracking (without NN)**: // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+- sample0 (100 frames, 108×102): 1770/1773 Python points in C++ (99.8%)
+- sample1 (350 frames, 110×120): 1382/1384 Python points in C++ (99.9%)
+- Minor differences from greedy tie-breaking order (std::map vs Python dict iteration)
 
-**Performance** (tracking only, `gpu_on=False`): // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+**Tracking (with NN, GPU)** — Python TF+GPU vs C++ ONNX+GPU: // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
-| Dataset | Frames | Python | C++ | Speedup | // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-|---------|--------|--------|-----|---------|
-| sample0 | 100 | 2.35s | 0.13s | **18x** | // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-| sample1 | 350 | 1.52s | 0.10s | **15x** | // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+| Dataset | Frames | Py Pts | C++ Pts | Match% | MaxDiff (px) |
+|---------|--------|--------|---------|--------|-------------|
+| sample0 | 100 | 1816 | 1814 | 99.89% | 0.000488 |
+| sample1 | 350 | 1431 | 1432 | 99.93% | 0.000610 |
+| sample2 | 2001 | 19291 | 19295 | 99.97% | 0.000697 |
+| sample3 | 2001 | 15262 | 15262 | 99.98% | 0.000696 |
+| sample4 | 5000 | 19874 | 19873 | 99.98% | 0.000690 |
+| sample5 | 1001 | 4244 | 4244 | 100% | 0.000589 |
+| sample6 | 40 | 592 | 592 | 100% | 0.000616 |
+| **TOTAL** | | **62510** | **62512** | **99.98%** | |
+
+Tiny differences (~0.01%) are due to TF vs ONNX Runtime floating-point divergence. When both sides use ONNX Runtime, sample0 and sample1 achieve 100% exact match.
+
+**NN prediction standalone**: 20/20 BM/fBM trajectories match within 1e-6 (worst 3.58e-07) when both use ONNX Runtime.
 
 ## Project Structure
 
@@ -58,9 +68,17 @@ FreeTrace_cpp/
 │   ├── regression.cpp     # Guo algorithm with inline 6x6 QR solver
 │   ├── cost_function.cpp  # Cost function for trajectory linking
 │   ├── localization.cpp   # Complete localization pipeline
-│   └── tracking.cpp       # Complete tracking pipeline (~2000 lines) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+│   ├── tracking.cpp       # Complete tracking pipeline (~2900 lines)
+│   ├── nn_inference.cpp   # ONNX Runtime NN inference (alpha + K prediction) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+│   └── gpu_module_stub.cpp # GPU module stub
+├── include/
+│   └── nn_inference.h     # NN models struct and function declarations
 └── models/
-    └── qt_99.bin           # Abnormal detection thresholds (from Python qt_99.npz) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    ├── qt_99.bin           # Abnormal detection thresholds (from Python qt_99.npz)
+    ├── reg_model_3.onnx    # Alpha ConvLSTM model (window=3)
+    ├── reg_model_5.onnx    # Alpha ConvLSTM model (window=5)
+    ├── reg_model_8.onnx    # Alpha ConvLSTM model (window=8)
+    └── reg_k_model.onnx    # K Dense model // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 ```
 
 ## Ported Modules
@@ -72,7 +90,7 @@ FreeTrace_cpp/
 | `cost_function` | Complete | predict_cauchy (fBm Cauchy log-PDF) |
 | `localization` | Complete | Full forward + backward pipeline: read_tiff, compute_background, gauss_psf, region_max_filter, image_regression, bi_variate_normal_pdf, subtract_pdf, batch processing |
 | `tracking` | Complete | DiGraph, segmentation, greedy matching, fBm Cauchy cost, multi-hypothesis optimization, forecast loop, trajectory visualization | // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-| `fBm inference` | Planned | ONNX Runtime model inference |
+| `nn_inference` | Complete | ONNX Runtime alpha/K prediction (GPU+CPU), ConvLSTM alpha models, Dense K model |
 
 ## Build
 
@@ -80,23 +98,58 @@ FreeTrace_cpp/
 - C++17 compiler (GCC 7+, Clang 5+, MSVC 2017+)
 - libtiff **or** OpenCV for TIFF I/O
 
-### With libtiff + libpng (recommended) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+### Basic build (no NN) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 ```bash
 g++ -std=c++17 -O2 -DUSE_LIBTIFF -DUSE_LIBPNG -Iinclude src/*.cpp -o freetrace -ltiff -lpng
 ```
 
-### With OpenCV
+### With NN support (ONNX Runtime GPU — recommended) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+
+1. Download ONNX Runtime GPU:
+```bash
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-linux-x64-gpu-1.24.3.tgz
+tar xzf onnxruntime-linux-x64-gpu-1.24.3.tgz
+```
+
+2. Build with GPU NN support:
+```bash
+ORT=onnxruntime-linux-x64-gpu-1.24.3
+g++ -std=c++17 -O2 -mavx2 \
+    -DUSE_LIBTIFF -DUSE_LIBPNG -DUSE_ONNXRUNTIME \
+    -Iinclude -I$ORT/include \
+    src/main.cpp src/image_pad.cpp src/regression.cpp src/cost_function.cpp \
+    src/localization.cpp src/tracking.cpp src/nn_inference.cpp src/gpu_module_stub.cpp \
+    -o freetrace_nn \
+    -ltiff -lpng -L$ORT/lib -lonnxruntime \
+    -Wl,-rpath,\$ORIGIN/$ORT/lib
+```
+
+3. Run with GPU (set `LD_LIBRARY_PATH` so the CUDA provider can find cuDNN):
+```bash
+export LD_LIBRARY_PATH=$(pwd)/onnxruntime-linux-x64-gpu-1.24.3/lib:$LD_LIBRARY_PATH
+./freetrace_nn track loc.csv output/ 100 --depth 2 --cutoff 2 --jump 10 --nn
+```
+
+**Requirements**: NVIDIA GPU with CUDA 12.x. The GPU ONNX Runtime package bundles cuDNN 9, so no separate cuDNN installation is needed. If no GPU is available, it falls back to CPU automatically.
+
+### With NN support (ONNX Runtime CPU only)
+```bash
+ORT=onnxruntime-linux-x64-1.24.3
+g++ -std=c++17 -O2 -mavx2 \
+    -DUSE_LIBTIFF -DUSE_LIBPNG -DUSE_ONNXRUNTIME \
+    -Iinclude -I$ORT/include \
+    src/main.cpp src/image_pad.cpp src/regression.cpp src/cost_function.cpp \
+    src/localization.cpp src/tracking.cpp src/nn_inference.cpp src/gpu_module_stub.cpp \
+    -o freetrace_nn \
+    -ltiff -lpng -L$ORT/lib -lonnxruntime \
+    -Wl,-rpath,\$ORIGIN/$ORT/lib
+```
+
+### With OpenCV (no NN)
 ```bash
 g++ -std=c++17 -O2 -DUSE_OPENCV -Iinclude src/*.cpp -o freetrace \
     $(pkg-config --cflags --libs opencv4)
-```
-
-### CMake
-```bash
-mkdir build && cd build
-cmake ..
-make
-```
+``` // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 ## Usage
 
@@ -132,7 +185,8 @@ This reads the TIFF stack, runs localization with window size 7, threshold multi
 - `--depth N` — graph search depth (default: 2, evaluates 2^N alternatives per subgraph) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 - `--cutoff N` — minimum trajectory length to keep (default: 2) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 - `--jump F` — fixed jump threshold in pixels (default: auto-estimated from data) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-- `--tiff path` — read TIFF for exact image dimensions in trajectory visualization // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+- `--tiff path` — read TIFF for exact image dimensions in trajectory visualization
+- `--nn` — enable NN-based alpha/K estimation (requires ONNX Runtime build) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 **Outputs**: `_traces.csv` and `_traces.png` (trajectory visualization) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
