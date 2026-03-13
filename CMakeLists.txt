@@ -11,6 +11,9 @@ set(ONNXRUNTIME_DIR "" CACHE PATH "Path to ONNX Runtime installation")
 
 # --- Dependencies ---
 
+# OpenMP (optional, parallel localization loops) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+find_package(OpenMP QUIET)
+
 # OpenCV (optional, alternative TIFF I/O)
 find_package(OpenCV QUIET)
 if(OpenCV_FOUND)
@@ -81,6 +84,10 @@ endif()
 if(PNG_FOUND)
     target_link_libraries(freetrace PRIVATE ${PNG_LIBRARIES})
 endif()
+
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(freetrace PRIVATE OpenMP::OpenMP_CXX)
+endif() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 if(USE_ONNXRUNTIME AND EXISTS "${ONNXRUNTIME_DIR}/include/onnxruntime_cxx_api.h")
     target_include_directories(freetrace PRIVATE ${ONNXRUNTIME_DIR}/include)

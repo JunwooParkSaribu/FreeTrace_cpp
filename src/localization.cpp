@@ -8,6 +8,9 @@
 #include <cassert>
 #include <random>
 #include <iomanip>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #ifdef USE_OPENCV
 #include <opencv2/imgcodecs.hpp>
@@ -726,13 +729,14 @@ LocalizationResult localize(
         // Thresholds for single window — use bg_result.thresholds directly
         auto& thresholds = bg_result.thresholds;
 
-        // Region max filter with NMS (matching Python region_max_filter)
+        // Region max filter with NMS (matching Python region_max_filter) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
         // Step 1: Find local maxima above threshold
         int r_half = (shift == 0) ? ws0.h / 2 : shift;
         int c_half = (shift == 0) ? ws0.w / 2 : shift;
         struct CandInfo { int frame; int r; int c; float score; };
         std::vector<std::vector<CandInfo>> per_frame_cands(nb_imgs);
 
+        #pragma omp parallel for schedule(static)
         for (int n = 0; n < nb_imgs; ++n) {
             float thresh = thresholds[n];
             for (int r = 0; r < rows; ++r) {
@@ -756,30 +760,35 @@ LocalizationResult localize(
             }
         }
 
-        // Step 2: Per-frame NMS with mask (sort by score desc, suppress overlaps)
+        // Step 2: Per-frame NMS with mask (sort by score desc, suppress overlaps) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
         // Matching Python: mask[row_min:row_max, col_min:col_max] = 1 (exclusive upper bound)
-        std::vector<DetIndex> indices;
+        std::vector<std::vector<DetIndex>> per_frame_indices(nb_imgs);
+        int ext_nms = (shift == 0) ? (ws0.w - 1) / 2 : shift;
+
+        #pragma omp parallel for schedule(static)
         for (int n = 0; n < nb_imgs; ++n) {
             auto& cands = per_frame_cands[n];
             std::sort(cands.begin(), cands.end(),
                       [](const CandInfo& a, const CandInfo& b) { return a.score > b.score; });
 
             std::vector<std::vector<uint8_t>> mask(rows, std::vector<uint8_t>(cols, 0));
-            int ext_nms = (shift == 0) ? (ws0.w - 1) / 2 : shift;
             for (auto& cand : cands) {
                 if (mask[cand.r][cand.c] != 0) continue;
-                indices.push_back({n, cand.r, cand.c});
-                // Python: mask[max(0,r-ext) : min(shape-1, r+ext), ...] = 1
-                // Python slice is exclusive upper bound, so upper = min(shape-1, r+ext)
-                int r0 = std::max(0, cand.r - ext_nms); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                int r1 = std::min(rows - 1, cand.r + ext_nms); // exclusive upper (Python slice)
+                per_frame_indices[n].push_back({n, cand.r, cand.c});
+                int r0 = std::max(0, cand.r - ext_nms);
+                int r1 = std::min(rows - 1, cand.r + ext_nms);
                 int c0 = std::max(0, cand.c - ext_nms);
-                int c1 = std::min(cols - 1, cand.c + ext_nms); // exclusive upper (Python slice)
+                int c1 = std::min(cols - 1, cand.c + ext_nms);
                 for (int ri = r0; ri < r1; ++ri)
                     for (int ci = c0; ci < c1; ++ci)
                         mask[ri][ci] = 1;
             }
-        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        }
+        // Merge in frame order (deterministic)
+        std::vector<DetIndex> indices;
+        for (int n = 0; n < nb_imgs; ++n)
+            indices.insert(indices.end(), per_frame_indices[n].begin(), per_frame_indices[n].end());
+        // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
         if (!indices.empty()) {
             int ws = ws0.w;
@@ -1101,12 +1110,13 @@ LocalizationResult localize_from_ext( // Modified by Claude (claude-opus-4-6, An
         auto& thresholds = bg_result.thresholds;
 
 
-        // NMS detection — identical to localize() // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:50 // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        // NMS detection — identical to localize() // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
         int r_half = (shift == 0) ? ws0.h / 2 : shift;
         int c_half = (shift == 0) ? ws0.w / 2 : shift;
         struct CandInfo { int frame; int r; int c; float score; };
         std::vector<std::vector<CandInfo>> per_frame_cands(nb_imgs);
 
+        #pragma omp parallel for schedule(static)
         for (int n = 0; n < nb_imgs; ++n) {
             float thresh = thresholds[n];
             for (int r = 0; r < rows; ++r) {
@@ -1127,16 +1137,18 @@ LocalizationResult localize_from_ext( // Modified by Claude (claude-opus-4-6, An
             }
         }
 
-        std::vector<DetIndex> indices; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<std::vector<DetIndex>> per_frame_indices(nb_imgs);
+        int ext_nms = (shift == 0) ? (ws0.w - 1) / 2 : shift;
+
+        #pragma omp parallel for schedule(static)
         for (int n = 0; n < nb_imgs; ++n) {
             auto& cands = per_frame_cands[n];
             std::sort(cands.begin(), cands.end(),
                       [](const CandInfo& a, const CandInfo& b) { return a.score > b.score; });
             std::vector<std::vector<uint8_t>> mask(rows, std::vector<uint8_t>(cols, 0));
-            int ext_nms = (shift == 0) ? (ws0.w - 1) / 2 : shift;
             for (auto& cand : cands) {
                 if (mask[cand.r][cand.c] != 0) continue;
-                indices.push_back({n, cand.r, cand.c});
+                per_frame_indices[n].push_back({n, cand.r, cand.c});
                 int r0 = std::max(0, cand.r - ext_nms);
                 int r1 = std::min(rows - 1, cand.r + ext_nms);
                 int c0 = std::max(0, cand.c - ext_nms);
@@ -1146,6 +1158,10 @@ LocalizationResult localize_from_ext( // Modified by Claude (claude-opus-4-6, An
                         mask[ri][ci] = 1;
             }
         }
+        std::vector<DetIndex> indices;
+        for (int n = 0; n < nb_imgs; ++n)
+            indices.insert(indices.end(), per_frame_indices[n].begin(), per_frame_indices[n].end());
+        // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
         if (!indices.empty()) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
             int ws = ws0.w;
