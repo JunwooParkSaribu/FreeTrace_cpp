@@ -11,8 +11,8 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 | **NN models** | Loaded (alpha & K inferred per trajectory) | Not loaded |
 | **Alpha / K** | Predicted by ConvLSTM / Dense NN | Fixed: alpha=1.0, K=0.3 |
 | **H-K output** | `_diffusion.csv` + `_diffusion_distribution.png` | Not produced |
-| **With GPU** | NN runs on GPU (fast) | No difference |
-| **Without GPU** | NN runs on CPU via ONNX Runtime (slow) | No difference |
+| **With GPU** | NN runs on GPU via ONNX Runtime CUDA (fast) | No difference |
+| **Without GPU** | NN runs on CPU via ONNX Runtime (slower) | No difference |
 
 **Defaults:**
 - fBm mode: **ON** (NN inference + H-K output)
@@ -20,7 +20,11 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 - Cutoff: **3** (minimum trajectory length)
 - Jump threshold: **auto** (inferred from data; use `--jump` to override)
 
-**GPU behavior:** FreeTrace automatically detects GPU availability. If no GPU is found, it prints a notification and runs on CPU. NN inference still works on CPU but is significantly slower.
+**GPU behavior:** FreeTrace automatically detects GPU availability via ONNX Runtime CUDA provider. At startup, it always prints which mode is active:
+- `NN inference: GPU (CUDA) — fast` when GPU is available
+- `NN inference: CPU — this may be slower than GPU` when falling back to CPU
+
+GPU requires building with the ONNX Runtime **GPU** package and setting `LD_LIBRARY_PATH` at runtime (see [Build Instructions](#build)).
 
 **Quick start:**
 ```bash
@@ -110,7 +114,8 @@ FreeTrace_cpp/
     ├── reg_model_3.onnx    # Alpha ConvLSTM model (window=3)
     ├── reg_model_5.onnx    # Alpha ConvLSTM model (window=5)
     ├── reg_model_8.onnx    # Alpha ConvLSTM model (window=8)
-    └── reg_k_model.onnx    # K Dense model // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    ├── reg_k_model.onnx    # K Dense model (ONNX, fallback)
+    └── k_model_weights.bin # K Dense model weights (direct computation, fast path)
 ```
 
 ## Ported Modules
@@ -122,7 +127,7 @@ FreeTrace_cpp/
 | `cost_function` | Complete | predict_cauchy (fBm Cauchy log-PDF) |
 | `localization` | Complete | Full forward + backward pipeline: read_tiff, compute_background, gauss_psf, region_max_filter, image_regression, bi_variate_normal_pdf, subtract_pdf, batch processing |
 | `tracking` | Complete | DiGraph, segmentation, greedy matching, fBm Cauchy cost, multi-hypothesis optimization, forecast loop, trajectory visualization | // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-| `nn_inference` | Complete | ONNX Runtime alpha/K prediction (GPU+CPU), ConvLSTM alpha models, Dense K model |
+| `nn_inference` | Complete | ONNX Runtime alpha/K prediction (GPU+CPU), ConvLSTM alpha models, Dense K model (direct fast path + ONNX fallback), batched inference |
 
 ## Build
 
@@ -170,41 +175,50 @@ g++ -std=c++17 -O2 -mavx2 -DUSE_LIBTIFF -DUSE_LIBPNG -Iinclude \
 
 #### Step 2b: Build with fBm support (ONNX Runtime GPU — recommended)
 
-1. Download ONNX Runtime GPU (bundles cuDNN 9, no separate install needed):
+1. Download ONNX Runtime GPU. Choose the package matching your **CUDA toolkit version** (check with `nvcc --version`):
 ```bash
 cd FreeTrace_cpp
+
+# CUDA 12.x (most common):
 wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-linux-x64-gpu-1.24.3.tgz
 tar xzf onnxruntime-linux-x64-gpu-1.24.3.tgz
+ORT_DIR=onnxruntime-linux-x64-gpu-1.24.3
+
+# CUDA 13.x:
+# wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-linux-x64-gpu_cuda13-1.24.3.tgz
+# tar xzf onnxruntime-linux-x64-gpu_cuda13-1.24.3.tgz
+# ORT_DIR=onnxruntime-linux-x64-gpu-1.24.3
 ```
+
+> **Important**: Your NVIDIA driver may report a higher CUDA version than what's actually installed. Use `nvcc --version` (not `nvidia-smi`) to check the toolkit version. If `nvcc` is not found, install the CUDA toolkit: `sudo apt install nvidia-cuda-toolkit`.
 
 2. Build:
 
 **Using CMake:**
 ```bash
 mkdir build && cd build
-cmake .. -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=$(pwd)/../onnxruntime-linux-x64-gpu-1.24.3
+cmake .. -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=$(pwd)/../$ORT_DIR
 make -j$(nproc)
 ```
 
 **Or direct compile:**
 ```bash
-ORT=onnxruntime-linux-x64-gpu-1.24.3
 g++ -std=c++17 -O2 -mavx2 \
     -DUSE_LIBTIFF -DUSE_LIBPNG -DUSE_ONNXRUNTIME \
-    -Iinclude -I$ORT/include \
+    -Iinclude -I$ORT_DIR/include \
     src/main.cpp src/image_pad.cpp src/regression.cpp src/cost_function.cpp \
     src/localization.cpp src/tracking.cpp src/nn_inference.cpp src/gpu_module_stub.cpp \
-    -o freetrace -ltiff -lpng -L$ORT/lib -lonnxruntime \
-    -Wl,-rpath,\$ORIGIN/$ORT/lib
+    -o freetrace -ltiff -lpng -L$ORT_DIR/lib -lonnxruntime \
+    -Wl,-rpath,\$ORIGIN/$ORT_DIR/lib
 ```
 
 3. Run (set library path for CUDA provider):
 ```bash
-export LD_LIBRARY_PATH=$(pwd)/onnxruntime-linux-x64-gpu-1.24.3/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$(pwd)/$ORT_DIR/lib:$LD_LIBRARY_PATH
 ./freetrace track loc.csv output/ 100 --tiff video.tiff
 ```
 
-> **Note**: Requires NVIDIA GPU with CUDA 12.x. If no GPU is detected, FreeTrace automatically falls back to CPU and prints a notification.
+FreeTrace will print `NN inference: GPU (CUDA) — fast` if GPU is detected, or `NN inference: CPU — this may be slower than GPU` if it falls back to CPU.
 
 #### Step 2c: Build with fBm support (ONNX Runtime CPU only — no GPU needed)
 
@@ -365,7 +379,7 @@ The output binary is at `build\Release\freetrace.exe`.
 1. Download ONNX Runtime GPU for Windows:
 ```powershell
 cd FreeTrace_cpp
-curl -LO https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-gpu-1.24.3.zip
+Invoke-WebRequest -Uri https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-gpu-1.24.3.zip -OutFile onnxruntime-win-x64-gpu-1.24.3.zip
 tar -xf onnxruntime-win-x64-gpu-1.24.3.zip
 ```
 
@@ -386,13 +400,13 @@ cd Release
 freetrace.exe track loc.csv output\ 100 --tiff video.tiff
 ```
 
-> **Note**: Requires NVIDIA GPU with CUDA 12.x. If no GPU is detected, it falls back to CPU automatically.
+> **Note**: Requires NVIDIA GPU with CUDA 12.x. FreeTrace will print `NN inference: GPU (CUDA) — fast` or `NN inference: CPU — this may be slower than GPU` at startup.
 
 #### Step 2c: Build with fBm support (ONNX Runtime CPU only)
 
 Same steps as above, but download the CPU package:
 ```powershell
-curl -LO https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-1.24.3.zip
+Invoke-WebRequest -Uri https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-1.24.3.zip -OutFile onnxruntime-win-x64-1.24.3.zip
 tar -xf onnxruntime-win-x64-1.24.3.zip
 ```
 Then use `-DONNXRUNTIME_DIR=..\onnxruntime-win-x64-1.24.3` in the cmake command.
@@ -529,6 +543,10 @@ freetrace::run_tracking("output_dir/input_loc.csv", "output_dir/", 100, config);
 // To disable fBm mode:
 // config.fbm_mode = false; config.use_nn = false; config.hk_output = false;
 ```
+
+## Paper
+
+- **FreeTrace** on bioRxiv: https://doi.org/10.64898/2026.01.08.698486 <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13 -->
 
 ## Original Project
 

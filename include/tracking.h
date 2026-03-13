@@ -66,8 +66,8 @@ struct TrackingConfig {
     int graph_depth = 3; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     int cutoff = 3; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     float jump_threshold = -1.0f; // -1 = undetermined, infer from data // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float init_alpha = 1.0f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float init_k = 0.3f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    double init_alpha = 1.0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    double init_k = 0.3; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     int dimension = 2; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     float loc_precision_err = 1.0f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     bool verbose = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -122,9 +122,9 @@ struct CauchyResult {
 };
 CauchyResult predict_cauchy_tracking(const std::array<double,3>& next_vec, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
                                      const std::array<double,3>& prev_vec,
-                                     float k, float alpha,
+                                     double k, double alpha,
                                      int before_lag, int lag,
-                                     float precision, int dimension);
+                                     double precision, int dimension); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 // --- Graph algorithms --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 std::vector<Path> find_paths_as_list(const DiGraph& G, const Node& source); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -165,11 +165,11 @@ struct PredictResult {
 PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
                                std::map<Path, double>& trajectories_costs,
                                const Localizations& locs,
-                               float prev_alpha, float prev_k,
+                               double prev_alpha, double prev_k, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
                                const std::vector<int>& next_times,
                                const Path* prev_path,
                                std::map<Path, int>& start_indice,
-                               int last_time, float jump_threshold,
+                               int last_time, double jump_threshold, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
                                const DiGraph& selected_graph,
                                const std::set<Node>& final_graph_nodes,
                                int time_forecast, int dimension,
