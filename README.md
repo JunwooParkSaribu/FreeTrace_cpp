@@ -36,6 +36,12 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 
 > **First time?** See [Build Instructions](#build) for step-by-step setup on Linux, macOS, and Windows.
 
+**NN Models:** ONNX models are not shipped with the repo. On first run with fBm mode, FreeTrace automatically attempts to download and convert them. You can also run manually:
+```bash
+python3 scripts/download_models.py --output-dir models
+```
+Requirements: `pip install tensorflow keras tf2onnx onnx "ml_dtypes>=0.5.0"`
+
 ## About
 
 FreeTrace localizes and tracks fluorescent particles in microscopy video data (TIFF stacks). // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11

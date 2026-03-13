@@ -19,7 +19,7 @@ freetrace
 .DS_Store
 Thumbs.db
 
-# ONNX models (export from Keras with tf2onnx)
+# ONNX models (auto-downloaded via scripts/download_models.py)
 models/*.onnx
 
 # ONNX Runtime (downloaded separately)
