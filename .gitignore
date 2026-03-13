@@ -19,8 +19,7 @@ freetrace
 .DS_Store
 Thumbs.db
 
-# ONNX models (auto-downloaded via scripts/download_models.py)
-models/*.onnx
+# ONNX models are shipped in git (platform-independent)
 
 # ONNX Runtime (downloaded separately)
 onnxruntime-*/
