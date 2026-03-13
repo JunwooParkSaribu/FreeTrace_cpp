@@ -9,6 +9,7 @@
 #include <sstream>
 #include <iostream>
 #include <cassert>
+#include <cstdlib>
 #include <random>
 #include <iomanip>
 // Platform-specific includes for get_exe_dir() // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
@@ -3547,18 +3548,56 @@ bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude
         }
     } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
-    // Load NN models if requested (fBm mode or explicit --nn)
-    if (config.use_nn) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    // Load NN models if requested (fBm mode or explicit --nn) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    if (config.use_nn) {
         for (const auto& md : mdirs) {
             if (load_nn_models(g_nn_models, md)) {
                 if (config.verbose) std::cerr << "Loaded NN models from " << md << std::endl;
                 break;
             }
         }
-        if (!g_nn_models.loaded && config.verbose) {
-            std::cerr << "Warning: ONNX models not found, using fixed alpha/k" << std::endl;
+        // If models not found, try auto-download via Python script
+        if (!g_nn_models.loaded) {
+            std::string script_path;
+            std::string exe_dir = get_exe_dir();
+            // Search for download script relative to exe or cwd
+            std::vector<std::string> script_candidates = {
+                "scripts" + psep + "download_models.py",
+                ".." + psep + "scripts" + psep + "download_models.py",
+            };
+            if (!exe_dir.empty()) {
+                script_candidates.push_back(exe_dir + psep + "scripts" + psep + "download_models.py");
+                script_candidates.push_back(exe_dir + psep + ".." + psep + "scripts" + psep + "download_models.py");
+            }
+            for (const auto& sp : script_candidates) {
+                std::ifstream test(sp);
+                if (test.good()) { script_path = sp; break; }
+            }
+
+            if (!script_path.empty()) {
+                std::cerr << "ONNX models not found. Attempting auto-download..." << std::endl;
+                std::string models_dir = mdirs.empty() ? "models" : mdirs[0];
+                std::string cmd = "python3 \"" + script_path + "\" --output-dir \"" + models_dir + "\"";
+                int ret = std::system(cmd.c_str());
+                if (ret == 0) {
+                    // Retry loading after download
+                    for (const auto& md : mdirs) {
+                        if (load_nn_models(g_nn_models, md)) {
+                            if (config.verbose) std::cerr << "Loaded NN models from " << md << std::endl;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!g_nn_models.loaded) {
+                std::cerr << "Warning: ONNX models not found, using fixed alpha/K." << std::endl;
+                std::cerr << "  To enable fBm mode, run:" << std::endl;
+                std::cerr << "    python3 scripts/download_models.py --output-dir models" << std::endl;
+                std::cerr << "  Requirements: pip install tensorflow keras tf2onnx onnx \"ml_dtypes>=0.5.0\"" << std::endl;
+            }
         }
-    }
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
     // Run forecast
     if (config.verbose) std::cerr << "Starting trajectory inference..." << std::endl;
