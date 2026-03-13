@@ -61,11 +61,11 @@ struct TrajectoryObj {
 // Localization data: frame -> list of (x, y, z) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 using Localizations = std::map<int, std::vector<std::array<double, 3>>>;
 
-// Tracking configuration // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// Tracking configuration // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 struct TrackingConfig {
-    int graph_depth = 2; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    int cutoff = 2; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float jump_threshold = -1.0f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    int graph_depth = 3; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    int cutoff = 3; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    float jump_threshold = -1.0f; // -1 = undetermined, infer from data // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     float init_alpha = 1.0f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     float init_k = 0.3f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     int dimension = 2; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -73,8 +73,11 @@ struct TrackingConfig {
     bool verbose = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     bool post_process = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     bool use_nn = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    bool fbm_mode = false; // fBm mode: enable NN + HK output // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    bool hk_output = false; // produce H-K diffusion CSV and distribution image // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     int img_rows = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11 (0 = auto from loc data)
     int img_cols = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::string tiff_path; // path to TIFF for image dimensions and output naming // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 };
 
 // --- I/O --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -203,6 +206,15 @@ void make_trajectory_image(const std::string& output_path, // Modified by Claude
 // --- PostProcessing --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 std::vector<TrajectoryObj> post_processing(const std::vector<TrajectoryObj>& trajectory_list, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
                                             const Localizations& locs, int cutoff, bool verbose = false);
+
+// --- H-K (diffusion) output --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+void write_hk_csv(const std::string& path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+                  const std::vector<TrajectoryObj>& trajectories,
+                  const Localizations& locs,
+                  bool use_nn);
+void make_hk_distribution_image(const std::string& path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+                                const std::vector<double>& H_vals,
+                                const std::vector<double>& K_vals);
 
 // --- Top-level tracking entry point --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
