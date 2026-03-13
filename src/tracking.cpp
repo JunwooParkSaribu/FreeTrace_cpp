@@ -2886,7 +2886,10 @@ static std::vector<int> get_sorted_time_steps(const Localizations& loc) { // Mod
 void write_hk_csv(const std::string& path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
                   const std::vector<TrajectoryObj>& trajectories,
                   const Localizations& locs,
-                  bool use_nn) {
+                  bool use_nn,
+                  std::vector<double>& out_H,
+                  std::vector<double>& out_K) {
+    out_H.clear(); out_K.clear();
     std::ofstream f(path);
     if (!f.is_open()) {
         std::cerr << "Error: cannot write to " << path << std::endl;
@@ -2895,30 +2898,221 @@ void write_hk_csv(const std::string& path, // Modified by Claude (claude-opus-4-
     f << std::setprecision(17);
     f << "traj_idx,H,K\n";
     for (const auto& traj : trajectories) {
-        // Extract x, y positions from trajectory
         std::vector<float> xs, ys;
         for (const auto& [frame, idx] : traj.tuples) {
             const auto& pos = locs.at(frame)[idx];
             xs.push_back((float)pos[0]);
             ys.push_back((float)pos[1]);
         }
-        float alpha = predict_alpha_nn(g_nn_models, xs, ys); // returns 1.0 if !use_nn
-        float log_k = predict_k_nn(g_nn_models, xs, ys);     // returns 0.5 if !use_nn
+        float alpha = predict_alpha_nn(g_nn_models, xs, ys);
+        float log_k = predict_k_nn(g_nn_models, xs, ys);
         double H = (double)alpha / 2.0;
         double K = std::pow(10.0, (double)log_k);
         f << traj.index << "," << H << "," << K << "\n";
+        out_H.push_back(H);
+        out_K.push_back(K);
     }
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+
+// Seaborn "mako" colormap (256 entries, sampled from seaborn) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+static void mako_colormap(double t, uint8_t& r, uint8_t& g, uint8_t& b) {
+    // t in [0,1]. Approximation of mako: dark purple → teal → yellow-green
+    // Key stops sampled from seaborn mako:
+    //   0.00: (11, 10, 36)     dark purple
+    //   0.15: (35, 23, 90)     deep purple
+    //   0.30: (62, 42, 127)    purple
+    //   0.45: (66, 78, 137)    blue-purple
+    //   0.55: (52, 115, 132)   teal
+    //   0.65: (40, 152, 127)   green-teal
+    //   0.75: (62, 189, 119)   green
+    //   0.85: (130, 219, 120)  light green
+    //   0.95: (210, 245, 165)  yellow-green
+    //   1.00: (222, 249, 183)  pale yellow
+    struct Stop { double pos; double r, g, b; };
+    static const Stop stops[] = {
+        {0.00,  11, 10, 36},
+        {0.15,  35, 23, 90},
+        {0.30,  62, 42,127},
+        {0.45,  66, 78,137},
+        {0.55,  52,115,132},
+        {0.65,  40,152,127},
+        {0.75,  62,189,119},
+        {0.85, 130,219,120},
+        {0.95, 210,245,165},
+        {1.00, 222,249,183},
+    };
+    static const int n = sizeof(stops)/sizeof(stops[0]);
+    if (t <= 0) { r = (uint8_t)stops[0].r; g = (uint8_t)stops[0].g; b = (uint8_t)stops[0].b; return; }
+    if (t >= 1) { r = (uint8_t)stops[n-1].r; g = (uint8_t)stops[n-1].g; b = (uint8_t)stops[n-1].b; return; }
+    for (int i = 0; i < n - 1; i++) {
+        if (t <= stops[i+1].pos) {
+            double f = (t - stops[i].pos) / (stops[i+1].pos - stops[i].pos);
+            r = (uint8_t)(stops[i].r + f * (stops[i+1].r - stops[i].r) + 0.5);
+            g = (uint8_t)(stops[i].g + f * (stops[i+1].g - stops[i].g) + 0.5);
+            b = (uint8_t)(stops[i].b + f * (stops[i+1].b - stops[i].b) + 0.5);
+            return;
+        }
+    }
+    r = (uint8_t)stops[n-1].r; g = (uint8_t)stops[n-1].g; b = (uint8_t)stops[n-1].b;
+}
 
 void make_hk_distribution_image(const std::string& path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
                                 const std::vector<double>& H_vals,
                                 const std::vector<double>& K_vals) {
-    // H-K distribution plot requires seaborn/matplotlib (Python only).
-    // For C++ we skip the distribution image and just log a note.
+#ifdef USE_LIBPNG
+    if (H_vals.empty() || H_vals.size() != K_vals.size()) return;
+    int n = (int)H_vals.size();
+    if (n < 2) return;
+
+    // Image dimensions (matching Python's figsize=(10,10) at ~100 dpi)
+    const int W = 800, H_img = 800;
+    // Plot area within image (leave margins for labels)
+    const int margin_left = 80, margin_right = 20, margin_top = 40, margin_bottom = 60;
+    const int pw = W - margin_left - margin_right;    // plot width
+    const int ph = H_img - margin_top - margin_bottom; // plot height
+
+    // Axis ranges: H in [0, 1], K in log scale
+    const double h_min = 0.0, h_max = 1.0;
+    // Compute K range from data (log scale)
+    double k_min_val = K_vals[0], k_max_val = K_vals[0];
+    for (double k : K_vals) {
+        if (k > 0) {
+            if (k < k_min_val || k_min_val <= 0) k_min_val = k;
+            if (k > k_max_val) k_max_val = k;
+        }
+    }
+    if (k_min_val <= 0) k_min_val = 1e-3;
+    if (k_max_val <= k_min_val) k_max_val = k_min_val * 100;
+    // Add some padding in log space
+    double log_k_min = std::log10(k_min_val) - 0.5;
+    double log_k_max = std::log10(k_max_val) + 0.5;
+
+    // Convert data to grid coordinates: H on x-axis, log10(K) on y-axis
+    // Compute 2D KDE on a grid
+    const int grid_size = 200;
+    std::vector<double> density(grid_size * grid_size, 0.0);
+
+    // Compute bandwidth using Scott's rule: bw = n^(-1/6) * std
+    double h_mean = 0, lk_mean = 0;
+    std::vector<double> log_ks(n);
+    for (int i = 0; i < n; i++) {
+        h_mean += H_vals[i];
+        log_ks[i] = std::log10(std::max(K_vals[i], 1e-10));
+        lk_mean += log_ks[i];
+    }
+    h_mean /= n; lk_mean /= n;
+    double h_var = 0, lk_var = 0;
+    for (int i = 0; i < n; i++) {
+        h_var += (H_vals[i] - h_mean) * (H_vals[i] - h_mean);
+        lk_var += (log_ks[i] - lk_mean) * (log_ks[i] - lk_mean);
+    }
+    h_var /= (n - 1); lk_var /= (n - 1);
+    double bw_factor = std::pow((double)n, -1.0/6.0); // Scott's rule for 2D
+    double bw_h = std::sqrt(h_var) * bw_factor;
+    double bw_k = std::sqrt(lk_var) * bw_factor;
+    if (bw_h < 1e-6) bw_h = 0.05;
+    if (bw_k < 1e-6) bw_k = 0.1;
+
+    // Grid spacing
+    double dh = (h_max - h_min) / grid_size;
+    double dlk = (log_k_max - log_k_min) / grid_size;
+
+    // Evaluate KDE on grid
+    for (int i = 0; i < n; i++) {
+        double hi = H_vals[i];
+        double lki = log_ks[i];
+        // Only evaluate in a window around the data point (±4*bw)
+        int gx_lo = std::max(0, (int)((hi - 4*bw_h - h_min) / dh));
+        int gx_hi = std::min(grid_size - 1, (int)((hi + 4*bw_h - h_min) / dh));
+        int gy_lo = std::max(0, (int)((lki - 4*bw_k - log_k_min) / dlk));
+        int gy_hi = std::min(grid_size - 1, (int)((lki + 4*bw_k - log_k_min) / dlk));
+        for (int gy = gy_lo; gy <= gy_hi; gy++) {
+            double lk_grid = log_k_min + (gy + 0.5) * dlk;
+            double dy = (lk_grid - lki) / bw_k;
+            double ey = std::exp(-0.5 * dy * dy);
+            for (int gx = gx_lo; gx <= gx_hi; gx++) {
+                double h_grid = h_min + (gx + 0.5) * dh;
+                double dx = (h_grid - hi) / bw_h;
+                density[gy * grid_size + gx] += std::exp(-0.5 * dx * dx) * ey;
+            }
+        }
+    }
+
+    // Find max density for normalization
+    double max_density = 0;
+    for (double d : density) if (d > max_density) max_density = d;
+    if (max_density <= 0) max_density = 1;
+
+    // Create RGB image
+    std::vector<uint8_t> img(H_img * W * 3, 255); // white background
+
+    // Fill plot area with mako(0) background (dark purple)
+    uint8_t bg_r, bg_g, bg_b;
+    mako_colormap(0.0, bg_r, bg_g, bg_b);
+    for (int py = margin_top; py < H_img - margin_bottom; py++) {
+        for (int px = margin_left; px < W - margin_right; px++) {
+            int idx = (py * W + px) * 3;
+            img[idx] = bg_r; img[idx+1] = bg_g; img[idx+2] = bg_b;
+        }
+    }
+
+    // Render KDE as filled contour (map density to mako colormap)
+    for (int gy = 0; gy < grid_size; gy++) {
+        // Map grid y to pixel y (note: y-axis is inverted — top of image = high log_k)
+        int py_start = margin_top + (int)((1.0 - (double)(gy + 1) / grid_size) * ph);
+        int py_end = margin_top + (int)((1.0 - (double)gy / grid_size) * ph);
+        for (int gx = 0; gx < grid_size; gx++) {
+            double d = density[gy * grid_size + gx] / max_density;
+            if (d < 1e-6) continue; // leave as background
+            uint8_t cr, cg, cb;
+            mako_colormap(d, cr, cg, cb);
+            int px_start = margin_left + (int)((double)gx / grid_size * pw);
+            int px_end = margin_left + (int)((double)(gx + 1) / grid_size * pw);
+            for (int py = py_start; py < py_end && py < H_img - margin_bottom; py++) {
+                for (int px = px_start; px < px_end && px < W - margin_right; px++) {
+                    if (py >= margin_top && px >= margin_left) {
+                        int idx = (py * W + px) * 3;
+                        img[idx] = cr; img[idx+1] = cg; img[idx+2] = cb;
+                    }
+                }
+            }
+        }
+    }
+
+    // Draw axes (black lines)
+    for (int px = margin_left; px < W - margin_right; px++) {
+        int idx_top = (margin_top * W + px) * 3;
+        int idx_bot = ((H_img - margin_bottom) * W + px) * 3;
+        img[idx_top] = img[idx_top+1] = img[idx_top+2] = 0;
+        img[idx_bot] = img[idx_bot+1] = img[idx_bot+2] = 0;
+    }
+    for (int py = margin_top; py <= H_img - margin_bottom; py++) {
+        int idx_left = (py * W + margin_left) * 3;
+        int idx_right = (py * W + W - margin_right - 1) * 3;
+        img[idx_left] = img[idx_left+1] = img[idx_left+2] = 0;
+        img[idx_right] = img[idx_right+1] = img[idx_right+2] = 0;
+    }
+
+    // Write PNG
+    FILE* fp = fopen(path.c_str(), "wb");
+    if (!fp) { std::cerr << "Error: cannot write " << path << std::endl; return; }
+    png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+    png_infop info = png_create_info_struct(png);
+    png_init_io(png, fp);
+    png_set_IHDR(png, info, W, H_img, 8, PNG_COLOR_TYPE_RGB,
+                 PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+    png_write_info(png, info);
+    for (int r = 0; r < H_img; r++) {
+        png_write_row(png, &img[r * W * 3]);
+    }
+    png_write_end(png, nullptr);
+    png_destroy_write_struct(&png, &info);
+    fclose(fp);
+#else
     (void)path; (void)H_vals; (void)K_vals;
-    std::cerr << "Note: H-K distribution image generation not yet supported in C++ "
-              << "(requires matplotlib/seaborn). Use the _diffusion.csv to plot externally." << std::endl;
-}
+    std::cerr << "Warning: libpng not available, skipping H-K distribution image" << std::endl;
+#endif
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 // ============================================================
 // run_tracking: top-level entry point
@@ -3130,12 +3324,14 @@ bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude
 
     // H-K (diffusion) output when fBm mode is on // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     if (config.hk_output) {
+        std::vector<double> H_vals, K_vals;
         std::string out_hk_csv = output_path + sep + base + "_diffusion.csv";
-        write_hk_csv(out_hk_csv, trajectories, loc, config.use_nn);
+        write_hk_csv(out_hk_csv, trajectories, loc, config.use_nn, H_vals, K_vals);
         if (config.verbose) std::cerr << "Written: " << out_hk_csv << std::endl;
 
         std::string out_hk_img = output_path + sep + base + "_diffusion_distribution.png";
-        make_hk_distribution_image(out_hk_img, {}, {}); // C++ does not yet generate the KDE plot
+        make_hk_distribution_image(out_hk_img, H_vals, K_vals);
+        if (config.verbose) std::cerr << "Written: " << out_hk_img << std::endl;
     } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
     // Cleanup NN models
