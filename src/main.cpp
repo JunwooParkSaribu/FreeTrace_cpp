@@ -18,7 +18,7 @@ static void print_usage() { // Modified by Claude (claude-opus-4-6, Anthropic AI
               << "    --cutoff N       Cutoff (default: 3)\n"
               << "    --jump F         Maximum jump distance in px (default: auto)\n"
               << "    --tiff PATH      TIFF file for image dimensions and output naming\n"
-              << "    --fbm            Enable fBm mode (NN inference + H-K output)\n"
+              << "    --no-fbm         Disable fBm mode (no NN, fixed alpha/K, no H-K output)\n"
               << "    --postprocess    Enable post-processing\n"
               << "    --quiet          Suppress status messages\n"
               << "\n"
@@ -41,7 +41,7 @@ int main(int argc, char* argv[]) {
             else if (std::strcmp(argv[i], "--cutoff") == 0 && i + 1 < argc) config.cutoff = std::stoi(argv[++i]);
             else if (std::strcmp(argv[i], "--jump") == 0 && i + 1 < argc) config.jump_threshold = std::stof(argv[++i]);
             else if (std::strcmp(argv[i], "--tiff") == 0 && i + 1 < argc) config.tiff_path = argv[++i];
-            else if (std::strcmp(argv[i], "--fbm") == 0) { config.fbm_mode = true; config.use_nn = true; config.hk_output = true; }
+            else if (std::strcmp(argv[i], "--no-fbm") == 0) { config.fbm_mode = false; config.use_nn = false; config.hk_output = false; } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
             else if (std::strcmp(argv[i], "--postprocess") == 0) config.post_process = true;
             else if (std::strcmp(argv[i], "--quiet") == 0) config.verbose = false;
             else if (std::strcmp(argv[i], "--init-k") == 0 && i + 1 < argc) config.init_k = std::stof(argv[++i]);
@@ -77,7 +77,7 @@ int main(int argc, char* argv[]) {
             std::cout << "  Jump threshold: " << config.jump_threshold << " px" << std::endl;
         else
             std::cout << "  Jump threshold: auto (inferred from data)" << std::endl;
-        if (config.fbm_mode) std::cout << "  fBm mode: ON (NN inference + H-K output)" << std::endl;
+        std::cout << "  fBm mode: " << (config.fbm_mode ? "ON (NN inference + H-K output)" : "OFF (fixed alpha/K)") << std::endl;
         if (config.post_process) std::cout << "  Post-processing: enabled" << std::endl;
         if (gpu_avail) std::cout << "  GPU: available" << std::endl;
         if (config.img_rows > 0) std::cout << "  Image: " << config.img_cols << "x" << config.img_rows << " (from TIFF)" << std::endl;

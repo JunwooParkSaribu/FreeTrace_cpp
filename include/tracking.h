@@ -72,9 +72,9 @@ struct TrackingConfig {
     float loc_precision_err = 1.0f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     bool verbose = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     bool post_process = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    bool use_nn = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    bool fbm_mode = false; // fBm mode: enable NN + HK output // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
-    bool hk_output = false; // produce H-K diffusion CSV and distribution image // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    bool use_nn = true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    bool fbm_mode = true; // fBm mode: enable NN + HK output (default ON) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    bool hk_output = true; // produce H-K diffusion CSV and distribution image // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     int img_rows = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11 (0 = auto from loc data)
     int img_cols = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     std::string tiff_path; // path to TIFF for image dimensions and output naming // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13

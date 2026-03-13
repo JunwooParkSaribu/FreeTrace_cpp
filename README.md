@@ -6,7 +6,7 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 
 ## Quick Reference — Tracking Modes
 
-| | **fBm mode ON** (`--fbm`) | **fBm mode OFF** (default) |
+| | **fBm mode ON** (default) | **fBm mode OFF** (`--no-fbm`) |
 |---|---|---|
 | **NN models** | Loaded (alpha & K inferred per trajectory) | Not loaded |
 | **Alpha / K** | Predicted by ConvLSTM / Dense NN | Fixed: alpha=1.0, K=0.3 |
@@ -15,19 +15,20 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 | **Without GPU** | NN runs on CPU via ONNX Runtime (slow) | No difference |
 
 **Defaults:**
+- fBm mode: **ON** (NN inference + H-K output)
 - Graph depth: **3** (evaluates 2^3 = 8 alternatives per subgraph)
 - Cutoff: **3** (minimum trajectory length)
 - Jump threshold: **auto** (inferred from data; use `--jump` to override)
 
-**GPU behavior:** FreeTrace automatically detects GPU availability. If no GPU is found, it prints a notification and runs on CPU. In fBm mode without GPU, NN inference still works but is significantly slower.
+**GPU behavior:** FreeTrace automatically detects GPU availability. If no GPU is found, it prints a notification and runs on CPU. NN inference still works on CPU but is significantly slower.
 
 **Quick start:**
 ```bash
-# Basic tracking (no fBm, auto jump threshold)
+# Default tracking (fBm ON, auto jump threshold)
 ./freetrace track loc.csv output/ 100 --tiff video.tiff
 
-# fBm mode (NN inference + H-K output)
-./freetrace track loc.csv output/ 100 --tiff video.tiff --fbm
+# Disable fBm mode (no NN, fixed alpha/K, no H-K output)
+./freetrace track loc.csv output/ 100 --tiff video.tiff --no-fbm
 ```
 
 ## About
@@ -129,7 +130,7 @@ FreeTrace C++ supports **Linux**, **macOS**, and **Windows**. You can build with
 | C++17 compiler | **Yes** | GCC 7+, Clang 5+, or MSVC 2019+ |
 | libtiff | **Yes** (or OpenCV) | Reading TIFF microscopy stacks |
 | libpng | Recommended | Trajectory visualization images |
-| ONNX Runtime | Optional | NN inference for fBm mode (`--fbm`) |
+| ONNX Runtime | Optional | NN inference for fBm mode (default ON; use `--no-fbm` to disable) |
 | NVIDIA GPU + CUDA 12.x | Optional | GPU-accelerated NN inference |
 
 ---
@@ -195,7 +196,7 @@ g++ -std=c++17 -O2 -mavx2 \
 3. Run (set library path for CUDA provider):
 ```bash
 export LD_LIBRARY_PATH=$(pwd)/onnxruntime-linux-x64-gpu-1.24.3/lib:$LD_LIBRARY_PATH
-./freetrace track loc.csv output/ 100 --tiff video.tiff --fbm
+./freetrace track loc.csv output/ 100 --tiff video.tiff
 ```
 
 > **Note**: Requires NVIDIA GPU with CUDA 12.x. If no GPU is detected, FreeTrace automatically falls back to CPU and prints a notification.
@@ -233,7 +234,7 @@ g++ -std=c++17 -O2 -mavx2 \
 3. Run:
 ```bash
 export LD_LIBRARY_PATH=$(pwd)/onnxruntime-linux-x64-1.24.3/lib:$LD_LIBRARY_PATH
-./freetrace track loc.csv output/ 100 --tiff video.tiff --fbm
+./freetrace track loc.csv output/ 100 --tiff video.tiff
 ```
 
 ---
@@ -316,7 +317,7 @@ clang++ -std=c++17 -O2 \
 3. Run:
 ```bash
 export DYLD_LIBRARY_PATH=$(pwd)/$ORT/lib:$DYLD_LIBRARY_PATH
-./freetrace track loc.csv output/ 100 --tiff video.tiff --fbm
+./freetrace track loc.csv output/ 100 --tiff video.tiff
 ```
 
 ---
@@ -377,7 +378,7 @@ cmake --build . --config Release
 ```powershell
 copy ..\onnxruntime-win-x64-gpu-1.24.3\lib\*.dll Release\
 cd Release
-freetrace.exe track loc.csv output\ 100 --tiff video.tiff --fbm
+freetrace.exe track loc.csv output\ 100 --tiff video.tiff
 ```
 
 > **Note**: Requires NVIDIA GPU with CUDA 12.x. If no GPU is detected, it falls back to CPU automatically.
@@ -424,7 +425,7 @@ Usage:
     --cutoff N       Cutoff (default: 3)
     --jump F         Maximum jump distance in px (default: auto)
     --tiff PATH      TIFF file for image dimensions and output naming
-    --fbm            Enable fBm mode (NN inference + H-K output)
+    --no-fbm         Disable fBm mode (no NN, fixed alpha/K, no H-K output)
     --postprocess    Enable post-processing
     --quiet          Suppress status messages
 
@@ -458,11 +459,14 @@ This reads the TIFF stack, runs localization with window size 7, threshold multi
 # Run localization first
 ./freetrace video.tiff results/
 
-# Basic tracking (auto jump threshold, depth=3, cutoff=3)
+# Default tracking (fBm ON, auto jump threshold, depth=3, cutoff=3)
 ./freetrace track results/video_loc.csv results/ 100 --tiff video.tiff
 
-# fBm mode with custom jump threshold
-./freetrace track results/video_loc.csv results/ 100 --tiff video.tiff --fbm --jump 10.0
+# Custom jump threshold
+./freetrace track results/video_loc.csv results/ 100 --tiff video.tiff --jump 10.0
+
+# Without fBm (no NN, fixed alpha/K)
+./freetrace track results/video_loc.csv results/ 100 --tiff video.tiff --no-fbm
 ```
 
 **Options:** // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
@@ -470,7 +474,7 @@ This reads the TIFF stack, runs localization with window size 7, threshold multi
 - `--cutoff N` — minimum trajectory length to keep (default: 3)
 - `--jump F` — maximum jump distance in pixels (default: auto-inferred from data)
 - `--tiff path` — TIFF file for image dimensions and output naming
-- `--fbm` — enable fBm mode: NN inference for alpha/K + H-K diffusion output
+- `--no-fbm` — disable fBm mode: no NN, uses fixed alpha=1.0/K=0.3, no H-K output
 - `--postprocess` — enable post-processing of trajectories
 - `--quiet` — suppress status messages
 
@@ -492,13 +496,13 @@ freetrace::run("input.tiff", "output_dir/",
                /*shift=*/1,
                /*verbose=*/true);
 
-// Tracking (uses defaults: depth=3, cutoff=3, jump=auto, no fBm) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+// Tracking (defaults: depth=3, cutoff=3, jump=auto, fBm=ON) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 freetrace::TrackingConfig config;
 config.tiff_path = "input.tiff";       // for output naming + image dimensions
-config.fbm_mode = true;                // enable fBm mode (NN + H-K output)
-config.use_nn = true;                  // load NN models
-config.hk_output = true;               // write diffusion CSV
 freetrace::run_tracking("output_dir/input_loc.csv", "output_dir/", 100, config);
+
+// To disable fBm mode:
+// config.fbm_mode = false; config.use_nn = false; config.hk_output = false;
 ```
 
 ## Original Project
