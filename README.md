@@ -31,6 +31,8 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 ./freetrace track loc.csv output/ 100 --tiff video.tiff --no-fbm
 ```
 
+> **First time?** See [Build Instructions](#build) for step-by-step setup on Linux, macOS, and Windows.
+
 ## About
 
 FreeTrace localizes and tracks fluorescent particles in microscopy video data (TIFF stacks). // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
