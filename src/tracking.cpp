@@ -10,16 +10,154 @@
 #include <iostream>
 #include <cassert>
 #include <random>
+#include <iomanip>
+#include "../x86-simd-sort/src/x86simdsort-static-incl.h" // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 
 namespace freetrace {
+
+// ============================================================ // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+// CPython set iteration order replication
+// Python's find_paths_as_iter uses nx.descendants_at_distance which returns
+// a set. To match Python's DFS path order, we must iterate successors in
+// CPython set iteration order (hash-table slot order).
+// ============================================================
+
+// CPython tuple hash for (int, int) — matches tuplehash() in tupleobject.c (Python 3.8+, 64-bit)
+static uint64_t cpython_tuple_hash(int a, int b) {
+    const uint64_t XXPRIME_1 = 11400714785074694791ULL;
+    const uint64_t XXPRIME_2 = 14029467366897019727ULL;
+    const uint64_t XXPRIME_5 = 2870177450012600261ULL;
+
+    // hash(small_int) = small_int for non-negative, hash(-1) = -2
+    uint64_t ha = (uint64_t)(int64_t)a;
+    uint64_t hb = (uint64_t)(int64_t)b;
+
+    uint64_t acc = XXPRIME_5;
+    acc += ha * XXPRIME_2;
+    acc = (acc << 31) | (acc >> 33);
+    acc *= XXPRIME_1;
+    acc += hb * XXPRIME_2;
+    acc = (acc << 31) | (acc >> 33);
+    acc *= XXPRIME_1;
+    acc += 2ULL ^ (XXPRIME_5 ^ 3527539ULL);
+
+    if (acc == (uint64_t)-1) return 1546275796ULL;
+    return acc;
+}
+
+// Reorder nodes to match CPython set({nodes}) iteration order // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+// CPython 3.12 set uses perturbation probing + LINEAR_PROBES (9 linear slots)
+static void cpython_set_order(std::vector<Node>& nodes) {
+    if (nodes.size() <= 1) return;
+
+    const int PERTURB_SHIFT = 5;
+    const int LINEAR_PROBES = 9;
+
+    // Compute hashes
+    std::vector<uint64_t> hashes(nodes.size());
+    for (size_t i = 0; i < nodes.size(); i++) {
+        hashes[i] = cpython_tuple_hash(nodes[i].first, nodes[i].second);
+    }
+
+    // Determine table size: start at 8, insert elements one by one
+    // CPython resizes when fill*5 >= mask*3 (mask = table_size - 1)
+    int table_size = 8;
+    int fill = 0;
+
+    struct Slot { bool occupied = false; Node node; uint64_t hash_val; };
+    std::vector<Slot> table(table_size);
+
+    // Insert function matching CPython set_add_entry with linear probing
+    auto insert_into_table = [&](std::vector<Slot>& tbl, int tbl_size,
+                                  const Node& node, uint64_t h) {
+        uint64_t mask = (uint64_t)(tbl_size - 1);
+        uint64_t i = h & mask;
+        if (!tbl[(int)i].occupied) {
+            tbl[(int)i] = {true, node, h};
+            return;
+        }
+        uint64_t perturb = h;
+        while (true) {
+            // Linear probing: check i+1 through i+LINEAR_PROBES
+            if (i + LINEAR_PROBES <= mask) {
+                for (int j = 0; j < LINEAR_PROBES; j++) {
+                    uint64_t li = i + (uint64_t)j + 1;
+                    if (!tbl[(int)li].occupied) {
+                        tbl[(int)li] = {true, node, h};
+                        return;
+                    }
+                }
+            }
+            // Perturbation step
+            perturb >>= PERTURB_SHIFT;
+            i = ((i * 5) + perturb + 1) & mask;
+            if (!tbl[(int)i].occupied) {
+                tbl[(int)i] = {true, node, h};
+                return;
+            }
+        }
+    };
+
+    for (size_t idx = 0; idx < nodes.size(); idx++) {
+        uint64_t h = hashes[idx];
+        insert_into_table(table, table_size, nodes[idx], h);
+        fill++;
+
+        // Check resize: CPython uses fill*5 >= mask*3
+        uint64_t mask = (uint64_t)(table_size - 1);
+        if ((uint64_t)fill * 5 >= mask * 3) {
+            int used = fill;
+            int minused = (used <= 50000) ? used * 4 : used * 2;
+            int new_size = 8;
+            while (new_size <= minused) new_size <<= 1;
+
+            // Rehash into new table
+            std::vector<Slot> new_table(new_size);
+            for (int s = 0; s < table_size; s++) {
+                if (table[s].occupied) {
+                    insert_into_table(new_table, new_size, table[s].node, table[s].hash_val);
+                }
+            }
+            table = std::move(new_table);
+            table_size = new_size;
+        }
+    }
+
+    // Extract in table-slot order (matching CPython set iteration)
+    nodes.clear();
+    for (int s = 0; s < table_size; s++) {
+        if (table[s].occupied) {
+            nodes.push_back(table[s].node);
+        }
+    }
+}
+
+// ============================================================ // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+// NumPy-compatible argsort using x86-simd-sort (AVX2)
+// numpy 2.0+ dispatches np.argsort(kind='quicksort') to x86-simd-sort.
+// Using the same library guarantees identical tie-breaking behavior.
+// ============================================================
+static std::vector<int> numpy_argsort(const std::vector<double>& costs) {
+    int n = (int)costs.size();
+    if (n <= 1) {
+        std::vector<int> idx(n);
+        if (n == 1) idx[0] = 0;
+        return idx;
+    }
+    auto result = x86simdsortStatic::argsort(costs.data(), (size_t)n);
+    // Convert size_t indices to int
+    std::vector<int> idx(n);
+    for (int i = 0; i < n; i++) idx[i] = (int)result[i];
+    return idx;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 
 // ============================================================
 // Global state for empirical PDF (matches Python module globals)
 // ============================================================
-static std::vector<float> g_emp_pdf; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-static std::vector<float> g_emp_bins; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+static std::vector<double> g_emp_pdf; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+static std::vector<double> g_emp_bins; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 static int g_emp_nb_bins = 40; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-static float g_emp_max_val = 20.0f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+static double g_emp_max_val = 20.0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 
 // ============================================================
 // Global state for qt_99 data (abnormal detection)
@@ -68,57 +206,88 @@ static double qt_fetch(int alpha_i, int k_i) { // Modified by Claude (claude-opu
 // DiGraph implementation
 // ============================================================
 
-void DiGraph::add_node(const Node& n) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    nodes_.insert(n);
+void DiGraph::add_node(const Node& n) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    if (nodes_.insert(n).second) {
+        nodes_ordered_.push_back(n);
+    }
 }
 
-void DiGraph::add_edge(const Node& from, const Node& to, const EdgeData& data) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    nodes_.insert(from);
-    nodes_.insert(to);
-    fwd_[from][to] = data;
-    rev_[to].insert(from);
+void DiGraph::add_edge(const Node& from, const Node& to, const EdgeData& data) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    if (nodes_.insert(from).second) nodes_ordered_.push_back(from);
+    if (nodes_.insert(to).second) nodes_ordered_.push_back(to);
+    // Insertion-ordered: update if exists, else append (matches Python dict behavior)
+    auto& adj = fwd_[from];
+    bool found = false;
+    for (auto& [n, d] : adj) {
+        if (n == to) { d = data; found = true; break; }
+    }
+    if (!found) adj.push_back({to, data});
+    // Reverse: append if not already present
+    auto& rev_list = rev_[to];
+    if (std::find(rev_list.begin(), rev_list.end(), from) == rev_list.end())
+        rev_list.push_back(from);
 }
 
-void DiGraph::remove_node(const Node& n) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+void DiGraph::remove_node(const Node& n) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     // Remove all edges from predecessors to n
-    if (rev_.count(n)) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (rev_.count(n)) {
         for (const auto& pred : rev_[n]) {
-            if (fwd_.count(pred)) fwd_[pred].erase(n);
+            if (fwd_.count(pred)) {
+                auto& adj = fwd_[pred];
+                adj.erase(std::remove_if(adj.begin(), adj.end(),
+                    [&](const std::pair<Node, EdgeData>& e) { return e.first == n; }),
+                    adj.end());
+            }
         }
         rev_.erase(n);
     }
     // Remove all edges from n to successors
-    if (fwd_.count(n)) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (fwd_.count(n)) {
         for (const auto& [succ, _] : fwd_[n]) {
-            if (rev_.count(succ)) rev_[succ].erase(n);
+            if (rev_.count(succ)) {
+                auto& rl = rev_[succ];
+                rl.erase(std::remove(rl.begin(), rl.end(), n), rl.end());
+            }
         }
         fwd_.erase(n);
     }
-    nodes_.erase(n); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    nodes_.erase(n);
+    nodes_ordered_.erase(std::remove(nodes_ordered_.begin(), nodes_ordered_.end(), n), nodes_ordered_.end());
 }
 
-void DiGraph::remove_edge(const Node& from, const Node& to) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    if (fwd_.count(from)) fwd_[from].erase(to);
-    if (rev_.count(to)) rev_[to].erase(from);
+void DiGraph::remove_edge(const Node& from, const Node& to) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    if (fwd_.count(from)) {
+        auto& adj = fwd_[from];
+        adj.erase(std::remove_if(adj.begin(), adj.end(),
+            [&](const std::pair<Node, EdgeData>& e) { return e.first == to; }),
+            adj.end());
+    }
+    if (rev_.count(to)) {
+        auto& rl = rev_[to];
+        rl.erase(std::remove(rl.begin(), rl.end(), from), rl.end());
+    }
 }
 
 bool DiGraph::has_node(const Node& n) const { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     return nodes_.count(n) > 0;
 }
 
-bool DiGraph::has_edge(const Node& from, const Node& to) const { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+bool DiGraph::has_edge(const Node& from, const Node& to) const { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     auto it = fwd_.find(from);
     if (it == fwd_.end()) return false;
-    return it->second.count(to) > 0;
+    for (const auto& [n, _] : it->second) {
+        if (n == to) return true;
+    }
+    return false;
 }
 
-bool DiGraph::has_path(const Node& from, const Node& to) const { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+bool DiGraph::has_path(const Node& from, const Node& to) const { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     if (from == to) return true;
     std::set<Node> visited;
     std::queue<Node> q;
     q.push(from);
     visited.insert(from);
-    while (!q.empty()) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    while (!q.empty()) {
         Node cur = q.front(); q.pop();
         auto it = fwd_.find(cur);
         if (it == fwd_.end()) continue;
@@ -133,13 +302,13 @@ bool DiGraph::has_path(const Node& from, const Node& to) const { // Modified by 
     return false;
 }
 
-std::vector<Node> DiGraph::successors(const Node& n) const { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+std::vector<Node> DiGraph::successors(const Node& n) const { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     std::vector<Node> result;
     auto it = fwd_.find(n);
     if (it != fwd_.end()) {
         for (const auto& [succ, _] : it->second) result.push_back(succ);
     }
-    return result;
+    return result; // Returns in insertion order (matches Python dict)
 }
 
 std::vector<Node> DiGraph::predecessors(const Node& n) const { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -151,22 +320,25 @@ std::vector<Node> DiGraph::predecessors(const Node& n) const { // Modified by Cl
     return result;
 }
 
-const EdgeData& DiGraph::get_edge_data(const Node& from, const Node& to) const { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+const EdgeData& DiGraph::get_edge_data(const Node& from, const Node& to) const { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     static EdgeData empty;
     auto it = fwd_.find(from);
     if (it == fwd_.end()) return empty;
-    auto it2 = it->second.find(to);
-    if (it2 == it->second.end()) return empty;
-    return it2->second;
+    for (const auto& [n, d] : it->second) {
+        if (n == to) return d;
+    }
+    return empty;
 }
 
 const std::set<Node>& DiGraph::get_nodes() const { return nodes_; } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+const std::vector<Node>& DiGraph::get_nodes_ordered() const { return nodes_ordered_; } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 
 size_t DiGraph::size() const { return nodes_.size(); } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
-DiGraph DiGraph::copy() const { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+DiGraph DiGraph::copy() const { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     DiGraph g;
     g.nodes_ = nodes_;
+    g.nodes_ordered_ = nodes_ordered_;
     g.fwd_ = fwd_;
     g.rev_ = rev_;
     return g;
@@ -223,16 +395,16 @@ std::vector<int> TrajectoryObj::get_times() const { // Modified by Claude (claud
 // Distance utilities
 // ============================================================
 
-float euclidean_displacement_single(const std::array<float,3>& a, const std::array<float,3>& b) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+double euclidean_displacement_single(const std::array<double,3>& a, const std::array<double,3>& b) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    double dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
     return std::sqrt(dx*dx + dy*dy + dz*dz);
 }
 
-std::vector<float> euclidean_displacement_batch(const std::vector<std::array<float,3>>& a, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                                                const std::vector<std::array<float,3>>& b) {
-    std::vector<float> result(a.size());
+std::vector<double> euclidean_displacement_batch(const std::vector<std::array<double,3>>& a, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+                                                 const std::vector<std::array<double,3>>& b) {
+    std::vector<double> result(a.size());
     for (size_t i = 0; i < a.size(); i++) {
-        float dx = a[i][0] - b[i][0], dy = a[i][1] - b[i][1], dz = a[i][2] - b[i][2];
+        double dx = a[i][0] - b[i][0], dy = a[i][1] - b[i][1], dz = a[i][2] - b[i][2];
         result[i] = std::sqrt(dx*dx + dy*dy + dz*dz);
     }
     return result;
@@ -284,9 +456,9 @@ Localizations read_localization_csv(const std::string& path, int nb_frames) { //
         while (std::getline(ss, val, ',')) vals.push_back(val);
 
         int frame = std::stoi(vals[frame_col]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        float x = std::stof(vals[x_col]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        float y = std::stof(vals[y_col]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        float z = (z_col >= 0 && z_col < (int)vals.size()) ? std::stof(vals[z_col]) : 0.0f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double x = std::stod(vals[x_col]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        double y = std::stod(vals[y_col]);
+        double z = (z_col >= 0 && z_col < (int)vals.size()) ? std::stod(vals[z_col]) : 0.0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
         locs[frame].push_back({x, y, z});
     }
 
@@ -320,15 +492,15 @@ void write_trajectory_csv(const std::string& path, // Modified by Claude (claude
 // Greedy shortest matching (segmentation helper)
 // ============================================================
 
-GreedyResult greedy_shortest(const std::vector<std::array<float,3>>& srcs, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                             const std::vector<std::array<float,3>>& dests) {
+GreedyResult greedy_shortest(const std::vector<std::array<double,3>>& srcs, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                             const std::vector<std::array<double,3>>& dests) {
     GreedyResult result;
     int ns = (int)srcs.size(), nd = (int)dests.size();
     if (ns == 0 || nd == 0) return result;
 
     // Compute all pairwise distances // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    std::vector<float> linkage(ns * nd, 0.0f);
-    std::vector<float> x_diff(ns * nd), y_diff(ns * nd), z_diff(ns * nd);
+    std::vector<double> linkage(ns * nd, 0.0); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    std::vector<double> x_diff(ns * nd), y_diff(ns * nd), z_diff(ns * nd);
     for (int i = 0; i < ns; i++) {
         for (int j = 0; j < nd; j++) {
             int idx = i * nd + j;
@@ -396,38 +568,38 @@ SegmentationResult segmentation(const Localizations& loc, const std::vector<int>
         }
     }
 
-    // Outlier filtering (2 rounds of 4*mean_std filter + diffraction limit) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float diffraction_light_limit = 10.0f;
-    auto compute_std = [](const std::vector<float>& v) -> float {
-        if (v.size() < 2) return 0.0f;
-        float mean = 0;
+    // Outlier filtering (2 rounds of 4*mean_std filter + diffraction limit) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    double diffraction_light_limit = 10.0;
+    auto compute_std = [](const std::vector<double>& v) -> double {
+        if (v.size() < 2) return 0.0;
+        double mean = 0;
         for (size_t i = 0; i + 1 < v.size(); i++) mean += v[i];
         mean /= (v.size() - 1);
-        float var = 0;
+        double var = 0;
         for (size_t i = 0; i + 1 < v.size(); i++) var += (v[i] - mean) * (v[i] - mean);
-        return std::sqrt(var / (v.size() - 2)); // sample std, n-1
+        return std::sqrt(var / (v.size() - 1)); // population std ddof=0, matching numpy np.std
     };
 
-    // Check dimensionality // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float z_var = 0;
+    // Check dimensionality
+    double z_var = 0;
     if (!result.dist_z.empty()) {
-        float z_mean = 0;
-        for (float v : result.dist_z) z_mean += v;
+        double z_mean = 0;
+        for (double v : result.dist_z) z_mean += v;
         z_mean /= result.dist_z.size();
-        for (float v : result.dist_z) z_var += (v - z_mean) * (v - z_mean);
+        for (double v : result.dist_z) z_var += (v - z_mean) * (v - z_mean);
         z_var /= result.dist_z.size();
     }
-    int ndim = (z_var < 1e-5f) ? 2 : 3; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    int ndim = (z_var < 1e-5) ? 2 : 3;
 
-    for (int round = 0; round < 2; round++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        float std_x = compute_std(result.dist_x);
-        float std_y = compute_std(result.dist_y);
-        float std_z = compute_std(result.dist_z);
-        float estim_limit = (ndim == 2) ? 4.0f * (std_x + std_y) / 2.0f
-                                        : 4.0f * (std_x + std_y + std_z) / 3.0f;
-        float filter_min = std::max(estim_limit, diffraction_light_limit);
+    for (int round = 0; round < 2; round++) {
+        double std_x = compute_std(result.dist_x);
+        double std_y = compute_std(result.dist_y);
+        double std_z = compute_std(result.dist_z);
+        double estim_limit = (ndim == 2) ? 4.0 * (std_x + std_y) / 2.0
+                                         : 4.0 * (std_x + std_y + std_z) / 3.0;
+        double filter_min = std::max(estim_limit, diffraction_light_limit);
 
-        std::vector<float> fx, fy, fz;
+        std::vector<double> fx, fy, fz;
         for (size_t i = 0; i + 1 < result.dist_x.size(); i++) {
             if (std::abs(result.dist_x[i]) < filter_min &&
                 std::abs(result.dist_y[i]) < filter_min &&
@@ -442,8 +614,8 @@ SegmentationResult segmentation(const Localizations& loc, const std::vector<int>
         result.dist_z = fz;
     }
 
-    // Final diffraction limit filter // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    std::vector<float> fx, fy, fz;
+    // Final diffraction limit filter
+    std::vector<double> fx, fy, fz;
     for (size_t i = 0; i + 1 < result.dist_x.size(); i++) {
         if (std::abs(result.dist_x[i]) < diffraction_light_limit &&
             std::abs(result.dist_y[i]) < diffraction_light_limit &&
@@ -471,74 +643,121 @@ SegmentationResult segmentation(const Localizations& loc, const std::vector<int>
 
 // Fit 1D GMM with n_components using Expectation-Maximization // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 // Returns (weights, means, variances, log_likelihood)
-struct GMM1DResult { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-    std::vector<double> weights;
-    std::vector<double> means;
-    std::vector<double> variances;
-    double log_likelihood;
+struct GMM1DResult { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<double> weights; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<double> means; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<double> variances; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    double log_likelihood; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 };
 
-// Digamma function (Stirling series approximation, matches scipy.special.digamma) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-static double digamma(double x) {
-    double result = 0.0;
-    // Shift argument to x >= 6 for series accuracy
-    while (x < 6.0) { result -= 1.0 / x; x += 1.0; }
-    // Asymptotic series: psi(x) ~ ln(x) - 1/(2x) - 1/(12x^2) + 1/(120x^4) - ...
-    double inv_x = 1.0 / x;
-    double inv_x2 = inv_x * inv_x;
-    result += std::log(x) - 0.5 * inv_x
-            - inv_x2 * (1.0/12.0 - inv_x2 * (1.0/120.0 - inv_x2 * (1.0/252.0)));
-    return result;
+static double gauss_pdf_1d(double x, double mean, double var) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    double d = x - mean; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    return std::exp(-0.5 * d * d / var) / std::sqrt(2.0 * M_PI * var); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 }
 
-static double gauss_pdf_1d(double x, double mean, double var) {
-    double d = x - mean;
-    return std::exp(-0.5 * d * d / var) / std::sqrt(2.0 * M_PI * var);
-}
+// 1D k-means for GMM initialization (matches sklearn init_params='kmeans') // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+static void kmeans_1d(const std::vector<double>& data, int n_comp,
+                      std::vector<double>& out_weights, std::vector<double>& out_means,
+                      std::vector<double>& out_vars, std::mt19937& rng) {
+    int n = (int)data.size();
+    const double reg_covar = 1e-6;
 
-// numpy-compatible linear interpolation quantile // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-static double numpy_quantile(const std::vector<double>& sorted_data, double q) {
-    int n = (int)sorted_data.size();
-    double idx = q * (n - 1);
-    int lo = (int)std::floor(idx);
-    int hi = lo + 1;
-    if (hi >= n) return sorted_data[n - 1];
-    double frac = idx - lo;
-    return sorted_data[lo] * (1.0 - frac) + sorted_data[hi] * frac;
-}
+    // k-means++ init for centroids
+    std::vector<double> centroids(n_comp);
+    std::uniform_int_distribution<int> uid(0, n - 1);
+    centroids[0] = data[uid(rng)];
+    for (int k = 1; k < n_comp; k++) {
+        std::vector<double> dists(n);
+        double total_d = 0;
+        for (int i = 0; i < n; i++) {
+            double min_d = 1e30;
+            for (int j = 0; j < k; j++) {
+                double d = (data[i] - centroids[j]) * (data[i] - centroids[j]);
+                if (d < min_d) min_d = d;
+            }
+            dists[i] = min_d;
+            total_d += min_d;
+        }
+        std::uniform_real_distribution<double> urd(0, total_d);
+        double r = urd(rng);
+        double cum = 0;
+        for (int i = 0; i < n; i++) {
+            cum += dists[i];
+            if (cum >= r) { centroids[k] = data[i]; break; }
+        }
+    }
 
-// Standard EM GMM for BIC model selection (used in GridSearchCV) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-static GMM1DResult fit_gmm_1d(const std::vector<double>& data, int n_comp,
-                               int max_iter = 100, int n_init = 3) {
+    // Run k-means iterations
+    std::vector<int> labels(n);
+    for (int iter = 0; iter < 100; iter++) {
+        // Assign
+        for (int i = 0; i < n; i++) {
+            double best_d = 1e30;
+            for (int k = 0; k < n_comp; k++) {
+                double d = (data[i] - centroids[k]) * (data[i] - centroids[k]);
+                if (d < best_d) { best_d = d; labels[i] = k; }
+            }
+        }
+        // Update centroids
+        std::vector<double> new_c(n_comp, 0);
+        std::vector<int> counts(n_comp, 0);
+        for (int i = 0; i < n; i++) { new_c[labels[i]] += data[i]; counts[labels[i]]++; }
+        bool converged = true;
+        for (int k = 0; k < n_comp; k++) {
+            if (counts[k] > 0) {
+                double nc = new_c[k] / counts[k];
+                if (std::abs(nc - centroids[k]) > 1e-8) converged = false;
+                centroids[k] = nc;
+            }
+        }
+        if (converged) break;
+    }
+
+    // Compute initial weights, means, vars from k-means labels
+    out_weights.assign(n_comp, 0);
+    out_means.assign(n_comp, 0);
+    out_vars.assign(n_comp, 0);
+    std::vector<int> counts(n_comp, 0);
+    for (int i = 0; i < n; i++) { out_means[labels[i]] += data[i]; counts[labels[i]]++; }
+    for (int k = 0; k < n_comp; k++) {
+        out_weights[k] = (double)counts[k] / n;
+        if (counts[k] > 0) out_means[k] /= counts[k];
+    }
+    for (int i = 0; i < n; i++) {
+        double d = data[i] - out_means[labels[i]];
+        out_vars[labels[i]] += d * d;
+    }
+    for (int k = 0; k < n_comp; k++) {
+        if (counts[k] > 0) out_vars[k] = out_vars[k] / counts[k] + reg_covar;
+        else out_vars[k] = reg_covar;
+    }
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+
+static GMM1DResult fit_gmm_1d(const std::vector<double>& data, int n_comp, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+                               int max_iter = 100, int n_init = 3,
+                               bool use_mean_prior = false,
+                               double mean_prior = 0.0,
+                               double mean_precision_prior = 1e7) {
     int n = (int)data.size();
     if (n == 0) return {{}, {}, {}, -1e30};
+    const double reg_covar = 1e-6; // matches sklearn default
 
     GMM1DResult best_result;
     best_result.log_likelihood = -1e30;
 
-    double data_mean = 0;
-    for (double x : data) data_mean += x;
-    data_mean /= n;
-    double data_var = 0;
-    for (double x : data) data_var += (x - data_mean) * (x - data_mean);
-    data_var /= n;
-    if (data_var < 1e-10) data_var = 1e-10;
-
     std::mt19937 rng(42);
 
     for (int init = 0; init < n_init; init++) {
-        std::vector<double> weights(n_comp, 1.0 / n_comp);
-        std::vector<double> means(n_comp, 0.0);  // means_init=[[0],...] like Python
-        std::vector<double> vars(n_comp, data_var);
+        // K-means initialization, then override means to 0 (matching sklearn with means_init)
+        std::vector<double> weights, means, vars;
+        kmeans_1d(data, n_comp, weights, means, vars, rng);
+        // Override means with means_init=[[0],[0],...]
+        for (int k = 0; k < n_comp; k++) means[k] = 0.0;
 
-        if (init > 0) {
-            std::normal_distribution<double> nd(0, std::sqrt(data_var) * 0.1);
-            for (int k = 0; k < n_comp; k++) means[k] = nd(rng);
-        }
-
+        // Responsibilities matrix
         std::vector<std::vector<double>> resp(n, std::vector<double>(n_comp));
-        double prev_ll = -1e30;
 
+        double prev_ll = -1e30;
         for (int iter = 0; iter < max_iter; iter++) {
             // E-step
             double ll = 0;
@@ -552,28 +771,37 @@ static GMM1DResult fit_gmm_1d(const std::vector<double>& data, int n_comp,
                 ll += std::log(total);
                 for (int k = 0; k < n_comp; k++) resp[i][k] /= total;
             }
+
+            // Check convergence
             if (std::abs(ll - prev_ll) < 1e-6) break;
             prev_ll = ll;
 
-            // M-step (standard ML)
+            // M-step
             for (int k = 0; k < n_comp; k++) {
                 double nk = 0;
                 for (int i = 0; i < n; i++) nk += resp[i][k];
                 if (nk < 1e-10) nk = 1e-10;
+
                 weights[k] = nk / n;
+
                 double sum_x = 0;
                 for (int i = 0; i < n; i++) sum_x += resp[i][k] * data[i];
-                means[k] = sum_x / nk;
+                if (use_mean_prior) {
+                    means[k] = (sum_x + mean_precision_prior * mean_prior) / (nk + mean_precision_prior);
+                } else {
+                    means[k] = sum_x / nk;
+                }
+
                 double sum_var = 0;
                 for (int i = 0; i < n; i++) {
                     double d = data[i] - means[k];
                     sum_var += resp[i][k] * d * d;
                 }
-                vars[k] = sum_var / nk;
-                if (vars[k] < 1e-10) vars[k] = 1e-10;
+                vars[k] = sum_var / nk + reg_covar;
             }
         }
 
+        // Compute final log-likelihood
         double ll = 0;
         for (int i = 0; i < n; i++) {
             double total = 0;
@@ -581,6 +809,7 @@ static GMM1DResult fit_gmm_1d(const std::vector<double>& data, int n_comp,
             if (total < 1e-300) total = 1e-300;
             ll += std::log(total);
         }
+
         if (ll > best_result.log_likelihood) {
             best_result.weights = weights;
             best_result.means = means;
@@ -589,266 +818,370 @@ static GMM1DResult fit_gmm_1d(const std::vector<double>& data, int n_comp,
         }
     }
     return best_result;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+
+// BIC score for 1D GMM: -2*LL + k*log(n) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+static double gmm_bic(const GMM1DResult& result, int n_comp, int n_data) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    int n_params = 3 * n_comp - 1; // weights(k-1) + means(k) + vars(k) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    return -2.0 * result.log_likelihood + n_params * std::log((double)n_data); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 }
 
-// BIC score matching sklearn: -2*LL + k*log(n) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-static double gmm_bic(const GMM1DResult& result, int n_comp, int n_data) {
-    int n_params = 3 * n_comp - 1;
-    return -2.0 * result.log_likelihood + n_params * std::log((double)n_data);
-}
-
-// Compute BIC of a fitted model on test data (for cross-validation) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-static double gmm_bic_on_data(const GMM1DResult& model, int n_comp,
-                               const std::vector<double>& test_data) {
-    int n_test = (int)test_data.size();
-    if (n_test == 0) return 1e30;
+// Compute log-likelihood of test data given fitted GMM parameters // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+static double gmm_score(const GMM1DResult& model, const std::vector<double>& test_data) {
     double ll = 0;
-    for (int i = 0; i < n_test; i++) {
+    int n_comp = (int)model.weights.size();
+    for (double x : test_data) {
         double total = 0;
-        for (int k = 0; k < n_comp; k++)
-            total += model.weights[k] * gauss_pdf_1d(test_data[i], model.means[k], model.variances[k]);
+        for (int k = 0; k < n_comp; k++) {
+            total += model.weights[k] * gauss_pdf_1d(x, model.means[k], model.variances[k]);
+        }
         if (total < 1e-300) total = 1e-300;
         ll += std::log(total);
     }
-    int n_params = 3 * n_comp - 1;
-    return -2.0 * ll + n_params * std::log((double)n_test);
+    return ll;
 }
 
 // 5-fold CV BIC model selection (matches sklearn GridSearchCV) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-static int select_n_components_cv(const std::vector<double>& data, int n_folds = 5) {
+static int gmm_cv_bic_select(const std::vector<double>& data, int max_comp = 3) {
     int n = (int)data.size();
-    int best_nc = 1;
-    double best_avg_bic = 1e30;
+    int n_folds = 5;
 
-    for (int nc = 1; nc <= 3; nc++) {
+    // Create fold indices (contiguous blocks, matching sklearn KFold default)
+    std::vector<int> fold_ids(n);
+    int fold_size = n / n_folds;
+    int remainder = n % n_folds;
+    int idx = 0;
+    for (int f = 0; f < n_folds; f++) {
+        int sz = fold_size + (f < remainder ? 1 : 0);
+        for (int j = 0; j < sz; j++) fold_ids[idx++] = f;
+    }
+
+    int best_nc = 1;
+    double best_mean_bic = 1e30;
+
+    for (int nc = 1; nc <= max_comp; nc++) {
         double bic_sum = 0;
         for (int fold = 0; fold < n_folds; fold++) {
-            // Split: fold-th portion is test, rest is train
             std::vector<double> train, test;
             for (int i = 0; i < n; i++) {
-                if (i % n_folds == fold) test.push_back(data[i]);
+                if (fold_ids[i] == fold) test.push_back(data[i]);
                 else train.push_back(data[i]);
             }
-            auto model = fit_gmm_1d(train, nc, 100, 3);
-            bic_sum += gmm_bic_on_data(model, nc, test);
+            // Fit on train
+            auto model = fit_gmm_1d(train, nc, 100, 3, false);
+            // BIC on test: -2*LL + n_params*log(n_test)
+            double test_ll = gmm_score(model, test);
+            int n_params = 3 * nc - 1;
+            double bic = -2.0 * test_ll + n_params * std::log((double)test.size());
+            bic_sum += bic;
         }
-        double avg_bic = bic_sum / n_folds;
-        if (avg_bic < best_avg_bic) {
-            best_avg_bic = avg_bic;
+        double mean_bic = bic_sum / n_folds;
+        if (mean_bic < best_mean_bic) {
+            best_mean_bic = mean_bic;
             best_nc = nc;
         }
     }
     return best_nc;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+
+// np.quantile linear interpolation (method='linear', default) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+static double np_quantile(const std::vector<double>& sorted_data, double q) {
+    int n = (int)sorted_data.size();
+    double idx = q * (n - 1);
+    int lo = (int)std::floor(idx);
+    int hi = (int)std::ceil(idx);
+    if (lo == hi || hi >= n) return sorted_data[lo];
+    double frac = idx - lo;
+    return sorted_data[lo] * (1.0 - frac) + sorted_data[hi] * frac;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+
+// ============================================================ // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 16:30
+// Variational Bayesian GMM (1D, full covariance)
+// Matches sklearn BayesianGaussianMixture with:
+//   weight_concentration_prior_type='dirichlet_process'
+//   covariance_type='full', mean_prior=[0], mean_precision_prior=1e7
+// ============================================================
+
+// digamma (psi) function via asymptotic expansion
+static double digamma_fn(double x) {
+    double result = 0;
+    // Shift x to x >= 6 using psi(x) = psi(x+1) - 1/x
+    while (x < 6.0) { result -= 1.0 / x; x += 1.0; }
+    // Asymptotic: psi(x) ~ ln(x) - 1/(2x) - 1/(12x^2) + 1/(120x^4) - 1/(252x^6)
+    double inv_x = 1.0 / x;
+    double inv_x2 = inv_x * inv_x;
+    result += std::log(x) - 0.5 * inv_x
+              - inv_x2 * (1.0/12.0 - inv_x2 * (1.0/120.0 - inv_x2 / 252.0));
+    return result;
 }
 
-// Variational Bayesian GMM matching sklearn BayesianGaussianMixture // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-// Implements Dirichlet Process weights, Normal-Wishart conjugate priors.
-static GMM1DResult fit_bayesian_gmm_1d(const std::vector<double>& data, int n_comp,
-                                        int max_iter = 100, int n_init = 3,
-                                        double mean_prior_val = 0.0,
-                                        double mean_precision_prior = 1e7) {
+static GMM1DResult fit_bgmm_1d(const std::vector<double>& data, int n_comp,
+                                int max_iter = 100, int n_init = 3,
+                                double mean_prior_val = 0.0,
+                                double mean_precision_prior = 1e7) {
     int n = (int)data.size();
     if (n == 0) return {{}, {}, {}, -1e30};
+    const double reg_covar = 1e-6;
+    const double tol = 1e-3; // sklearn default for BGMM
 
-    // Compute priors from data (matching sklearn defaults)
+    // Compute priors from data
     double data_mean = 0;
     for (double x : data) data_mean += x;
     data_mean /= n;
-    // covariance_prior = np.cov(X.T) for 1D = sample variance with ddof=1
-    double cov_prior = 0;
-    for (double x : data) cov_prior += (x - data_mean) * (x - data_mean);
-    cov_prior /= (n - 1);  // Bessel correction (ddof=1)
-    if (cov_prior < 1e-10) cov_prior = 1e-10;
+    double data_cov = 0; // np.cov with ddof=1
+    for (double x : data) data_cov += (x - data_mean) * (x - data_mean);
+    data_cov /= (n - 1);
 
-    double dof_prior = 1.0;  // n_features = 1
-    double weight_conc_prior = 1.0 / n_comp;  // sklearn default
+    double weight_conc_prior = 1.0 / n_comp; // sklearn default
+    double dof_prior = 1.0;        // n_features = 1
+    double cov_prior = data_cov;   // np.cov(X.T) for 1D
 
+    std::mt19937 rng(42);
     GMM1DResult best_result;
     best_result.log_likelihood = -1e30;
 
-    double data_var = cov_prior * (n - 1.0) / n;  // population variance for init
-
-    std::mt19937 rng(42);
-
     for (int init = 0; init < n_init; init++) {
-        // Initialize parameters
-        std::vector<double> means(n_comp, 0.0);
-        std::vector<double> covars(n_comp, data_var);  // W_k / dof_k (normalized)
-        std::vector<double> mean_prec(n_comp, mean_precision_prior);
-        std::vector<double> dof(n_comp, dof_prior + (double)n / n_comp);
+        // K-means initialization → hard responsibilities
+        std::vector<double> km_w, km_m, km_v;
+        kmeans_1d(data, n_comp, km_w, km_m, km_v, rng);
 
-        // Dirichlet Process: two-parameter beta representation
-        std::vector<double> wc_a(n_comp, 1.0);
-        std::vector<double> wc_b(n_comp, weight_conc_prior);
-
-        if (init > 0) {
-            std::normal_distribution<double> nd(0, std::sqrt(data_var) * 0.1);
-            for (int k = 0; k < n_comp; k++) means[k] = nd(rng);
+        // Compute initial responsibilities from k-means labels
+        // Recompute labels from centroids
+        std::vector<int> labels(n);
+        for (int i = 0; i < n; i++) {
+            double best_d = 1e30;
+            for (int k = 0; k < n_comp; k++) {
+                double d = (data[i] - km_m[k]) * (data[i] - km_m[k]);
+                if (d < best_d) { best_d = d; labels[i] = k; }
+            }
         }
 
-        std::vector<std::vector<double>> resp(n, std::vector<double>(n_comp));
-        double prev_lb = -1e30;
+        // Compute initial nk, xk, sk from hard responsibilities
+        std::vector<double> nk(n_comp, 0), xk(n_comp, 0), sk(n_comp, 0);
+        for (int i = 0; i < n; i++) { nk[labels[i]] += 1.0; xk[labels[i]] += data[i]; }
+        double eps10 = 10.0 * 2.2e-16; // 10 * np.finfo(float64).eps
+        for (int k = 0; k < n_comp; k++) {
+            nk[k] += eps10;
+            xk[k] /= nk[k];
+        }
+        for (int i = 0; i < n; i++) {
+            double d = data[i] - xk[labels[i]];
+            sk[labels[i]] += d * d;
+        }
+        for (int k = 0; k < n_comp; k++) {
+            sk[k] = sk[k] / nk[k] + reg_covar;
+        }
 
-        for (int iter = 0; iter < max_iter; iter++) {
-            // E-step: compute responsibilities using variational expectations
-            // E[log π_k] from Dirichlet Process (stick-breaking)
-            std::vector<double> log_weights(n_comp, 0.0);
-            double cumsum_digamma_b = 0.0;
-            for (int k = 0; k < n_comp; k++) {
-                double dg_sum = digamma(wc_a[k] + wc_b[k]);
-                double dg_a = digamma(wc_a[k]);
-                double dg_b = digamma(wc_b[k]);
-                log_weights[k] = dg_a - dg_sum + cumsum_digamma_b;
-                cumsum_digamma_b += dg_b - dg_sum;
-            }
-
-            // E[log |Λ_k|] for 1D Wishart: digamma((dof_k+1)/2) + log(2) - log(W_k)
-            // where W_k = covars[k] * dof[k] (un-normalized)
-            std::vector<double> log_det_prec(n_comp);
-            for (int k = 0; k < n_comp; k++) {
-                double Wk = covars[k] * dof[k];
-                log_det_prec[k] = digamma(0.5 * (dof[k] + 1.0)) + std::log(2.0) - std::log(Wk);
-            }
-
-            double lb = 0;
-            for (int i = 0; i < n; i++) {
-                double max_log = -1e30;
-                for (int k = 0; k < n_comp; k++) {
-                    double d = data[i] - means[k];
-                    // Expected Mahalanobis: d/mean_prec_k + dof_k * d^2 / W_k
-                    // = 1/mean_prec_k + d^2 / covars_k  (since covars_k = W_k/dof_k)
-                    double mahal = 1.0 / mean_prec[k] + d * d / covars[k];
-                    resp[i][k] = log_weights[k] + 0.5 * log_det_prec[k]
-                               - 0.5 * std::log(2.0 * M_PI) - 0.5 * mahal;
-                    // Subtract 0.5 * log(dof_k) because covars is normalized (sklearn line 769)
-                    resp[i][k] -= 0.5 * std::log(dof[k]);
-                    if (resp[i][k] > max_log) max_log = resp[i][k];
-                }
-                // Log-sum-exp for numerical stability
-                double total = 0;
-                for (int k = 0; k < n_comp; k++) {
-                    resp[i][k] = std::exp(resp[i][k] - max_log);
-                    total += resp[i][k];
-                }
-                if (total < 1e-300) total = 1e-300;
-                lb += std::log(total) + max_log;
-                for (int k = 0; k < n_comp; k++) resp[i][k] /= total;
-            }
-
-            if (std::abs(lb - prev_lb) < 1e-6) break;
-            prev_lb = lb;
-
-            // M-step: update variational parameters
-            std::vector<double> nk(n_comp, 0.0);
-            std::vector<double> xk(n_comp, 0.0);
-            std::vector<double> sk(n_comp, 0.0);
-
-            for (int k = 0; k < n_comp; k++) {
-                for (int i = 0; i < n; i++) nk[k] += resp[i][k];
-                if (nk[k] < 1e-10) nk[k] = 1e-10;
-                for (int i = 0; i < n; i++) xk[k] += resp[i][k] * data[i];
-                xk[k] /= nk[k];  // weighted mean x_bar_k
-                for (int i = 0; i < n; i++) {
-                    double d = data[i] - xk[k];
-                    sk[k] += resp[i][k] * d * d;
-                }
-                sk[k] /= nk[k];  // weighted variance S_k (normalized by nk)
-            }
-
-            // Update weights (Dirichlet Process stick-breaking)
-            // wc_a[k] = 1 + nk[k]
-            // wc_b[k] = weight_conc_prior + sum(nk[k+1:])
+        // Initialize posterior parameters via M-step
+        // Weights (Dirichlet Process: stick-breaking)
+        std::vector<double> wc_a(n_comp), wc_b(n_comp);
+        { // cumsum of nk reversed
+            std::vector<double> nk_rev(nk.rbegin(), nk.rend());
+            std::vector<double> cs(n_comp, 0);
+            cs[0] = nk_rev[0];
+            for (int k = 1; k < n_comp; k++) cs[k] = cs[k-1] + nk_rev[k];
+            // reverse back and shift: [cs[-2], cs[-3], ..., cs[0], 0]
             for (int k = 0; k < n_comp; k++) {
                 wc_a[k] = 1.0 + nk[k];
-                double tail_sum = 0;
-                for (int j = k + 1; j < n_comp; j++) tail_sum += nk[j];
-                wc_b[k] = weight_conc_prior + tail_sum;
+                wc_b[k] = (k < n_comp - 1) ? weight_conc_prior + cs[n_comp - 2 - k] : weight_conc_prior;
+            }
+        }
+
+        // Means
+        std::vector<double> mean_prec(n_comp), means(n_comp);
+        for (int k = 0; k < n_comp; k++) {
+            mean_prec[k] = mean_precision_prior + nk[k];
+            means[k] = (mean_precision_prior * mean_prior_val + nk[k] * xk[k]) / mean_prec[k];
+        }
+
+        // Wishart (covariances and degrees of freedom)
+        std::vector<double> dof(n_comp), covs(n_comp);
+        for (int k = 0; k < n_comp; k++) {
+            dof[k] = dof_prior + nk[k];
+            double diff = xk[k] - mean_prior_val;
+            covs[k] = (cov_prior + nk[k] * sk[k] + nk[k] * mean_precision_prior / mean_prec[k] * diff * diff) / dof[k];
+        }
+
+        // Compute precisions for E-step
+        std::vector<double> prec(n_comp);
+        for (int k = 0; k < n_comp; k++) prec[k] = 1.0 / covs[k];
+
+        double prev_lower_bound = -1e30;
+
+        for (int iter = 0; iter < max_iter; iter++) {
+            // E-step: compute log responsibilities
+            // log_weights (Dirichlet Process stick-breaking)
+            std::vector<double> log_weights(n_comp);
+            {
+                std::vector<double> dig_sum(n_comp), dig_a(n_comp), dig_b(n_comp);
+                for (int k = 0; k < n_comp; k++) {
+                    dig_sum[k] = digamma_fn(wc_a[k] + wc_b[k]);
+                    dig_a[k] = digamma_fn(wc_a[k]);
+                    dig_b[k] = digamma_fn(wc_b[k]);
+                }
+                // log_weights[0] = dig_a[0] - dig_sum[0]
+                // log_weights[k] = dig_a[k] - dig_sum[k] + sum(dig_b[j] - dig_sum[j], j=0..k-1)
+                double cum = 0;
+                for (int k = 0; k < n_comp; k++) {
+                    log_weights[k] = dig_a[k] - dig_sum[k] + cum;
+                    cum += dig_b[k] - dig_sum[k];
+                }
             }
 
-            // Update means (Normal conjugate)
-            // mean_precision_k = mean_precision_prior + nk
-            // mean_k = (mean_precision_prior * mean_prior + nk * x_bar) / mean_precision_k
+            // log_prob for each data point and component
+            // For 1D full: log_lambda = log(2) + digamma(0.5 * dof[k])
+            // log_prob = log_gauss - 0.5*log(dof[k]) + 0.5*(log_lambda - 1/mean_prec[k])
+            // log_gauss = -0.5*log(2*pi) + 0.5*log(prec[k]) - 0.5*prec[k]*(x-mean[k])^2
+            // But sklearn normalizes precision by dof, so:
+            // log_gauss uses precisions_cholesky_ = sqrt(1/covs[k]) which gives prec = 1/covs[k]
+            // Then subtracts 0.5*n_features*log(dof[k]) = 0.5*log(dof[k])
+
+            std::vector<double> log_lambda(n_comp);
+            for (int k = 0; k < n_comp; k++) {
+                log_lambda[k] = std::log(2.0) + digamma_fn(0.5 * dof[k]);
+            }
+
+            // Compute log_resp and log_prob_norm (for ELBO)
+            std::vector<std::vector<double>> log_resp(n, std::vector<double>(n_comp));
+            double log_prob_norm_sum = 0;
+
+            for (int i = 0; i < n; i++) {
+                double max_lr = -1e30;
+                for (int k = 0; k < n_comp; k++) {
+                    double d = data[i] - means[k];
+                    // log_gauss (using precision = 1/covs[k], but NOT divided by dof yet)
+                    double log_gauss = -0.5 * std::log(2.0 * M_PI)
+                                       + 0.5 * std::log(prec[k])
+                                       - 0.5 * prec[k] * d * d;
+                    // Subtract 0.5*log(dof[k]) per sklearn
+                    log_gauss -= 0.5 * std::log(dof[k]);
+                    // Add log_lambda and mean_precision correction
+                    double log_prob = log_gauss + 0.5 * (log_lambda[k] - 1.0 / mean_prec[k]);
+                    log_resp[i][k] = log_weights[k] + log_prob;
+                    if (log_resp[i][k] > max_lr) max_lr = log_resp[i][k];
+                }
+                // Log-sum-exp normalization
+                double lse = 0;
+                for (int k = 0; k < n_comp; k++) lse += std::exp(log_resp[i][k] - max_lr);
+                double log_norm = max_lr + std::log(lse);
+                log_prob_norm_sum += log_norm;
+                for (int k = 0; k < n_comp; k++) log_resp[i][k] -= log_norm;
+            }
+
+            // M-step: compute sufficient statistics
+            std::fill(nk.begin(), nk.end(), 0);
+            std::fill(xk.begin(), xk.end(), 0);
+            std::fill(sk.begin(), sk.end(), 0);
+            for (int i = 0; i < n; i++) {
+                for (int k = 0; k < n_comp; k++) {
+                    double r = std::exp(log_resp[i][k]);
+                    nk[k] += r;
+                    xk[k] += r * data[i];
+                }
+            }
+            for (int k = 0; k < n_comp; k++) {
+                nk[k] += eps10;
+                xk[k] /= nk[k];
+            }
+            for (int i = 0; i < n; i++) {
+                for (int k = 0; k < n_comp; k++) {
+                    double r = std::exp(log_resp[i][k]);
+                    double d = data[i] - xk[k];
+                    sk[k] += r * d * d;
+                }
+            }
+            for (int k = 0; k < n_comp; k++) {
+                sk[k] = sk[k] / nk[k] + reg_covar;
+            }
+
+            // Update weights (Dirichlet Process)
+            {
+                std::vector<double> nk_rev(nk.rbegin(), nk.rend());
+                std::vector<double> cs(n_comp, 0);
+                cs[0] = nk_rev[0];
+                for (int j = 1; j < n_comp; j++) cs[j] = cs[j-1] + nk_rev[j];
+                for (int k = 0; k < n_comp; k++) {
+                    wc_a[k] = 1.0 + nk[k];
+                    wc_b[k] = (k < n_comp - 1) ? weight_conc_prior + cs[n_comp - 2 - k] : weight_conc_prior;
+                }
+            }
+
+            // Update means
             for (int k = 0; k < n_comp; k++) {
                 mean_prec[k] = mean_precision_prior + nk[k];
                 means[k] = (mean_precision_prior * mean_prior_val + nk[k] * xk[k]) / mean_prec[k];
             }
 
-            // Update covariances (Wishart conjugate)
-            // dof_k = dof_prior + nk
-            // W_k = cov_prior + nk*S_k + nk*beta0/beta_k * (x_bar_k - m0)^2
-            // covars_k = W_k / dof_k (normalized, matching sklearn line 628)
+            // Update Wishart
             for (int k = 0; k < n_comp; k++) {
                 dof[k] = dof_prior + nk[k];
                 double diff = xk[k] - mean_prior_val;
-                double Wk = cov_prior + nk[k] * sk[k]
-                          + nk[k] * mean_precision_prior / mean_prec[k] * diff * diff;
-                covars[k] = Wk / dof[k];
-                if (covars[k] < 1e-10) covars[k] = 1e-10;
+                covs[k] = (cov_prior + nk[k] * sk[k] + nk[k] * mean_precision_prior / mean_prec[k] * diff * diff) / dof[k];
+                prec[k] = 1.0 / covs[k];
             }
+
+            // Convergence check on total ELBO (matching sklearn's tol on total lower bound)
+            double lower_bound = log_prob_norm_sum;
+            double change = lower_bound - prev_lower_bound;
+            if (std::abs(change) < tol) break;
+            prev_lower_bound = lower_bound;
         }
 
-        // Compute weights from DP parameters (matching sklearn _set_parameters)
+        // Compute final weights via stick-breaking: E[V_k] = a_k/(a_k+b_k)
         std::vector<double> weights(n_comp);
         {
-            std::vector<double> stick_remaining(n_comp);
+            double remaining = 1.0;
             for (int k = 0; k < n_comp; k++) {
-                double sum_ab = wc_a[k] + wc_b[k];
-                double ratio_b = wc_b[k] / sum_ab;
-                double ratio_a = wc_a[k] / sum_ab;
-                stick_remaining[k] = ratio_b;
-                weights[k] = ratio_a;
-                if (k > 0) {
-                    double prod = 1.0;
-                    for (int j = 0; j < k; j++) prod *= stick_remaining[j];
-                    weights[k] *= prod;
-                }
+                double ev = wc_a[k] / (wc_a[k] + wc_b[k]);
+                weights[k] = ev * remaining;
+                remaining *= (1.0 - ev);
             }
+            // Normalize
             double wsum = 0;
-            for (int k = 0; k < n_comp; k++) wsum += weights[k];
-            if (wsum > 0) for (int k = 0; k < n_comp; k++) weights[k] /= wsum;
+            for (double w : weights) wsum += w;
+            for (double& w : weights) w /= wsum;
         }
 
-        // Use lower bound as comparison metric across inits
-        double lb = prev_lb;
-        if (lb > best_result.log_likelihood) {
+        // Use ELBO as comparison metric across inits
+        if (prev_lower_bound > best_result.log_likelihood) {
             best_result.weights = weights;
             best_result.means = means;
-            best_result.variances = covars;  // These are W_k/dof_k = actual covariances
-            best_result.log_likelihood = lb;
+            best_result.variances = covs; // posterior covariances (W_k/dof_k)
+            best_result.log_likelihood = prev_lower_bound;
         }
     }
-    return best_result; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-}
+    return best_result;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 16:30
 
-// approx_gauss: GMM-based jump threshold (matches Python sklearn pipeline) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-static float approx_gauss(const std::vector<std::vector<float>>& distributions) {
-    float min_euclid = 5.0f;
-    std::vector<float> max_xyz;
+// approx_gauss: full GMM-based jump threshold estimation (matches Python) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+static double approx_gauss(const std::vector<std::vector<double>>& distributions) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    double min_euclid = 5.0;
+    std::vector<double> max_xyz;
 
-    for (const auto& raw_dist : distributions) {
+    for (const auto& raw_dist : distributions) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
         if (raw_dist.empty()) continue;
 
         // Check variance
         double mean_v = 0;
-        for (float x : raw_dist) mean_v += x;
+        for (double x : raw_dist) mean_v += x;
         mean_v /= raw_dist.size();
         double var_v = 0;
-        for (float x : raw_dist) var_v += (x - mean_v) * (x - mean_v);
+        for (double x : raw_dist) var_v += (x - mean_v) * (x - mean_v);
         var_v /= raw_dist.size();
         if (var_v <= 1e-5) continue;
 
-        // Quantile filter (2.5% - 97.5%) with numpy-compatible interpolation
+        // Quantile filter (2.5% - 97.5%) with np.quantile-compatible interpolation // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
         std::vector<double> sorted_dist(raw_dist.begin(), raw_dist.end());
         std::sort(sorted_dist.begin(), sorted_dist.end());
-        double q025 = numpy_quantile(sorted_dist, 0.025);
-        double q975 = numpy_quantile(sorted_dist, 0.975);
+        double q025 = np_quantile(sorted_dist, 0.025);
+        double q975 = np_quantile(sorted_dist, 0.975);
         std::vector<double> filtered;
-        for (float x : raw_dist) {
-            if ((double)x > q025 && (double)x < q975) filtered.push_back((double)x);
+        for (double x : raw_dist) {
+            if (x > q025 && x < q975) filtered.push_back(x);
         }
         if (filtered.empty()) continue;
 
-        // Recheck variance after filtering
+        // Recheck variance after filtering // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
         double fmean = 0;
         for (double x : filtered) fmean += x;
         fmean /= filtered.size();
@@ -857,108 +1190,116 @@ static float approx_gauss(const std::vector<std::vector<float>>& distributions) 
         fvar /= filtered.size();
         if (fvar <= 1e-5) continue;
 
-        // 5-fold CV BIC model selection (matches sklearn GridSearchCV)
-        int best_n_comp = select_n_components_cv(filtered, 5);
-        fprintf(stderr, "  GMM dim: n=%d, CV best_nc=%d\n", (int)filtered.size(), best_n_comp);
+        // 5-fold CV BIC model selection (matches sklearn GridSearchCV) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        int best_n_comp = gmm_cv_bic_select(filtered, 3);
 
-        // Bayesian GMM with Wishart/DP priors (matches sklearn BayesianGaussianMixture)
-        auto cluster = fit_bayesian_gmm_1d(filtered, best_n_comp, 100, 3, 0.0, 1e7);
+        // Variational Bayesian GMM (matches sklearn BayesianGaussianMixture) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        auto cluster = fit_bgmm_1d(filtered, best_n_comp, 100, 3, 0.0, 1e7);
 
-        // Select components near zero with weight > 0.05
-        std::vector<double> selec_var;
-        for (int k = 0; k < best_n_comp; k++) {
-            fprintf(stderr, "    comp[%d]: mean=%.6f, var=%.6f, weight=%.6f\n",
-                    k, cluster.means[k], cluster.variances[k], cluster.weights[k]);
-            if (cluster.means[k] > -1.0 && cluster.means[k] < 1.0 && cluster.weights[k] > 0.05) {
-                selec_var.push_back(cluster.variances[k]);
+        // Select components near zero with weight > 0.05 // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::vector<double> selec_var; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        for (int k = 0; k < best_n_comp; k++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            if (cluster.means[k] > -1.0 && cluster.means[k] < 1.0 && cluster.weights[k] > 0.05) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                selec_var.push_back(cluster.variances[k]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
             }
         }
-        if (selec_var.empty()) { fprintf(stderr, "    NO components selected!\n"); continue; }
+        if (selec_var.empty()) continue;
 
+        // Take the component with largest variance // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         double max_var = *std::max_element(selec_var.begin(), selec_var.end());
-        max_xyz.push_back((float)(std::sqrt(max_var) * 2.5));
+        max_xyz.push_back(std::sqrt(max_var) * 2.5); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     }
 
-    float max_euclid_sq = 0;
-    for (float v : max_xyz) max_euclid_sq += v * v;
+    // Compute Euclidean norm across dimensions // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    double max_euclid_sq = 0;
+    for (double v : max_xyz) max_euclid_sq += v * v;
     return std::max(std::sqrt(max_euclid_sq), min_euclid); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 }
 
-std::map<int, float> approximation(const std::vector<float>& dist_x, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                                   const std::vector<float>& dist_y,
-                                   const std::vector<float>& dist_z,
+std::map<int, double> approximation(const std::vector<double>& dist_x, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+                                   const std::vector<double>& dist_y,
+                                   const std::vector<double>& dist_z,
                                    int time_forecast, float jump_threshold) {
-    std::map<int, float> approx;
-    if (jump_threshold > 0) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        for (int t = 0; t <= time_forecast; t++) approx[t] = jump_threshold;
+    std::map<int, double> approx;
+    if (jump_threshold > 0) {
+        for (int t = 0; t <= time_forecast; t++) approx[t] = (double)jump_threshold;
     } else {
-        // Full GMM-based threshold estimation (matches Python approx_gauss) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::vector<std::vector<float>> distributions; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        distributions.push_back(dist_x); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        distributions.push_back(dist_y); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        if (!dist_z.empty()) distributions.push_back(dist_z); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        float max_euclid = approx_gauss(distributions); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        // Full GMM-based threshold estimation (matches Python approx_gauss)
+        std::vector<std::vector<double>> distributions;
+        distributions.push_back(dist_x);
+        distributions.push_back(dist_y);
+        if (!dist_z.empty()) distributions.push_back(dist_z);
+        double max_euclid = approx_gauss(distributions);
         for (int t = 0; t <= time_forecast; t++) approx[t] = max_euclid;
     }
     return approx;
-}
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 
 // ============================================================
 // Empirical PDF
 // ============================================================
 
-void build_emp_pdf(const std::vector<float>& emp_distribution, int nb_bins, float max_val) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    g_emp_nb_bins = nb_bins;
-    g_emp_max_val = max_val;
-    g_emp_bins.resize(nb_bins + 1);
-    for (int i = 0; i <= nb_bins; i++) g_emp_bins[i] = max_val * i / nb_bins;
+void build_emp_pdf(const std::vector<double>& emp_distribution, int nb_bins, float max_val) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    // nb_bins = number of edge points (matching Python np.linspace(0, 20, 40) = 40 edges)
+    // Actual histogram bins = nb_bins - 1 (39 bins, matching np.histogram)
+    int n_edges = nb_bins;  // 40 edges
+    int n_hist_bins = n_edges - 1;  // 39 bins
+    g_emp_nb_bins = n_edges;  // store edge count for lookup (matching Python len(EMP_BINS)=40)
+    g_emp_max_val = (double)max_val;
+    g_emp_bins.resize(n_edges);
+    for (int i = 0; i < n_edges; i++) g_emp_bins[i] = (double)max_val * (double)i / (double)(n_edges - 1);
 
-    std::vector<float> data; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<double> data;
     if ((int)emp_distribution.size() < 1000) {
-        // Generate exponential(1.0) samples // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         std::mt19937 rng(42);
-        std::exponential_distribution<float> exp_dist(1.0f);
+        std::exponential_distribution<double> exp_dist(1.0);
         data.resize(10000);
         for (auto& v : data) v = exp_dist(rng);
     } else {
         data = emp_distribution;
     }
 
-    // Compute histogram (density=True) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    g_emp_pdf.assign(nb_bins, 0.0f);
-    for (float v : data) {
-        int bin = (int)(v / max_val * nb_bins);
-        if (bin >= 0 && bin < nb_bins) g_emp_pdf[bin] += 1.0f;
+    // Compute histogram with n_hist_bins bins using n_edges bin edges
+    // Matching np.histogram(data, bins=EMP_BINS, density=True)
+    g_emp_pdf.assign(n_hist_bins, 0.0);
+    double bin_width = g_emp_bins[1] - g_emp_bins[0]; // uniform bin width
+    for (double v : data) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        // Use binary search via std::upper_bound (matching numpy bin assignment)
+        auto it = std::upper_bound(g_emp_bins.begin(), g_emp_bins.end(), v);
+        int bin = (int)(it - g_emp_bins.begin()) - 1;
+        // Last bin includes right edge: edge[-2] <= v <= edge[-1]
+        if (bin == n_hist_bins && v == g_emp_bins.back()) bin = n_hist_bins - 1;
+        if (bin >= 0 && bin < n_hist_bins) g_emp_pdf[bin] += 1.0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     }
-    // Normalize to density // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float bin_width = max_val / nb_bins;
-    float total = 0;
-    for (float c : g_emp_pdf) total += c;
+    // Normalize to density: count / (total * bin_width)
+    double total = 0;
+    for (double c : g_emp_pdf) total += c;
     if (total > 0) {
-        for (float& c : g_emp_pdf) c /= (total * bin_width);
+        for (double& c : g_emp_pdf) c /= (total * bin_width);
     }
-}
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 
-float empirical_pdf_lookup(const std::array<float,3>& coords) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float jump_d = std::sqrt(coords[0]*coords[0] + coords[1]*coords[1] + coords[2]*coords[2]);
-    int idx = (int)std::min(jump_d / g_emp_bins.back() * g_emp_nb_bins, (float)(g_emp_nb_bins - 1));
-    idx = std::max(0, idx);
-    return std::log(g_emp_pdf[idx] + 1e-7f);
+double empirical_pdf_lookup(const std::array<double,3>& coords) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    // Match Python: idx = int(min((jump_d / EMP_BINS[-1] * len(EMP_BINS)), len(EMP_BINS) - 1))
+    double jump_d = std::sqrt(coords[0]*coords[0] + coords[1]*coords[1] + coords[2]*coords[2]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    int idx = (int)std::min(jump_d / g_emp_bins.back() * (double)g_emp_nb_bins, (double)(g_emp_nb_bins - 1));
+    idx = std::max(0, std::min(idx, (int)g_emp_pdf.size() - 1));
+    return std::log(g_emp_pdf[idx] + 1e-7); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 }
 
 // ============================================================
 // Regularization helpers (for predict_cauchy_tracking)
 // ============================================================
 
-static float scaling_func(float numer) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    return std::max(0.0f, std::min(2.0f, -std::log10(std::abs(numer))));
+static double scaling_func(double numer) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    return std::max(0.0, std::min(2.0, -std::log10(std::abs(numer))));
 }
 
-static float regularization(float numer, float denom, float expect) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    if (numer < 0) numer -= 2e-1f; else numer += 2e-1f;
-    if (denom < 0) denom -= 2e-1f; else denom += 2e-1f;
-    float scaler = std::min(std::sqrt(scaling_func(numer) + 2.0f * scaling_func(denom)) / 2.0f, 1.0f);
-    float scaled_ratio = (numer / denom) + (expect - numer / denom) * std::pow(scaler, 1.0f / 3.0f);
+static double regularization(double numer, double denom, double expect) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    if (numer < 0) numer -= 2e-1; else numer += 2e-1;
+    if (denom < 0) denom -= 2e-1; else denom += 2e-1;
+    double scaler = std::min(std::sqrt(scaling_func(numer) + 2.0 * scaling_func(denom)) / 2.0, 1.0);
+    double scaled_ratio = (numer / denom) + (expect - numer / denom) * std::pow(scaler, 1.0 / 3.0);
     return scaled_ratio;
 }
 
@@ -966,79 +1307,86 @@ static float regularization(float numer, float denom, float expect) { // Modifie
 // Cauchy cost (tracking version)
 // ============================================================
 
-CauchyResult predict_cauchy_tracking(const std::array<float,3>& next_vec, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                                     const std::array<float,3>& prev_vec,
+CauchyResult predict_cauchy_tracking(const std::array<double,3>& next_vec, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+                                     const std::array<double,3>& prev_vec,
                                      float k, float alpha,
                                      int before_lag, int lag,
                                      float precision, int dimension) {
-    CauchyResult result = {0.0f, false};
-    float delta_s = (float)(before_lag + 1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float delta_t = (float)(lag + 1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    CauchyResult result = {0.0, false};
+    double d_alpha = (double)alpha;
+    double delta_s = (double)(before_lag + 1);
+    double delta_t = (double)(lag + 1);
 
-    if (std::abs(alpha - 1.0f) < 1e-4f) alpha += 1e-4f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float rho = std::pow(2.0f, alpha - 1.0f) - 1.0f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float std_ratio = std::sqrt( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        (std::pow(2.0f * delta_t, alpha) - 2.0f * std::pow(delta_t, alpha)) /
-        (std::pow(2.0f * delta_s, alpha) - 2.0f * std::pow(delta_s, alpha))
+    if (std::abs(d_alpha - 1.0) < 1e-4) d_alpha += 1e-4;
+    double rho = std::pow(2.0, d_alpha - 1.0) - 1.0;
+    double std_ratio = std::sqrt(
+        (std::pow(2.0 * delta_t, d_alpha) - 2.0 * std::pow(delta_t, d_alpha)) /
+        (std::pow(2.0 * delta_s, d_alpha) - 2.0 * std::pow(delta_s, d_alpha))
     );
-    float scale = std::sqrt(1.0f - rho * rho) * std_ratio; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    double scale = std::sqrt(1.0 - rho * rho) * std_ratio;
 
-    std::vector<float> coord_ratios; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<double> coord_ratios;
     for (int d = 0; d < dimension; d++) {
-        float cr = regularization(next_vec[d], prev_vec[d], rho * std_ratio);
+        double cr = regularization((double)next_vec[d], (double)prev_vec[d], rho * std_ratio);
         coord_ratios.push_back(cr);
     }
 
-    for (float cr : coord_ratios) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        float density = (1.0f / ((float)M_PI * scale)) *
-                        (1.0f / (((cr - rho * std_ratio) * (cr - rho * std_ratio)) /
+    for (double cr : coord_ratios) {
+        double density = (1.0 / (M_PI * scale)) *
+                        (1.0 / (((cr - rho * std_ratio) * (cr - rho * std_ratio)) /
                                  (scale * scale * std_ratio) + std_ratio));
         result.log_pdf += std::log(density);
     }
 
-    // Abnormal check: |coord_ratio - std_ratio*rho| > 6*scale // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    for (float cr : coord_ratios) {
-        if (std::abs(cr - std_ratio * rho) > 6.0f * scale) {
+    // Abnormal check: |coord_ratio - std_ratio*rho| > 6*scale
+    for (double cr : coord_ratios) {
+        if (std::abs(cr - std_ratio * rho) > 6.0 * scale) {
             result.abnormal = true;
             break;
         }
     }
 
-    // qt_fetch-based abnormal check // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // qt_fetch-based abnormal check
     if (g_qt_loaded) {
-        auto [ai, ki] = indice_fetch((double)alpha, (double)k); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        auto [ai, ki] = indice_fetch(d_alpha, (double)k);
         double qt_val = qt_fetch(ai, ki);
-        float jump_mag = std::sqrt(next_vec[0]*next_vec[0] + next_vec[1]*next_vec[1] + next_vec[2]*next_vec[2]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        if (jump_mag - (float)qt_val * 2.5f > 0) {
-            result.abnormal = true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double jump_mag = std::sqrt((double)next_vec[0]*next_vec[0] + (double)next_vec[1]*next_vec[1] + (double)next_vec[2]*next_vec[2]);
+        if (jump_mag - qt_val * 2.5 > 0) {
+            result.abnormal = true;
         }
     }
 
     return result;
-}
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 
 // ============================================================
 // DFS path enumeration
 // ============================================================
 
-void find_paths_dfs(const DiGraph& G, const Node& current, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+void find_paths_dfs(const DiGraph& G, const Node& current, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
                     Path& path, std::set<Node>& seen,
                     std::vector<Path>& results) {
     seen.insert(current);
     auto neighbors = G.successors(current);
+    // Reorder successors to match CPython set iteration order
+    // (Python's find_paths_as_iter uses nx.descendants_at_distance which returns a set)
+    cpython_set_order(neighbors);
 
-    if (neighbors.empty()) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (neighbors.empty()) {
         results.push_back(path); // leaf: yield the path
     }
     for (const auto& neighbor : neighbors) {
-        if (!seen.count(neighbor)) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        if (!seen.count(neighbor)) {
             path.push_back(neighbor);
             find_paths_dfs(G, neighbor, path, seen, results);
             path.pop_back();
+        } else {
+            // Match Python: when n in seen, yield current path
+            results.push_back(path);
         }
     }
     seen.erase(current);
-}
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 
 std::vector<Path> find_paths_as_list(const DiGraph& G, const Node& source) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     std::vector<Path> all_paths;
@@ -1059,44 +1407,54 @@ std::vector<Path> find_paths_as_list(const DiGraph& G, const Node& source) { // 
 // Matches Python split_to_subgraphs exactly
 // ============================================================
 
-std::vector<DiGraph> split_to_subgraphs(const DiGraph& G, const Node& source_node) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+std::vector<DiGraph> split_to_subgraphs(const DiGraph& G, const Node& source_node) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     std::vector<DiGraph> subgraphs;
 
-    // Get first edges (source -> direct neighbors) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Get first edges (source -> direct neighbors) in insertion order
     auto first_neighbors = G.successors(source_node);
 
-    // Build undirected graph without source // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    // Represent as adjacency set (undirected)
-    std::set<Node> all_nodes;
-    std::map<Node, std::set<Node>> undirected;
-    for (const auto& n : G.get_nodes()) {
+    // Build undirected graph without source, matching Python's to_undirected() order
+    // Python iterates directed edges in (node-insertion-order, successor-insertion-order)
+    // For each edge (u,v): add v to u's neighbor list and u to v's neighbor list
+    std::vector<Node> all_nodes_ordered; // node insertion order for undirected graph
+    std::set<Node> all_nodes_set;
+    std::map<Node, std::vector<Node>> undirected; // insertion-ordered adjacency
+
+    auto add_undirected_edge = [&](const Node& u, const Node& v) {
+        // Add v to u's list if not present, and u to v's list if not present
+        auto& ul = undirected[u];
+        if (std::find(ul.begin(), ul.end(), v) == ul.end()) ul.push_back(v);
+        auto& vl = undirected[v];
+        if (std::find(vl.begin(), vl.end(), u) == vl.end()) vl.push_back(u);
+        // Track node order
+        if (all_nodes_set.insert(u).second) all_nodes_ordered.push_back(u);
+        if (all_nodes_set.insert(v).second) all_nodes_ordered.push_back(v);
+    };
+
+    // Iterate nodes in insertion order (matching Python's graph node iteration)
+    for (const auto& n : G.get_nodes_ordered()) {
         if (n == source_node) continue;
-        all_nodes.insert(n);
+        if (all_nodes_set.insert(n).second) all_nodes_ordered.push_back(n);
         for (const auto& succ : G.successors(n)) {
             if (succ == source_node) continue;
-            undirected[n].insert(succ);
-            undirected[succ].insert(n);
-        }
-        for (const auto& pred : G.predecessors(n)) {
-            if (pred == source_node) continue;
-            undirected[n].insert(pred);
-            undirected[pred].insert(n);
+            add_undirected_edge(n, succ);
         }
     }
 
-    std::set<Node> remaining = all_nodes; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Track remaining nodes in insertion order
+    std::vector<Node> remaining_ordered = all_nodes_ordered;
 
-    while (!remaining.empty()) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        // BFS from arbitrary node in undirected graph // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        Node arb_node = *remaining.begin();
+    while (!remaining_ordered.empty()) {
+        // Python: arb_node = node_list[0] (first in current node list)
+        Node arb_node = remaining_ordered[0];
         std::vector<Node> bfs_nodes;
         std::set<Node> bfs_visited;
         std::queue<Node> bfs_q;
         bfs_q.push(arb_node);
         bfs_visited.insert(arb_node);
-        bool has_edges = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        bool has_edges = false;
 
-        while (!bfs_q.empty()) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        while (!bfs_q.empty()) {
             Node cur = bfs_q.front(); bfs_q.pop();
             bfs_nodes.push_back(cur);
             if (undirected.count(cur)) {
@@ -1110,40 +1468,45 @@ std::vector<DiGraph> split_to_subgraphs(const DiGraph& G, const Node& source_nod
             }
         }
 
-        // Build directed subgraph from BFS component // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        // Build directed subgraph preserving original edge insertion order // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        // Python does: sub_graph_ = graph_copy.subgraph(component).copy()
+        // This preserves the original graph's edge insertion order.
+        // We iterate the original graph's nodes in insertion order and copy
+        // edges whose both endpoints are in the BFS component.
         DiGraph sub_graph;
-        for (const auto& node : bfs_nodes) {
-            if (undirected.count(node)) {
-                for (const auto& nb : undirected[node]) {
-                    // Add edge in time-forward direction // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                    if (node.first < nb.first) {
-                        sub_graph.add_edge(node, nb);
-                    } else if (nb.first < node.first) {
-                        sub_graph.add_edge(nb, node);
-                    }
+        std::set<Node> component_set_tmp(bfs_nodes.begin(), bfs_nodes.end());
+        for (const auto& node : G.get_nodes_ordered()) {
+            if (node == source_node) continue;
+            if (!component_set_tmp.count(node)) continue;
+            for (const auto& succ : G.successors(node)) {
+                if (succ == source_node) continue;
+                if (component_set_tmp.count(succ)) {
+                    sub_graph.add_edge(node, succ, G.get_edge_data(node, succ));
                 }
             }
         }
 
-        // Remove processed nodes // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        for (const auto& n : sub_graph.get_nodes()) remaining.erase(n);
-
-        // Handle isolated nodes (no edges in BFS) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        if (!has_edges && !remaining.empty()) {
-            // Actually check: if bfs found no edges but node exists
-        }
-        if (bfs_nodes.size() == 1 && !has_edges) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        // Remove processed nodes from remaining list
+        std::set<Node> component_set(bfs_nodes.begin(), bfs_nodes.end());
+        if (bfs_nodes.size() == 1 && !has_edges) {
             sub_graph.add_edge(source_node, arb_node);
-            remaining.erase(arb_node);
+            component_set.insert(arb_node);
         }
+        // Python: graph_copy_without_source.remove_nodes_from(sub_graph_.nodes)
+        std::vector<Node> new_remaining;
+        for (const auto& n : remaining_ordered) {
+            if (!component_set.count(n)) new_remaining.push_back(n);
+        }
+        remaining_ordered = std::move(new_remaining);
 
-        // Add source edges to subgraph for any first_neighbor in this component // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        // Add source edges to subgraph for any first_neighbor in this component
         for (const auto& fn : first_neighbors) {
             if (sub_graph.has_node(fn)) {
                 sub_graph.add_edge(source_node, fn);
             }
         }
 
+        // Debug: dump subgraph composition // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
         subgraphs.push_back(std::move(sub_graph));
     }
     return subgraphs;
@@ -1154,21 +1517,22 @@ std::vector<DiGraph> split_to_subgraphs(const DiGraph& G, const Node& source_nod
 // ============================================================
 
 bool is_terminal_node(const Node& node, const Localizations& locs, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-                      float max_jump_d, const DiGraph& selected_graph,
+                      double max_jump_d, const DiGraph& selected_graph,
                       const std::set<Node>& final_graph_nodes,
                       int time_forecast) {
-    int node_t = node.first; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-    // Check TIME_FORECAST frames ahead (matching Python: range(node_t+1, node_t+TIME_FORECAST+1))
+    int node_t = node.first;
+    auto node_loc = locs.at(node_t)[node.second];
+    // Match Python: range(node_t + 1, node_t + TIME_FORECAST + 1)
     for (int next_t = node_t + 1; next_t <= node_t + time_forecast; next_t++) {
         auto it = locs.find(next_t);
         if (it == locs.end()) continue;
         const auto& particles = it->second;
-        auto node_loc = locs.at(node_t)[node.second];
         for (int idx = 0; idx < (int)particles.size(); idx++) {
+            if (particles[idx].size() < 3) continue;
             Node next_node = {next_t, idx};
-            if (final_graph_nodes.count(next_node)) continue;
             if (selected_graph.has_node(next_node)) continue;
-            float d = euclidean_displacement_single(node_loc, particles[idx]);
+            if (final_graph_nodes.count(next_node)) continue;
+            double d = euclidean_displacement_single(node_loc, particles[idx]); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
             if (d < max_jump_d) return false;
         }
     }
@@ -1183,7 +1547,7 @@ GenerateResult generate_next_paths(DiGraph next_graph, // Modified by Claude (cl
                                    const std::set<Node>& final_graph_nodes,
                                    const Localizations& locs,
                                    const std::vector<int>& next_times,
-                                   const std::map<int, float>& distribution,
+                                   const std::map<int, double>& distribution, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
                                    const Node& source_node) {
     std::vector<Node> cumulative_last_nodes;
 
@@ -1218,7 +1582,7 @@ GenerateResult generate_next_paths(DiGraph next_graph, // Modified by Claude (cl
                     const auto& cur_particles = locs.at(cur_time);
 
                     for (int next_idx = 0; next_idx < (int)cur_particles.size(); next_idx++) {
-                        float jump_d = euclidean_displacement_single(cur_particles[next_idx], node_loc); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                        double jump_d = euclidean_displacement_single(cur_particles[next_idx], node_loc); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
                         int time_gap = cur_time - last_node.first - 1; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
                         auto it = distribution.find(time_gap);
                         if (it != distribution.end()) {
@@ -1287,10 +1651,10 @@ const Path* match_prev_next(const std::vector<Path>& prev_paths, // Modified by 
 // Predict long sequence cost
 // ============================================================
 
-static const float UNCOMPUTED = -999999.0f; // sentinel for uncomputed cost // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+static const double UNCOMPUTED = -999999.0; // sentinel for uncomputed cost // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 
-PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                               std::map<Path, float>& trajectories_costs,
+PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+                               std::map<Path, double>& trajectories_costs,
                                const Localizations& locs,
                                float prev_alpha, float prev_k,
                                const std::vector<int>& next_times,
@@ -1300,12 +1664,13 @@ PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (cla
                                const DiGraph& selected_graph,
                                const std::set<Node>& final_graph_nodes,
                                int time_forecast, int dimension,
-                               float loc_precision_err) {
+                               float loc_precision_err,
+                               bool use_nn) {
     PredictResult presult;
-    float abnormal_penalty = 1000.0f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float time_penalty = abnormal_penalty / (float)(time_forecast + 1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float cutting_threshold = 2.0f * abnormal_penalty; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    float initial_cost = cutting_threshold - 100.0f; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    double abnormal_penalty = 1000.0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    double time_penalty = abnormal_penalty / (double)(time_forecast + 1);
+    double cutting_threshold = 2.0 * abnormal_penalty;
+    double initial_cost = cutting_threshold - 100.0;
 
     // Already computed or single node? // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     auto cost_it = trajectories_costs.find(next_path);
@@ -1314,8 +1679,8 @@ PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (cla
         return presult;
     }
 
-    // Terminal check // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    bool terminal = is_terminal_node(next_path.back(), locs, jump_threshold, selected_graph, final_graph_nodes, time_forecast); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    // Terminal check // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    bool terminal = is_terminal_node(next_path.back(), locs, jump_threshold, selected_graph, final_graph_nodes, time_forecast);
     presult.terminal = terminal ? 1 : 0;
 
     // Check for excessive time gaps // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -1331,46 +1696,64 @@ PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (cla
         // Should not happen
         trajectories_costs[next_path] = initial_cost;
         return presult;
-    } else if (next_path.size() == 2) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    } else if (next_path.size() == 2) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
         trajectories_costs[next_path] = time_penalty;
-    } else if (next_path.size() == 3) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    } else if (next_path.size() == 3) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
         Node before_node = next_path[1];
         Node next_node = next_path[2];
         int time_gap = next_node.first - before_node.first - 1;
-        std::array<float,3> dummy = {0.15f, 0.15f, 0.0f};
-        float log_p0 = empirical_pdf_lookup(dummy);
-        float time_score = time_gap * time_penalty;
-        trajectories_costs[next_path] = time_score + std::abs(log_p0 - 5.0f);
-    } else { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::array<double,3> dummy = {0.15, 0.15, 0.0}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        double log_p0 = empirical_pdf_lookup(dummy);
+        double time_score = time_gap * time_penalty;
+        trajectories_costs[next_path] = time_score + std::abs(log_p0 - 5.0);
+    } else { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
         // len >= 4
         int last_idx = terminal ? -1 : -2; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         int path_len = (int)next_path.size();
 
-        // First edge cost (empirical PDF) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::vector<float> traj_cost;
+        // First edge cost (empirical PDF) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        std::vector<double> traj_cost;
         std::vector<int> ab_index;
         Node before_node = next_path[1];
         Node next_node = next_path[2];
-        auto next_coord = locs.at(next_node.first)[next_node.second]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        auto cur_coord = locs.at(before_node.first)[before_node.second]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::array<float,3> input_mu = {next_coord[0] - cur_coord[0],
+        auto next_coord = locs.at(next_node.first)[next_node.second];
+        auto cur_coord = locs.at(before_node.first)[before_node.second];
+        std::array<double,3> input_mu = {next_coord[0] - cur_coord[0],
                                         next_coord[1] - cur_coord[1],
                                         next_coord[2] - cur_coord[2]};
-        float log_p0 = empirical_pdf_lookup(input_mu); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        traj_cost.push_back(std::abs(log_p0 - 5.0f));
+        double log_p0 = empirical_pdf_lookup(input_mu);
+        traj_cost.push_back(std::abs(log_p0 - 5.0));
 
-        // Cauchy cost for subsequent edges // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        int end_idx = path_len + last_idx - 1; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::vector<float> tmpx, tmpy; // for k re-estimation after abnormal
-        Node j_prev_node, j_next_node; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        // Cauchy cost for subsequent edges // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        int end_idx = path_len + last_idx - 1;
+        std::vector<double> tmpx, tmpy; // for NN k re-estimation after abnormal // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        Node j_prev_node, j_next_node;
 
         for (int edge_i = 1; edge_i < end_idx; edge_i++) {
-            int edge_j = edge_i + 1; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            int edge_j = edge_i + 1;
 
-            // Re-estimate k after abnormal detections (fixed mode: k=0.5) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            // Re-estimate k after abnormal detections // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
             if (!ab_index.empty()) {
                 prev_alpha = 1.0f;
-                prev_k = 0.5f; // predict_ks returns 0.5 when TF=False
+                if (use_nn && g_nn_models.loaded) {
+                    // Accumulate positions for NN k prediction (matching Python)
+                    if (tmpx.empty()) {
+                        tmpx = {locs.at(j_prev_node.first)[j_prev_node.second][0],
+                                locs.at(j_next_node.first)[j_next_node.second][0]};
+                        tmpy = {locs.at(j_prev_node.first)[j_prev_node.second][1],
+                                locs.at(j_next_node.first)[j_next_node.second][1]};
+                    } else {
+                        tmpx.push_back(locs.at(j_next_node.first)[j_next_node.second][0]);
+                        tmpy.push_back(locs.at(j_next_node.first)[j_next_node.second][1]);
+                    }
+                    // Use at most 5 points (matching Python tmpx[:5])
+                    int nn_len = std::min((int)tmpx.size(), 5); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+                    std::vector<float> tx(nn_len), ty(nn_len);
+                    for (int ni = 0; ni < nn_len; ni++) { tx[ni] = (float)tmpx[ni]; ty[ni] = (float)tmpy[ni]; }
+                    prev_k = predict_k_nn(g_nn_models, tx, ty);
+                } else {
+                    prev_k = 0.5f; // predict_ks returns 0.5 when TF=False
+                }
             }
 
             Node i_prev_node = next_path[edge_i]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -1385,17 +1768,17 @@ PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (cla
             auto loc_j_next = locs.at(j_next_node.first)[j_next_node.second];
             auto loc_j_prev = locs.at(j_prev_node.first)[j_prev_node.second];
 
-            std::array<float,3> vec_i = {loc_i_next[0] - loc_i_prev[0], // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            std::array<double,3> vec_i = {loc_i_next[0] - loc_i_prev[0], // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
                                          loc_i_next[1] - loc_i_prev[1],
                                          loc_i_next[2] - loc_i_prev[2]};
-            std::array<float,3> vec_j = {loc_j_next[0] - loc_j_prev[0],
+            std::array<double,3> vec_j = {loc_j_next[0] - loc_j_prev[0],
                                          loc_j_next[1] - loc_j_prev[1],
                                          loc_j_next[2] - loc_j_prev[2]};
 
             auto cauchy = predict_cauchy_tracking(vec_j, vec_i, prev_k, prev_alpha, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
                                                   i_time_gap, j_time_gap, loc_precision_err, dimension);
-            if (cauchy.abnormal) ab_index.push_back(edge_j); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-            traj_cost.push_back(std::abs(cauchy.log_pdf - 5.0f));
+            if (cauchy.abnormal) ab_index.push_back(edge_j);
+            traj_cost.push_back(std::abs(cauchy.log_pdf - 5.0));
         }
 
         // Compute time gaps penalty // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -1408,13 +1791,13 @@ PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (cla
         std::sort(ab_index.begin(), ab_index.end());
         ab_index.erase(std::unique(ab_index.begin(), ab_index.end()), ab_index.end());
 
-        float abnormal_jump_score = abnormal_penalty * (float)ab_index.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        float time_score = (float)time_gaps * time_penalty;
+        double abnormal_jump_score = abnormal_penalty * (double)ab_index.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        double time_score = (double)time_gaps * time_penalty;
 
-        float final_score; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double final_score;
         if (traj_cost.size() > 1) {
-            float mean_cost = 0;
-            for (float c : traj_cost) mean_cost += c;
+            double mean_cost = 0;
+            for (double c : traj_cost) mean_cost += c;
             mean_cost /= traj_cost.size();
             final_score = mean_cost + abnormal_jump_score + time_score;
         } else {
@@ -1435,14 +1818,14 @@ PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (cla
 // Used by both the NB_TO_OPTIMUM probing passes and the final pass
 // ============================================================
 
-static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 21:30
     DiGraph& sub_graph,
     DiGraph& out_graph,
     const Node& source_node,
     const std::set<Node>& final_graph_node_set_hashed,
     const Localizations& locs,
     const std::vector<int>& next_times,
-    const std::map<int, float>& distribution,
+    const std::map<int, double>& distribution, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     bool first_step,
     int last_time,
     const TrackingConfig& config,
@@ -1450,14 +1833,15 @@ static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropi
     const std::map<Path, float>* alpha_values_ptr,
     const std::map<Path, float>* k_values_ptr,
     std::map<Path, int>& hashed_prev_next,
-    const std::set<Node>& last_nodes_set, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     int initial_pick_idx,
-    float& cost_sum)
+    double& cost_sum,
+    const std::vector<Node>& last_nodes,
+    bool debug_phase1 = true) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 {
     int nb_to_optimum = 1 << config.graph_depth; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     (void)nb_to_optimum;
 
-    std::map<Path, float> trajectories_costs; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::map<Path, double> trajectories_costs; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     // Initialize all paths with UNCOMPUTED
     {
         Path path_buf = {source_node};
@@ -1476,8 +1860,8 @@ static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropi
     Path prev_lowest = {source_node};
 
     while (true) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        // Rebuild cost_copy (prune stale entries) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::map<Path, float> cost_copy;
+        // Rebuild cost_copy (prune stale entries) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        std::map<Path, double> cost_copy;
         auto next_paths = find_paths_as_list(sub_graph, source_node);
         if (next_paths.empty()) break;
 
@@ -1510,30 +1894,37 @@ static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropi
                 }
             }
 
-            auto pr = predict_long_seq(np, trajectories_costs, locs, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            auto pr = predict_long_seq(np, trajectories_costs, locs, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
                                        use_alpha, use_k, next_times, pp,
                                        start_indice_map, last_time,
                                        distribution.at(0), out_graph,
                                        final_graph_node_set_hashed,
                                        config.graph_depth, config.dimension,
-                                       config.loc_precision_err);
+                                       config.loc_precision_err,
+                                       config.use_nn);
             if (pr.terminal >= 0) is_terminals[np] = (pr.terminal == 1);
             if (!pr.ab_index.empty()) ab_indice[np] = pr.ab_index;
         }
 
-        // Sort by cost // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::vector<std::pair<float, int>> cost_idx_vec;
+        // Sort by cost using numpy-compatible quicksort argsort // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        std::vector<double> cost_values;
         for (int i = 0; i < (int)next_paths.size(); i++) {
-            float c = trajectories_costs.count(next_paths[i]) ? trajectories_costs[next_paths[i]] : 1e9f;
-            if (c == UNCOMPUTED) c = 1e9f;
-            cost_idx_vec.push_back({c, i});
+            double c = trajectories_costs.count(next_paths[i]) ? trajectories_costs[next_paths[i]] : 1e9;
+            if (c == UNCOMPUTED) c = 1e9;
+            cost_values.push_back(c);
         }
-        std::sort(cost_idx_vec.begin(), cost_idx_vec.end());
+        auto sorted_indices = numpy_argsort(cost_values);
+        std::vector<std::pair<double, int>> cost_idx_vec;
+        for (int si : sorted_indices) {
+            cost_idx_vec.push_back({cost_values[si], si});
+        }
 
         Path lowest_cost_traj; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        int actual_pick = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
         if (initial_) {
             if (initial_pick_idx < (int)cost_idx_vec.size()) {
                 lowest_cost_traj = next_paths[cost_idx_vec[initial_pick_idx].second];
+                actual_pick = initial_pick_idx;
             } else {
                 break;
             }
@@ -1582,7 +1973,7 @@ static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropi
                             !sub_graph.has_edge(pred, suc)) {
                             auto pred_loc = locs.at(pred.first)[pred.second]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
                             auto suc_loc = locs.at(suc.first)[suc.second];
-                            float jump_d = euclidean_displacement_single(pred_loc, suc_loc);
+                            double jump_d = euclidean_displacement_single(pred_loc, suc_loc); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
                             int time_gap = suc.first - pred.first - 1;
                             auto dit = distribution.find(time_gap);
                             if (dit != distribution.end() && jump_d < dit->second) {
@@ -1612,14 +2003,18 @@ static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropi
             }
         }
 
-        // Reconnect orphaned nodes to source (skip last_nodes, matching Python) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-        for (const auto& sn : std::set<Node>(sub_graph.get_nodes())) {
-            if (sn != source_node && !last_nodes_set.count(sn) && !sub_graph.has_path(source_node, sn)) {
-                sub_graph.add_edge(source_node, sn);
+        // Reconnect orphaned nodes to source — only in phase 1 (matching Python) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        if (debug_phase1) { // phase 1 only — Python phase 2 has no orphan reconnection // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+            std::set<Node> last_nodes_set(last_nodes.begin(), last_nodes.end());
+            auto orphan_check_nodes = sub_graph.get_nodes_ordered(); // use insertion order like Python
+            for (const auto& sn : orphan_check_nodes) {
+                if (sn != source_node && !last_nodes_set.count(sn) && !sub_graph.has_path(source_node, sn)) {
+                    sub_graph.add_edge(source_node, sn);
+                }
             }
-        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        }
 
-        float pop_cost = trajectories_costs.count(lowest_cost_traj) ? trajectories_costs[lowest_cost_traj] : 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        double pop_cost = trajectories_costs.count(lowest_cost_traj) ? trajectories_costs[lowest_cost_traj] : 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
         cost_sum += pop_cost;
 
         // Update output graph // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -1659,7 +2054,7 @@ SelectResult select_opt_graph2(const std::set<Node>& final_graph_node_set_hashed
                                DiGraph next_graph,
                                const Localizations& locs,
                                const std::vector<int>& next_times,
-                               const std::map<int, float>& distribution,
+                               const std::map<int, double>& distribution, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
                                bool first_step, int last_time,
                                const TrackingConfig& config) {
     Node source_node = {0, 0}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -1695,21 +2090,17 @@ SelectResult select_opt_graph2(const std::set<Node>& final_graph_node_set_hashed
         }
     }
 
-    // Generate next graph // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     auto gen_result = generate_next_paths(next_graph, final_graph_node_set_hashed,
                                           locs, next_times, distribution, source_node);
     next_graph = gen_result.graph;
     auto& last_nodes = gen_result.last_nodes;
-
-    // Build last_nodes set for orphan reconnection check (matching Python) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-    std::set<Node> last_nodes_set(last_nodes.begin(), last_nodes.end());
 
     // Split into connected subgraphs // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     auto subgraphs = split_to_subgraphs(next_graph, source_node);
 
     for (auto& sub_graph_ : subgraphs) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         // Phase 1: try NB_TO_OPTIMUM alternatives // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::vector<float> cost_sums(nb_to_optimum, -1e-5f);
+        std::vector<double> cost_sums(nb_to_optimum, -1e-5);
 
         for (int lowest_idx = 0; lowest_idx < nb_to_optimum; lowest_idx++) {
             DiGraph sub_copy = sub_graph_.copy();
@@ -1717,18 +2108,18 @@ SelectResult select_opt_graph2(const std::set<Node>& final_graph_node_set_hashed
             tmp_graph.add_node(source_node);
             std::map<Path, int> hpn_copy = hashed_prev_next;
 
-            greedy_assign_pass(sub_copy, tmp_graph, source_node, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+            greedy_assign_pass(sub_copy, tmp_graph, source_node, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 21:30
                               final_graph_node_set_hashed, locs, next_times,
                               distribution, first_step, last_time, config,
                               first_step ? nullptr : &prev_paths,
                               first_step ? nullptr : &alpha_values,
                               first_step ? nullptr : &k_values,
-                              hpn_copy, last_nodes_set, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-                              lowest_idx, cost_sums[lowest_idx]);
+                              hpn_copy, lowest_idx, cost_sums[lowest_idx],
+                              last_nodes);
         }
 
-        // Find best starting index // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        for (auto& cs : cost_sums) { if (cs < 0) cs = 99999.0f; }
+        // Find best starting index // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 21:30
+        for (auto& cs : cost_sums) { if (cs < 0) cs = 99999.0; }
         int lowest_cost_idx = 0;
         for (int i = 1; i < (int)cost_sums.size(); i++) {
             if (cost_sums[i] < cost_sums[lowest_cost_idx]) lowest_cost_idx = i;
@@ -1737,16 +2128,16 @@ SelectResult select_opt_graph2(const std::set<Node>& final_graph_node_set_hashed
         // Phase 2: rebuild with best starting index into selected_graph // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         DiGraph sub_copy2 = sub_graph_.copy();
         std::map<Path, int> hpn2 = hashed_prev_next;
-        float dummy_cost = -1e-5f;
-        greedy_assign_pass(sub_copy2, selected_graph, source_node, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        double dummy_cost = -1e-5;
+        greedy_assign_pass(sub_copy2, selected_graph, source_node, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
                           final_graph_node_set_hashed, locs, next_times,
                           distribution, first_step, last_time, config,
                           first_step ? nullptr : &prev_paths,
                           first_step ? nullptr : &alpha_values,
                           first_step ? nullptr : &k_values,
-                          hpn2, last_nodes_set, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-                          lowest_cost_idx, dummy_cost);
-    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+                          hpn2, lowest_cost_idx, dummy_cost,
+                          last_nodes, false);
+    }
 
     // Check for orphan nodes // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     std::vector<Node> orphans;
@@ -1767,9 +2158,9 @@ SelectResult select_opt_graph2(const std::set<Node>& final_graph_node_set_hashed
 // forecast: main tracking loop
 // ============================================================
 
-std::vector<TrajectoryObj> forecast(const Localizations& locs, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+std::vector<TrajectoryObj> forecast(const Localizations& locs, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
                                    const std::vector<int>& t_avail_steps,
-                                   const std::map<int, float>& distribution,
+                                   const std::map<int, double>& distribution,
                                    int image_length,
                                    const TrackingConfig& config) {
     bool first_construction = true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -1837,7 +2228,6 @@ std::vector<TrajectoryObj> forecast(const Localizations& locs, // Modified by Cl
         light_prev_graph.add_node(source_node);
 
         auto selected_paths = find_paths_as_list(selected_sub_graph, source_node); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-
 
         // Check if we're at the end // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         bool last_time_in_sel = false;
@@ -1980,7 +2370,7 @@ std::vector<TrajectoryObj> forecast(const Localizations& locs, // Modified by Cl
                 next_graph.add_edge(source_node, np[0], ed);
                 auto last_xyz = locs.at(np.back().first)[np.back().second];
                 auto second_last_xyz = locs.at(np[0].first)[np[0].second];
-                float jd = std::sqrt(
+                double jd = std::sqrt( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
                     (last_xyz[0] - second_last_xyz[0]) * (last_xyz[0] - second_last_xyz[0]) +
                     (last_xyz[1] - second_last_xyz[1]) * (last_xyz[1] - second_last_xyz[1])
                 );
@@ -2477,15 +2867,15 @@ bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude
     }
 
     // Build empirical PDF // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    std::vector<float> emp_bins_edges(41);
-    for (int i = 0; i <= 40; i++) emp_bins_edges[i] = 20.0f * i / 40;
+    std::vector<double> emp_bins_edges(41); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    for (int i = 0; i <= 40; i++) emp_bins_edges[i] = 20.0 * i / 40;
     build_emp_pdf(seg.seg_distribution[0], 40, 20.0f);
 
     // Count particles per frame // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     if (config.verbose) {
         int total = 0;
         for (const auto& [t, ps] : loc) total += (int)ps.size();
-        float mean_nb = (float)total / all_steps.size();
+        double mean_nb = (double)total / all_steps.size(); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
         std::cerr << "Mean particles/frame: " << mean_nb << std::endl;
     }
 
@@ -2556,7 +2946,7 @@ bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude
     int img_cols = config.img_cols;
     if (img_rows <= 0 || img_cols <= 0) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         // Infer from localization data
-        float max_x = 0, max_y = 0;
+        double max_x = 0, max_y = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
         for (const auto& [t, particles] : loc) {
             for (const auto& p : particles) {
                 if (p[0] > max_x) max_x = p[0];

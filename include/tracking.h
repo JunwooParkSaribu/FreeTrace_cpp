@@ -32,14 +32,17 @@ public:
     std::vector<Node> predecessors(const Node& n) const; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     const EdgeData& get_edge_data(const Node& from, const Node& to) const; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     const std::set<Node>& get_nodes() const; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    const std::vector<Node>& get_nodes_ordered() const; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     size_t size() const; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     DiGraph copy() const; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     std::vector<Node> ancestors(const Node& n) const; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
 private:
-    std::set<Node> nodes_; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    std::map<Node, std::map<Node, EdgeData>> fwd_; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    std::map<Node, std::set<Node>> rev_; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::set<Node> nodes_; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    std::vector<Node> nodes_ordered_; // Insertion order tracking // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    // Insertion-ordered adjacency lists to match Python dict insertion order
+    std::map<Node, std::vector<std::pair<Node, EdgeData>>> fwd_; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    std::map<Node, std::vector<Node>> rev_; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 };
 
 // Path: sequence of nodes // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -56,7 +59,7 @@ struct TrajectoryObj {
 };
 
 // Localization data: frame -> list of (x, y, z) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-using Localizations = std::map<int, std::vector<std::array<float, 3>>>;
+using Localizations = std::map<int, std::vector<std::array<double, 3>>>;
 
 // Tracking configuration // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 struct TrackingConfig {
@@ -81,41 +84,41 @@ void write_trajectory_csv(const std::string& path, // Modified by Claude (claude
                           const Localizations& locs);
 
 // --- Distance --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-float euclidean_displacement_single(const std::array<float,3>& a, const std::array<float,3>& b); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-std::vector<float> euclidean_displacement_batch(const std::vector<std::array<float,3>>& a, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                                                const std::vector<std::array<float,3>>& b);
+double euclidean_displacement_single(const std::array<double,3>& a, const std::array<double,3>& b); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+std::vector<double> euclidean_displacement_batch(const std::vector<std::array<double,3>>& a, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+                                                 const std::vector<std::array<double,3>>& b);
 
 // --- Segmentation --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 struct SegmentationResult {
-    std::vector<float> dist_x, dist_y, dist_z; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    std::map<int, std::vector<float>> seg_distribution; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<double> dist_x, dist_y, dist_z; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+    std::map<int, std::vector<double>> seg_distribution; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 };
 SegmentationResult segmentation(const Localizations& loc, const std::vector<int>& time_steps, int lag); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
 // --- Greedy matching --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 struct GreedyResult {
-    std::vector<float> x_dist, y_dist, z_dist, jump_dist; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    std::vector<double> x_dist, y_dist, z_dist, jump_dist; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 };
-GreedyResult greedy_shortest(const std::vector<std::array<float,3>>& srcs, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                             const std::vector<std::array<float,3>>& dests);
+GreedyResult greedy_shortest(const std::vector<std::array<double,3>>& srcs, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                             const std::vector<std::array<double,3>>& dests);
 
 // --- Approximation (jump thresholds) --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-std::map<int, float> approximation(const std::vector<float>& dist_x, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                                   const std::vector<float>& dist_y,
-                                   const std::vector<float>& dist_z,
+std::map<int, double> approximation(const std::vector<double>& dist_x, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+                                   const std::vector<double>& dist_y,
+                                   const std::vector<double>& dist_z,
                                    int time_forecast, float jump_threshold);
 
-// --- Empirical PDF --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-void build_emp_pdf(const std::vector<float>& emp_distribution, int nb_bins = 40, float max_val = 20.0f); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-float empirical_pdf_lookup(const std::array<float,3>& coords); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// --- Empirical PDF --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+void build_emp_pdf(const std::vector<double>& emp_distribution, int nb_bins = 40, float max_val = 20.0f);
+double empirical_pdf_lookup(const std::array<double,3>& coords); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 
 // --- Cauchy cost (tracking version with regularization) --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 struct CauchyResult {
-    float log_pdf; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    double log_pdf; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     bool abnormal; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 };
-CauchyResult predict_cauchy_tracking(const std::array<float,3>& next_vec, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                                     const std::array<float,3>& prev_vec,
+CauchyResult predict_cauchy_tracking(const std::array<double,3>& next_vec, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                                     const std::array<double,3>& prev_vec,
                                      float k, float alpha,
                                      int before_lag, int lag,
                                      float precision, int dimension);
@@ -137,14 +140,14 @@ GenerateResult generate_next_paths(DiGraph next_graph, // Modified by Claude (cl
                                    const std::set<Node>& final_graph_nodes,
                                    const Localizations& locs,
                                    const std::vector<int>& next_times,
-                                   const std::map<int, float>& distribution,
+                                   const std::map<int, double>& distribution,
                                    const Node& source_node);
 
-// --- Terminal check --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// --- Terminal check --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
 bool is_terminal_node(const Node& node, const Localizations& locs, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
-                      float max_jump_d, const DiGraph& selected_graph,
+                      double max_jump_d, const DiGraph& selected_graph,
                       const std::set<Node>& final_graph_nodes,
-                      int time_forecast); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+                      int time_forecast);
 
 // --- Path matching --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 const Path* match_prev_next(const std::vector<Path>& prev_paths, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -156,8 +159,8 @@ struct PredictResult {
     std::vector<int> ab_index; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     int terminal = -1; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 };
-PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-                               std::map<Path, float>& trajectories_costs,
+PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+                               std::map<Path, double>& trajectories_costs,
                                const Localizations& locs,
                                float prev_alpha, float prev_k,
                                const std::vector<int>& next_times,
@@ -167,7 +170,8 @@ PredictResult predict_long_seq(const Path& next_path, // Modified by Claude (cla
                                const DiGraph& selected_graph,
                                const std::set<Node>& final_graph_nodes,
                                int time_forecast, int dimension,
-                               float loc_precision_err);
+                               float loc_precision_err,
+                               bool use_nn = false);
 
 // --- Optimal graph selection --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 struct SelectResult {
@@ -179,14 +183,14 @@ SelectResult select_opt_graph2(const std::set<Node>& final_graph_node_set_hashed
                                DiGraph next_graph,
                                const Localizations& locs,
                                const std::vector<int>& next_times,
-                               const std::map<int, float>& distribution,
+                               const std::map<int, double>& distribution,
                                bool first_step, int last_time,
                                const TrackingConfig& config);
 
 // --- Main forecast loop --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 std::vector<TrajectoryObj> forecast(const Localizations& locs, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
                                    const std::vector<int>& t_avail_steps,
-                                   const std::map<int, float>& distribution,
+                                   const std::map<int, double>& distribution,
                                    int image_length,
                                    const TrackingConfig& config);
 
