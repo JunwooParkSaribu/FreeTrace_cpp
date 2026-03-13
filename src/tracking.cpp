@@ -2956,6 +2956,189 @@ static void mako_colormap(double t, uint8_t& r, uint8_t& g, uint8_t& b) {
     r = (uint8_t)stops[n-1].r; g = (uint8_t)stops[n-1].g; b = (uint8_t)stops[n-1].b;
 }
 
+// ---- Bitmap font for plot text (6x10 glyphs) ---- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+// Each glyph is 6 wide x 10 tall, stored as 10 bytes (1 bit per pixel, MSB=left)
+static const uint8_t FONT_6x10[][10] = {
+    // ' ' (space)
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+    // '0'
+    {0x78,0xCC,0xCC,0xDC,0xEC,0xCC,0xCC,0x78,0x00,0x00},
+    // '1'
+    {0x30,0x70,0x30,0x30,0x30,0x30,0x30,0xFC,0x00,0x00},
+    // '2'
+    {0x78,0xCC,0x0C,0x18,0x30,0x60,0xC0,0xFC,0x00,0x00},
+    // '3'
+    {0x78,0xCC,0x0C,0x38,0x0C,0x0C,0xCC,0x78,0x00,0x00},
+    // '4'
+    {0x1C,0x3C,0x6C,0xCC,0xFC,0x0C,0x0C,0x0C,0x00,0x00},
+    // '5'
+    {0xFC,0xC0,0xC0,0xF8,0x0C,0x0C,0xCC,0x78,0x00,0x00},
+    // '6'
+    {0x38,0x60,0xC0,0xF8,0xCC,0xCC,0xCC,0x78,0x00,0x00},
+    // '7'
+    {0xFC,0x0C,0x18,0x30,0x30,0x30,0x30,0x30,0x00,0x00},
+    // '8'
+    {0x78,0xCC,0xCC,0x78,0xCC,0xCC,0xCC,0x78,0x00,0x00},
+    // '9'
+    {0x78,0xCC,0xCC,0xCC,0x7C,0x0C,0x18,0x70,0x00,0x00},
+    // '.'
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x30,0x30,0x00,0x00},
+    // '-'
+    {0x00,0x00,0x00,0x00,0xFC,0x00,0x00,0x00,0x00,0x00},
+    // 'A'
+    {0x30,0x78,0xCC,0xCC,0xFC,0xCC,0xCC,0xCC,0x00,0x00},
+    // 'B' (not used but placeholder)
+    {0xF8,0xCC,0xCC,0xF8,0xCC,0xCC,0xCC,0xF8,0x00,0x00},
+    // 'C'
+    {0x78,0xCC,0xC0,0xC0,0xC0,0xC0,0xCC,0x78,0x00,0x00},
+    // 'D'
+    {0xF0,0xD8,0xCC,0xCC,0xCC,0xCC,0xD8,0xF0,0x00,0x00},
+    // 'E'
+    {0xFC,0xC0,0xC0,0xF8,0xC0,0xC0,0xC0,0xFC,0x00,0x00},
+    // 'H'
+    {0xCC,0xCC,0xCC,0xFC,0xCC,0xCC,0xCC,0xCC,0x00,0x00},
+    // 'K'
+    {0xCC,0xD8,0xF0,0xE0,0xF0,0xD8,0xCC,0xCC,0x00,0x00},
+    // '('
+    {0x18,0x30,0x60,0x60,0x60,0x60,0x30,0x18,0x00,0x00},
+    // ')'
+    {0x60,0x30,0x18,0x18,0x18,0x18,0x30,0x60,0x00,0x00},
+    // 'a'
+    {0x00,0x00,0x78,0x0C,0x7C,0xCC,0xCC,0x76,0x00,0x00},
+    // 'c'
+    {0x00,0x00,0x78,0xCC,0xC0,0xC0,0xCC,0x78,0x00,0x00},
+    // 'd'
+    {0x0C,0x0C,0x7C,0xCC,0xCC,0xCC,0xCC,0x76,0x00,0x00},
+    // 'e'
+    {0x00,0x00,0x78,0xCC,0xFC,0xC0,0xCC,0x78,0x00,0x00},
+    // 'f'
+    {0x38,0x6C,0x60,0xF0,0x60,0x60,0x60,0x60,0x00,0x00},
+    // 'g'
+    {0x00,0x00,0x76,0xCC,0xCC,0x7C,0x0C,0xCC,0x78,0x00},
+    // 'h' (not used)
+    {0xC0,0xC0,0xF8,0xCC,0xCC,0xCC,0xCC,0xCC,0x00,0x00},
+    // 'i'
+    {0x30,0x00,0x70,0x30,0x30,0x30,0x30,0x78,0x00,0x00},
+    // 'l'
+    {0x70,0x30,0x30,0x30,0x30,0x30,0x30,0x78,0x00,0x00},
+    // 'n'
+    {0x00,0x00,0xB8,0xCC,0xCC,0xCC,0xCC,0xCC,0x00,0x00},
+    // 'o'
+    {0x00,0x00,0x78,0xCC,0xCC,0xCC,0xCC,0x78,0x00,0x00},
+    // 'p'
+    {0x00,0x00,0xF8,0xCC,0xCC,0xF8,0xC0,0xC0,0xC0,0x00},
+    // 'r'
+    {0x00,0x00,0xB8,0xCC,0xC0,0xC0,0xC0,0xC0,0x00,0x00},
+    // 's'
+    {0x00,0x00,0x78,0xC0,0x78,0x0C,0x0C,0xF8,0x00,0x00},
+    // 't'
+    {0x30,0x30,0xFC,0x30,0x30,0x30,0x34,0x18,0x00,0x00},
+    // 'u'
+    {0x00,0x00,0xCC,0xCC,0xCC,0xCC,0xCC,0x76,0x00,0x00},
+    // 'x'
+    {0x00,0x00,0xCC,0xCC,0x78,0x30,0x78,0xCC,0x00,0x00},
+    // 'm'
+    {0x00,0x00,0xCC,0xFE,0xFE,0xD6,0xC6,0xC6,0x00,0x00},
+    // 'j'
+    {0x0C,0x00,0x1C,0x0C,0x0C,0x0C,0xCC,0xCC,0x78,0x00},
+};
+// Map character to glyph index
+static int font_index(char c) {
+    if (c == ' ') return 0;
+    if (c >= '0' && c <= '9') return c - '0' + 1;
+    if (c == '.') return 11;
+    if (c == '-') return 12;
+    switch(c) {
+        case 'A': return 13; case 'B': return 14; case 'C': return 15;
+        case 'D': return 16; case 'E': return 17; case 'H': return 18;
+        case 'K': return 19; case '(': return 20; case ')': return 21;
+        case 'a': return 22; case 'c': return 23; case 'd': return 24;
+        case 'e': return 25; case 'f': return 26; case 'g': return 27;
+        case 'h': return 28; case 'i': return 29; case 'l': return 30;
+        case 'n': return 31; case 'o': return 32; case 'p': return 33;
+        case 'r': return 34; case 's': return 35; case 't': return 36;
+        case 'u': return 37; case 'x': return 38;
+        case 'm': return 39; case 'j': return 40;
+        default: return 0;
+    }
+}
+
+// Draw a character at (x,y) top-left, with scale factor, onto RGB image
+static void draw_char(std::vector<uint8_t>& img, int img_w, int img_h,
+                      int x, int y, char c, int scale, uint8_t cr, uint8_t cg, uint8_t cb) {
+    int gi = font_index(c);
+    for (int row = 0; row < 10; row++) {
+        uint8_t bits = FONT_6x10[gi][row];
+        for (int col = 0; col < 6; col++) {
+            if (bits & (0x80 >> col)) {
+                for (int sy = 0; sy < scale; sy++) {
+                    for (int sx = 0; sx < scale; sx++) {
+                        int px = x + col * scale + sx;
+                        int py = y + row * scale + sy;
+                        if (px >= 0 && px < img_w && py >= 0 && py < img_h) {
+                            int idx = (py * img_w + px) * 3;
+                            img[idx] = cr; img[idx+1] = cg; img[idx+2] = cb;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Draw a string horizontally at (x,y)
+static void draw_text(std::vector<uint8_t>& img, int img_w, int img_h,
+                      int x, int y, const std::string& text, int scale,
+                      uint8_t r = 0, uint8_t g = 0, uint8_t b = 0) {
+    for (int i = 0; i < (int)text.size(); i++) {
+        draw_char(img, img_w, img_h, x + i * 6 * scale, y, text[i], scale, r, g, b);
+    }
+}
+
+// Draw a string vertically (rotated 90 CCW) at (x,y) = bottom-left of first char
+static void draw_text_vertical(std::vector<uint8_t>& img, int img_w, int img_h,
+                               int x, int y, const std::string& text, int scale,
+                               uint8_t cr = 0, uint8_t cg = 0, uint8_t cb = 0) {
+    for (int i = 0; i < (int)text.size(); i++) {
+        int gi = font_index(text[i]);
+        // Draw rotated: column becomes row (bottom-to-top for the string)
+        for (int row = 0; row < 10; row++) {
+            uint8_t bits = FONT_6x10[gi][row];
+            for (int col = 0; col < 6; col++) {
+                if (bits & (0x80 >> col)) {
+                    for (int sy = 0; sy < scale; sy++) {
+                        for (int sx = 0; sx < scale; sx++) {
+                            // Rotate 90 CCW: (col, row) → (-row, col) in screen coords
+                            int px = x - row * scale - sy;
+                            int py = y - (int)text.size() * 6 * scale + i * 6 * scale + col * scale + sx;
+                            if (px >= 0 && px < img_w && py >= 0 && py < img_h) {
+                                int idx = (py * img_w + px) * 3;
+                                img[idx] = cr; img[idx+1] = cg; img[idx+2] = cb;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Format a number for tick labels
+static std::string fmt_tick(double val, int decimals = 1) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.*f", decimals, val);
+    return buf;
+}
+
+static std::string fmt_sci(double val) {
+    // Format as e.g. "0.01", "0.1", "1", "10", "100"
+    if (val >= 1.0 && val < 10.0) return fmt_tick(val, 0);
+    if (val >= 10.0) return fmt_tick(val, 0);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.2g", val);
+    return buf;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+
 void make_hk_distribution_image(const std::string& path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
                                 const std::vector<double>& H_vals,
                                 const std::vector<double>& K_vals) {
@@ -2964,16 +3147,15 @@ void make_hk_distribution_image(const std::string& path, // Modified by Claude (
     int n = (int)H_vals.size();
     if (n < 2) return;
 
-    // Image dimensions (matching Python's figsize=(10,10) at ~100 dpi)
-    const int W = 800, H_img = 800;
-    // Plot area within image (leave margins for labels)
-    const int margin_left = 80, margin_right = 20, margin_top = 40, margin_bottom = 60;
-    const int pw = W - margin_left - margin_right;    // plot width
-    const int ph = H_img - margin_top - margin_bottom; // plot height
+    // Image dimensions
+    const int IMG_W = 900, IMG_H = 900;
+    // Margins: left for Y-label+ticks, bottom for X-label+ticks, top for title
+    const int margin_left = 110, margin_right = 30, margin_top = 50, margin_bottom = 80;
+    const int pw = IMG_W - margin_left - margin_right;
+    const int ph = IMG_H - margin_top - margin_bottom;
 
-    // Axis ranges: H in [0, 1], K in log scale
+    // Axis ranges
     const double h_min = 0.0, h_max = 1.0;
-    // Compute K range from data (log scale)
     double k_min_val = K_vals[0], k_max_val = K_vals[0];
     for (double k : K_vals) {
         if (k > 0) {
@@ -2983,16 +3165,13 @@ void make_hk_distribution_image(const std::string& path, // Modified by Claude (
     }
     if (k_min_val <= 0) k_min_val = 1e-3;
     if (k_max_val <= k_min_val) k_max_val = k_min_val * 100;
-    // Add some padding in log space
-    double log_k_min = std::log10(k_min_val) - 0.5;
-    double log_k_max = std::log10(k_max_val) + 0.5;
+    double log_k_min = std::floor(std::log10(k_min_val) - 0.5);
+    double log_k_max = std::ceil(std::log10(k_max_val) + 0.5);
 
-    // Convert data to grid coordinates: H on x-axis, log10(K) on y-axis
-    // Compute 2D KDE on a grid
+    // 2D KDE computation
     const int grid_size = 200;
     std::vector<double> density(grid_size * grid_size, 0.0);
 
-    // Compute bandwidth using Scott's rule: bw = n^(-1/6) * std
     double h_mean = 0, lk_mean = 0;
     std::vector<double> log_ks(n);
     for (int i = 0; i < n; i++) {
@@ -3007,21 +3186,18 @@ void make_hk_distribution_image(const std::string& path, // Modified by Claude (
         lk_var += (log_ks[i] - lk_mean) * (log_ks[i] - lk_mean);
     }
     h_var /= (n - 1); lk_var /= (n - 1);
-    double bw_factor = std::pow((double)n, -1.0/6.0); // Scott's rule for 2D
+    double bw_factor = std::pow((double)n, -1.0/6.0);
     double bw_h = std::sqrt(h_var) * bw_factor;
     double bw_k = std::sqrt(lk_var) * bw_factor;
     if (bw_h < 1e-6) bw_h = 0.05;
     if (bw_k < 1e-6) bw_k = 0.1;
 
-    // Grid spacing
     double dh = (h_max - h_min) / grid_size;
     double dlk = (log_k_max - log_k_min) / grid_size;
 
-    // Evaluate KDE on grid
     for (int i = 0; i < n; i++) {
         double hi = H_vals[i];
         double lki = log_ks[i];
-        // Only evaluate in a window around the data point (±4*bw)
         int gx_lo = std::max(0, (int)((hi - 4*bw_h - h_min) / dh));
         int gx_hi = std::min(grid_size - 1, (int)((hi + 4*bw_h - h_min) / dh));
         int gy_lo = std::max(0, (int)((lki - 4*bw_k - log_k_min) / dlk));
@@ -3038,40 +3214,38 @@ void make_hk_distribution_image(const std::string& path, // Modified by Claude (
         }
     }
 
-    // Find max density for normalization
     double max_density = 0;
     for (double d : density) if (d > max_density) max_density = d;
     if (max_density <= 0) max_density = 1;
 
-    // Create RGB image
-    std::vector<uint8_t> img(H_img * W * 3, 255); // white background
+    // Create RGB image (white background)
+    std::vector<uint8_t> img(IMG_H * IMG_W * 3, 255);
 
-    // Fill plot area with mako(0) background (dark purple)
+    // Fill plot area with mako(0) background
     uint8_t bg_r, bg_g, bg_b;
     mako_colormap(0.0, bg_r, bg_g, bg_b);
-    for (int py = margin_top; py < H_img - margin_bottom; py++) {
-        for (int px = margin_left; px < W - margin_right; px++) {
-            int idx = (py * W + px) * 3;
+    for (int py = margin_top; py < IMG_H - margin_bottom; py++) {
+        for (int px = margin_left; px < IMG_W - margin_right; px++) {
+            int idx = (py * IMG_W + px) * 3;
             img[idx] = bg_r; img[idx+1] = bg_g; img[idx+2] = bg_b;
         }
     }
 
-    // Render KDE as filled contour (map density to mako colormap)
+    // Render KDE
     for (int gy = 0; gy < grid_size; gy++) {
-        // Map grid y to pixel y (note: y-axis is inverted — top of image = high log_k)
         int py_start = margin_top + (int)((1.0 - (double)(gy + 1) / grid_size) * ph);
         int py_end = margin_top + (int)((1.0 - (double)gy / grid_size) * ph);
         for (int gx = 0; gx < grid_size; gx++) {
             double d = density[gy * grid_size + gx] / max_density;
-            if (d < 1e-6) continue; // leave as background
+            if (d < 1e-6) continue;
             uint8_t cr, cg, cb;
             mako_colormap(d, cr, cg, cb);
             int px_start = margin_left + (int)((double)gx / grid_size * pw);
             int px_end = margin_left + (int)((double)(gx + 1) / grid_size * pw);
-            for (int py = py_start; py < py_end && py < H_img - margin_bottom; py++) {
-                for (int px = px_start; px < px_end && px < W - margin_right; px++) {
+            for (int py = py_start; py < py_end && py < IMG_H - margin_bottom; py++) {
+                for (int px = px_start; px < px_end && px < IMG_W - margin_right; px++) {
                     if (py >= margin_top && px >= margin_left) {
-                        int idx = (py * W + px) * 3;
+                        int idx = (py * IMG_W + px) * 3;
                         img[idx] = cr; img[idx+1] = cg; img[idx+2] = cb;
                     }
                 }
@@ -3079,19 +3253,121 @@ void make_hk_distribution_image(const std::string& path, // Modified by Claude (
         }
     }
 
-    // Draw axes (black lines)
-    for (int px = margin_left; px < W - margin_right; px++) {
-        int idx_top = (margin_top * W + px) * 3;
-        int idx_bot = ((H_img - margin_bottom) * W + px) * 3;
-        img[idx_top] = img[idx_top+1] = img[idx_top+2] = 0;
-        img[idx_bot] = img[idx_bot+1] = img[idx_bot+2] = 0;
+    // Draw axes (black border)
+    for (int px = margin_left; px <= IMG_W - margin_right; px++) {
+        for (int t = 0; t < 2; t++) {
+            int idx_top = ((margin_top + t) * IMG_W + px) * 3;
+            int idx_bot = ((IMG_H - margin_bottom - t) * IMG_W + px) * 3;
+            img[idx_top] = img[idx_top+1] = img[idx_top+2] = 0;
+            img[idx_bot] = img[idx_bot+1] = img[idx_bot+2] = 0;
+        }
     }
-    for (int py = margin_top; py <= H_img - margin_bottom; py++) {
-        int idx_left = (py * W + margin_left) * 3;
-        int idx_right = (py * W + W - margin_right - 1) * 3;
-        img[idx_left] = img[idx_left+1] = img[idx_left+2] = 0;
-        img[idx_right] = img[idx_right+1] = img[idx_right+2] = 0;
+    for (int py = margin_top; py <= IMG_H - margin_bottom; py++) {
+        for (int t = 0; t < 2; t++) {
+            int idx_l = (py * IMG_W + margin_left + t) * 3;
+            int idx_r = (py * IMG_W + IMG_W - margin_right - t) * 3;
+            img[idx_l] = img[idx_l+1] = img[idx_l+2] = 0;
+            img[idx_r] = img[idx_r+1] = img[idx_r+2] = 0;
+        }
     }
+
+    const int scale = 2; // font scale
+    const int tick_len = 6;
+
+    // X-axis ticks (H: 0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+    for (int ti = 0; ti <= 5; ti++) {
+        double hval = ti * 0.2;
+        int px = margin_left + (int)(hval / (h_max - h_min) * pw);
+        // Tick mark
+        for (int t = 0; t < tick_len; t++) {
+            if (px >= 0 && px < IMG_W) {
+                int idx = ((IMG_H - margin_bottom + t) * IMG_W + px) * 3;
+                img[idx] = img[idx+1] = img[idx+2] = 0;
+            }
+        }
+        // Tick label
+        std::string label = fmt_tick(hval, 1);
+        int text_x = px - (int)label.size() * 6 * scale / 2;
+        draw_text(img, IMG_W, IMG_H, text_x, IMG_H - margin_bottom + tick_len + 2, label, scale);
+    }
+
+    // Y-axis ticks (K: log scale — powers of 10)
+    for (int exp = (int)log_k_min; exp <= (int)log_k_max; exp++) {
+        double lk = (double)exp;
+        double frac = (lk - log_k_min) / (log_k_max - log_k_min);
+        if (frac < 0 || frac > 1) continue;
+        int py = margin_top + (int)((1.0 - frac) * ph);
+        // Tick mark
+        for (int t = 0; t < tick_len; t++) {
+            if (py >= 0 && py < IMG_H) {
+                int idx = (py * IMG_W + margin_left - t) * 3;
+                img[idx] = img[idx+1] = img[idx+2] = 0;
+            }
+        }
+        // Tick label
+        double kval = std::pow(10.0, exp);
+        std::string label = fmt_sci(kval);
+        int text_x = margin_left - tick_len - 4 - (int)label.size() * 6 * scale;
+        int text_y = py - 5 * scale; // center vertically
+        draw_text(img, IMG_W, IMG_H, text_x, text_y, label, scale);
+    }
+
+    // X-axis label: "H (Hurst exponent)"
+    {
+        std::string xlabel = "H (Hurst exponent)";
+        int text_x = margin_left + pw / 2 - (int)xlabel.size() * 6 * scale / 2;
+        int text_y = IMG_H - margin_bottom + tick_len + 2 + 10 * scale + 8;
+        draw_text(img, IMG_W, IMG_H, text_x, text_y, xlabel, scale);
+    }
+
+    // Y-axis label: "K (generalised diffusion coefficient)" — vertical
+    {
+        std::string ylabel = "K (generalised diffusion coefficient)";
+        int center_y = margin_top + ph / 2;
+        int text_x = 12 + 10 * scale; // left side
+        int text_start_y = center_y + (int)ylabel.size() * 6 * scale / 2;
+        draw_text_vertical(img, IMG_W, IMG_H, text_x, text_start_y, ylabel, scale);
+    }
+
+    // Title: "Estimated cluster of trajectories"
+    {
+        std::string title = "Estimated cluster of trajectories";
+        int text_x = IMG_W / 2 - (int)title.size() * 6 * scale / 2;
+        int text_y = 10;
+        draw_text(img, IMG_W, IMG_H, text_x, text_y, title, scale);
+    }
+
+    // Scatter points: yellow 'x' markers for each (H, K) data point // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    {
+        const int marker_half = 3; // half-size of x marker in pixels
+        const uint8_t mr = 255, mg = 220, mb = 50; // yellow
+        for (int i = 0; i < n; i++) {
+            double hi = H_vals[i];
+            double lki = std::log10(std::max(K_vals[i], 1e-10));
+            double frac_x = (hi - h_min) / (h_max - h_min);
+            double frac_y = (lki - log_k_min) / (log_k_max - log_k_min);
+            if (frac_x < 0 || frac_x > 1 || frac_y < 0 || frac_y > 1) continue;
+            int cx = margin_left + (int)(frac_x * pw);
+            int cy = margin_top + (int)((1.0 - frac_y) * ph);
+            // Draw X shape
+            for (int d = -marker_half; d <= marker_half; d++) {
+                // diagonal 1
+                int px1 = cx + d, py1 = cy + d;
+                if (px1 >= margin_left && px1 < IMG_W - margin_right &&
+                    py1 >= margin_top && py1 < IMG_H - margin_bottom) {
+                    int idx = (py1 * IMG_W + px1) * 3;
+                    img[idx] = mr; img[idx+1] = mg; img[idx+2] = mb;
+                }
+                // diagonal 2
+                int px2 = cx + d, py2 = cy - d;
+                if (px2 >= margin_left && px2 < IMG_W - margin_right &&
+                    py2 >= margin_top && py2 < IMG_H - margin_bottom) {
+                    int idx = (py2 * IMG_W + px2) * 3;
+                    img[idx] = mr; img[idx+1] = mg; img[idx+2] = mb;
+                }
+            }
+        }
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
     // Write PNG
     FILE* fp = fopen(path.c_str(), "wb");
@@ -3099,11 +3375,11 @@ void make_hk_distribution_image(const std::string& path, // Modified by Claude (
     png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
     png_infop info = png_create_info_struct(png);
     png_init_io(png, fp);
-    png_set_IHDR(png, info, W, H_img, 8, PNG_COLOR_TYPE_RGB,
+    png_set_IHDR(png, info, IMG_W, IMG_H, 8, PNG_COLOR_TYPE_RGB,
                  PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
     png_write_info(png, info);
-    for (int r = 0; r < H_img; r++) {
-        png_write_row(png, &img[r * W * 3]);
+    for (int r = 0; r < IMG_H; r++) {
+        png_write_row(png, &img[r * IMG_W * 3]);
     }
     png_write_end(png, nullptr);
     png_destroy_write_struct(&png, &info);
