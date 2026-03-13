@@ -31,3 +31,4 @@ inputs/
 outputs_*/
 *.bin
 !models/qt_99.bin
+!models/traj_colors.bin
