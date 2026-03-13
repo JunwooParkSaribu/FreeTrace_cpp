@@ -3095,22 +3095,25 @@ static void draw_text(std::vector<uint8_t>& img, int img_w, int img_h,
     }
 }
 
-// Draw a string vertically (rotated 90 CCW) at (x,y) = bottom-left of first char
+// Draw a string vertically (rotated 90 CW: tilt head right to read) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+// (x, y) = top-left of bounding box; text reads top-to-bottom
+// Rotated glyph is 10px wide, 6px tall (before scale)
 static void draw_text_vertical(std::vector<uint8_t>& img, int img_w, int img_h,
                                int x, int y, const std::string& text, int scale,
                                uint8_t cr = 0, uint8_t cg = 0, uint8_t cb = 0) {
-    for (int i = 0; i < (int)text.size(); i++) {
-        int gi = font_index(text[i]);
-        // Draw rotated: column becomes row (bottom-to-top for the string)
+    int nch = (int)text.size();
+    for (int i = 0; i < nch; i++) {
+        int ci = nch - 1 - i; // first char at bottom, last at top
+        int gi = font_index(text[ci]);
+        // 90 CW: (col, row) → screen (row, 5-col)
         for (int row = 0; row < 10; row++) {
             uint8_t bits = FONT_6x10[gi][row];
             for (int col = 0; col < 6; col++) {
                 if (bits & (0x80 >> col)) {
                     for (int sy = 0; sy < scale; sy++) {
                         for (int sx = 0; sx < scale; sx++) {
-                            // Rotate 90 CCW: (col, row) → (-row, col) in screen coords
-                            int px = x - row * scale - sy;
-                            int py = y - (int)text.size() * 6 * scale + i * 6 * scale + col * scale + sx;
+                            int px = x + row * scale + sy;
+                            int py = y + i * 6 * scale + (5 - col) * scale + sx;
                             if (px >= 0 && px < img_w && py >= 0 && py < img_h) {
                                 int idx = (py * img_w + px) * 3;
                                 img[idx] = cr; img[idx+1] = cg; img[idx+2] = cb;
@@ -3121,7 +3124,7 @@ static void draw_text_vertical(std::vector<uint8_t>& img, int img_w, int img_h,
             }
         }
     }
-}
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 // Format a number for tick labels
 static std::string fmt_tick(double val, int decimals = 1) {
@@ -3320,14 +3323,15 @@ void make_hk_distribution_image(const std::string& path, // Modified by Claude (
         draw_text(img, IMG_W, IMG_H, text_x, text_y, xlabel, scale);
     }
 
-    // Y-axis label: "K (generalised diffusion coefficient)" — vertical
+    // Y-axis label: "K (generalised diffusion coefficient)" — vertical (90 CW) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     {
         std::string ylabel = "K (generalised diffusion coefficient)";
+        int text_height = (int)ylabel.size() * 6 * scale;
         int center_y = margin_top + ph / 2;
-        int text_x = 12 + 10 * scale; // left side
-        int text_start_y = center_y + (int)ylabel.size() * 6 * scale / 2;
+        int text_x = 4; // left side
+        int text_start_y = center_y - text_height / 2;
         draw_text_vertical(img, IMG_W, IMG_H, text_x, text_start_y, ylabel, scale);
-    }
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
     // Title: "Estimated cluster of trajectories"
     {
