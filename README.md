@@ -24,11 +24,14 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 
 **Quick start:**
 ```bash
-# Default tracking (fBm ON, auto jump threshold)
-./freetrace track loc.csv output/ 100 --tiff video.tiff
+# Full pipeline: localization + tracking (simplest usage)
+./freetrace video.tiff results/
 
-# Disable fBm mode (no NN, fixed alpha/K, no H-K output)
-./freetrace track loc.csv output/ 100 --tiff video.tiff --no-fbm
+# Localization only
+./freetrace localize video.tiff results/
+
+# Tracking only (from existing loc CSV)
+./freetrace track results/video_loc.csv results/ 100 --tiff video.tiff
 ```
 
 > **First time?** See [Build Instructions](#build) for step-by-step setup on Linux, macOS, and Windows.
@@ -437,31 +440,57 @@ Usage:
 
 ## Usage
 
-### Localization // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+### Full pipeline (localization + tracking) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+
+The simplest way to use FreeTrace — just provide a TIFF and output directory:
 ```bash
-./freetrace <input.tiff> <output_dir> [window_size=7] [threshold=1.0] [shift=1]
+./freetrace <input.tiff> <output_dir> [options]
 ```
 
 **Example:**
 ```bash
-./freetrace video.tiff results/ 7 1.0 1
+# Run everything with defaults (fBm ON, auto jump threshold)
+./freetrace video.tiff results/
+
+# With custom options
+./freetrace video.tiff results/ --window 9 --threshold 1.5 --depth 4 --jump 10.0
 ```
 
-This reads the TIFF stack, runs localization with window size 7, threshold multiplier 1.0, and shift 1, then writes `results/video_loc.csv` and `results/video_loc_2d_density.png`. // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+This runs localization first, then automatically feeds the result into tracking.
+
+**Outputs:**
+- `{name}_loc.csv` — localization CSV
+- `{name}_loc_2d_density.png` — particle density image
+- `{name}_traces.csv` — trajectory CSV
+- `{name}_traces.png` — trajectory visualization
+- `{name}_diffusion.csv` — H and K per trajectory (fBm mode only)
+- `{name}_diffusion_distribution.png` — H-K distribution plot (fBm mode only)
+
+### Localization only // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+```bash
+./freetrace localize <input.tiff> <output_dir> [options]
+```
+
+**Example:**
+```bash
+./freetrace localize video.tiff results/ --window 7 --threshold 1.0 --shift 1
+```
+
+**Localization options:**
+- `--window N` — window size (default: 7)
+- `--threshold F` — detection threshold multiplier (default: 1.0)
+- `--shift N` — shift (default: 1)
 
 **Output columns**: `frame, x, y, z, xvar, yvar, rho, norm_cst, intensity, window_size` — identical to the Python FreeTrace output format.
 
-### Tracking // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+### Tracking only // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 ```bash
 ./freetrace track <loc.csv> <output_dir> <nb_frames> [options]
 ```
 
-**Example:** // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+**Example:**
 ```bash
-# Run localization first
-./freetrace video.tiff results/
-
-# Default tracking (fBm ON, auto jump threshold, depth=3, cutoff=3)
+# Default tracking (fBm ON, auto jump threshold)
 ./freetrace track results/video_loc.csv results/ 100 --tiff video.tiff
 
 # Custom jump threshold
@@ -471,7 +500,7 @@ This reads the TIFF stack, runs localization with window size 7, threshold multi
 ./freetrace track results/video_loc.csv results/ 100 --tiff video.tiff --no-fbm
 ```
 
-**Options:** // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+**Tracking options:**
 - `--depth N` — graph search depth (default: 3, evaluates 2^N alternatives per subgraph)
 - `--cutoff N` — minimum trajectory length to keep (default: 3)
 - `--jump F` — maximum jump distance in pixels (default: auto-inferred from data)
@@ -479,12 +508,6 @@ This reads the TIFF stack, runs localization with window size 7, threshold multi
 - `--no-fbm` — disable fBm mode: no NN, uses fixed alpha=1.0/K=0.3, no H-K output
 - `--postprocess` — enable post-processing of trajectories
 - `--quiet` — suppress status messages
-
-**Outputs:** // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
-- `{name}_traces.csv` — trajectory CSV (always)
-- `{name}_traces.png` — trajectory visualization (always)
-- `{name}_diffusion.csv` — H and K values per trajectory (fBm mode only)
-- `{name}_diffusion_distribution.png` — H-K distribution plot (fBm mode only)
 
 ### As a library
 ```cpp
