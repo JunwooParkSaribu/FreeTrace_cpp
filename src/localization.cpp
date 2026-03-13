@@ -18,6 +18,11 @@
 #include <tiffio.h>
 #endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
+#include "gpu_module.h" // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:50
+
+// Global GPU flag — set once at startup in run()
+static bool USE_GPU = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:50
+
 namespace freetrace {
 
 // ============================================================
@@ -683,10 +688,16 @@ LocalizationResult localize(
         auto& ws0 = single_ws[0];
         auto& grid0 = forward_grids[0];
 
-        // Crop images
+        // Crop images // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:50
         int nb_crops = 0;
-        auto crop_imgs = image_cropping(ext_imgs, nb_imgs, ext_rows, ext_cols,
+        std::vector<float> crop_imgs;
+        if (USE_GPU) {
+            crop_imgs = gpu::image_cropping_gpu(ext_imgs, nb_imgs, ext_rows, ext_cols,
+                                                 extend, ws0.w, ws0.h, shift, nb_crops);
+        } else {
+            crop_imgs = image_cropping(ext_imgs, nb_imgs, ext_rows, ext_cols,
                                          extend, ws0.w, ws0.h, shift, nb_crops);
+        }
 
         // Compute bg_squared_sums
         std::vector<float> bg_sq_sums(nb_imgs);
@@ -694,10 +705,22 @@ LocalizationResult localize(
             bg_sq_sums[n] = ws0.w * ws0.h * bg_means[n] * bg_means[n];
 
         // Compute likelihood
-        auto lik = likelihood(crop_imgs, grid0, bg_sq_sums, bg_means,
+        std::vector<float> lik;
+        if (USE_GPU) {
+            int sw = ws0.h * ws0.w;
+            std::vector<float> gdata(sw);
+            float gmean = image_mean(grid0);
+            for (int i = 0; i < ws0.h; ++i)
+                for (int j = 0; j < ws0.w; ++j)
+                    gdata[i * ws0.w + j] = grid0.data[i * grid0.cols + j];
+            lik = gpu::likelihood_gpu(crop_imgs, gdata, gmean, bg_sq_sums, bg_means,
+                                       nb_imgs, nb_crops, sw);
+        } else {
+            lik = likelihood(crop_imgs, grid0, bg_sq_sums, bg_means,
                               nb_imgs, nb_crops, ws0.h, ws0.w);
+        }
 
-        // Map likelihood back to image space
+        // Map likelihood back to image space // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:50
         auto h_map = mapping(lik, nb_imgs, rows, cols, shift);
 
         // Thresholds for single window — use bg_result.thresholds directly
@@ -866,18 +889,36 @@ LocalizationResult localize(
             auto& ws = multi_ws[wi];
             auto& grid = backward_grids[wi];
 
-            int nb_crops = 0;
-            auto crop_imgs = image_cropping(ext_imgs, nb_imgs, ext_rows, ext_cols,
+            int nb_crops = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:50
+            std::vector<float> crop_imgs;
+            if (USE_GPU) {
+                crop_imgs = gpu::image_cropping_gpu(ext_imgs, nb_imgs, ext_rows, ext_cols,
+                                                     extend, ws.w, ws.h, shift, nb_crops);
+            } else {
+                crop_imgs = image_cropping(ext_imgs, nb_imgs, ext_rows, ext_cols,
                                              extend, ws.w, ws.h, shift, nb_crops);
+            }
 
             std::vector<float> bg_sq_sums(nb_imgs);
             for (int n = 0; n < nb_imgs; ++n)
                 bg_sq_sums[n] = ws.w * ws.h * bg_means[n] * bg_means[n];
 
-            auto lik = likelihood(crop_imgs, grid, bg_sq_sums, bg_means,
+            std::vector<float> lik;
+            if (USE_GPU) {
+                int sw = ws.h * ws.w;
+                std::vector<float> gdata(sw);
+                float gmean = image_mean(grid);
+                for (int i = 0; i < ws.h; ++i)
+                    for (int j = 0; j < ws.w; ++j)
+                        gdata[i * ws.w + j] = grid.data[i * grid.cols + j];
+                lik = gpu::likelihood_gpu(crop_imgs, gdata, gmean, bg_sq_sums, bg_means,
+                                           nb_imgs, nb_crops, sw);
+            } else {
+                lik = likelihood(crop_imgs, grid, bg_sq_sums, bg_means,
                                   nb_imgs, nb_crops, ws.h, ws.w);
+            }
 
-            auto h_map = mapping(lik, nb_imgs, rows, cols, shift);
+            auto h_map = mapping(lik, nb_imgs, rows, cols, shift); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:50
 
             // Scale by window area ratio (as in Python)
             float scale = static_cast<float>(multi_ws[0].w * multi_ws[0].w) /
@@ -1027,22 +1068,40 @@ LocalizationResult localize_from_ext( // Modified by Claude (claude-opus-4-6, An
         auto& ws0 = single_ws[0];
         auto& grid0 = forward_grids[0];
 
-        int nb_crops = 0;
-        auto crop_imgs = image_cropping(ext_imgs, nb_imgs, ext_rows, ext_cols,
+        int nb_crops = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:50
+        std::vector<float> crop_imgs;
+        if (USE_GPU) {
+            crop_imgs = gpu::image_cropping_gpu(ext_imgs, nb_imgs, ext_rows, ext_cols,
+                                                 extend, ws0.w, ws0.h, shift, nb_crops);
+        } else {
+            crop_imgs = image_cropping(ext_imgs, nb_imgs, ext_rows, ext_cols,
                                          extend, ws0.w, ws0.h, shift, nb_crops);
+        }
 
         std::vector<float> bg_sq_sums(nb_imgs);
         for (int n = 0; n < nb_imgs; ++n)
             bg_sq_sums[n] = ws0.w * ws0.h * bg_means[n] * bg_means[n];
 
-        auto lik = likelihood(crop_imgs, grid0, bg_sq_sums, bg_means,
+        std::vector<float> lik;
+        if (USE_GPU) {
+            int sw = ws0.h * ws0.w;
+            std::vector<float> gdata(sw);
+            float gmean = image_mean(grid0);
+            for (int i = 0; i < ws0.h; ++i)
+                for (int j = 0; j < ws0.w; ++j)
+                    gdata[i * ws0.w + j] = grid0.data[i * grid0.cols + j];
+            lik = gpu::likelihood_gpu(crop_imgs, gdata, gmean, bg_sq_sums, bg_means,
+                                       nb_imgs, nb_crops, sw);
+        } else {
+            lik = likelihood(crop_imgs, grid0, bg_sq_sums, bg_means,
                               nb_imgs, nb_crops, ws0.h, ws0.w);
+        }
 
         auto h_map = mapping(lik, nb_imgs, rows, cols, shift);
         auto& thresholds = bg_result.thresholds;
 
 
-        // NMS detection — identical to localize() // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        // NMS detection — identical to localize() // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:50 // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         int r_half = (shift == 0) ? ws0.h / 2 : shift;
         int c_half = (shift == 0) ? ws0.w / 2 : shift;
         struct CandInfo { int frame; int r; int c; float score; };
@@ -1182,13 +1241,28 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
         return false;
     }
 
-    if (verbose)
+    // Detect GPU availability // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:50
+    USE_GPU = gpu::is_available();
+    if (verbose) {
         std::cout << "Loaded " << nb_frames << " frames (" << height << "x" << width << ")" << std::endl;
+        if (USE_GPU) {
+            std::cout << "GPU detected (" << gpu::get_gpu_mem_size() << " GB free). Using CUDA acceleration." << std::endl;
+        } else {
+            std::cout << "No GPU detected. Running on CPU." << std::endl;
+        }
+    }
 
-    // Batch size matching Python: DIV_Q = min(50, int(2.7 * 4194304 / rows / cols * (49 / ws^2))) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    // Batch size — GPU uses larger batches (matching Python gpu_module logic) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:50
     int ws2 = window_size * window_size;
-    int div_q = std::min(50, static_cast<int>(2.7 * 4194304.0 / height / width * (49.0 / ws2)));
-    div_q = std::max(div_q, 1);
+    int div_q;
+    if (USE_GPU) {
+        int mem_gb = gpu::get_gpu_mem_size();
+        div_q = static_cast<int>(64.0 * 512 * 512 / height / width * (49.0 / ws2) * mem_gb / 24.0);
+        div_q = std::max(div_q, 1);
+    } else {
+        div_q = std::min(50, static_cast<int>(2.7 * 4194304.0 / height / width * (49.0 / ws2)));
+        div_q = std::max(div_q, 1);
+    }
 
     if (verbose)
         std::cout << "Batch size: " << div_q << std::endl;

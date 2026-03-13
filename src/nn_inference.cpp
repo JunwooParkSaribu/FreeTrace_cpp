@@ -144,13 +144,24 @@ static int model_selection(const NNModels& models, int length) {
 
 #ifdef USE_ONNXRUNTIME // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
-bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     try {
-        auto* env = new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "freetrace"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        models.env = env; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        auto* env = new Ort::Env(ORT_LOGGING_LEVEL_ERROR, "freetrace"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        models.env = env;
 
-        Ort::SessionOptions opts; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        opts.SetIntraOpNumThreads(1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        Ort::SessionOptions opts;
+        opts.SetIntraOpNumThreads(1);
+
+        // Try to enable CUDA execution provider if available // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        bool gpu_enabled = false;
+        try {
+            OrtCUDAProviderOptions cuda_opts;
+            cuda_opts.device_id = 0;
+            opts.AppendExecutionProvider_CUDA(cuda_opts);
+            gpu_enabled = true;
+        } catch (...) {
+            // CUDA provider not available, fall back to CPU
+        }
 
         models.reg_model_nums = {3, 5, 8}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         models.crits = {3, 5, 8, 8192}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -166,11 +177,16 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
         std::string k_path = models_dir + "/reg_k_model.onnx"; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         models.k_session = new Ort::Session(*env, k_path.c_str(), opts); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
-        models.loaded = true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        return true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    } catch (const Ort::Exception& e) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        std::cerr << "ONNX load error: " << e.what() << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-        return false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        models.loaded = true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+        if (gpu_enabled) {
+            std::cout << "NN inference: GPU (CUDA) enabled" << std::endl;
+        } else {
+            std::cout << "NN inference: CPU mode" << std::endl;
+        }
+        return true;
+    } catch (const Ort::Exception& e) {
+        std::cerr << "ONNX load error: " << e.what() << std::endl;
+        return false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
     }
 }
 
