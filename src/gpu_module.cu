@@ -24,13 +24,19 @@ int get_gpu_mem_size() {
     return static_cast<int>(free_mem / (1000ULL * 1000ULL * 1000ULL));
 }
 
+size_t get_gpu_free_mem_bytes() { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+    size_t free_mem = 0, total_mem = 0;
+    cudaMemGetInfo(&free_mem, &total_mem);
+    return free_mem;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+
 // ============================================================
 // Likelihood CUDA kernel
 // ============================================================
 // Each thread handles one (img, crop) pair.
 // Computes: min over window, dot product with g_bar, then log-likelihood.
 
-__global__ void likelihood_kernel(
+__global__ void likelihood_kernel( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     const float* __restrict__ crop_imgs,   // [nb_imgs * nb_crops * sw]
     const float* __restrict__ g_bar,       // [sw]
     float g_squared_sum,
@@ -46,35 +52,37 @@ __global__ void likelihood_kernel(
     int n = idx / nb_crops;
     int c = idx % nb_crops;
 
-    float bg_mean = bg_means[n];
-    float denom = bg_squared_sums[n] - surface_window * bg_mean;
-    if (fabsf(denom) < 1e-12f) denom = 1e-12f;
+    // Use double precision internally to match CPU arithmetic
+    double bg_mean = (double)bg_means[n];
+    double g_sq = (double)g_squared_sum;
+    double denom = (double)bg_squared_sums[n] - surface_window * bg_mean;
+    if (fabs(denom) < 1e-12) denom = 1e-12;
 
     int base = (n * nb_crops + c) * surface_window;
 
     // Compute min(crop - bg_mean)
-    float i_local_min = 1e30f;
+    double i_local_min = 1e30;
     for (int p = 0; p < surface_window; ++p) {
-        float v = crop_imgs[base + p] - bg_mean;
-        i_local_min = fminf(i_local_min, v);
+        double v = (double)crop_imgs[base + p] - bg_mean;
+        i_local_min = fmin(i_local_min, v);
     }
-    float shift_val = fmaxf(0.0f, i_local_min);
+    double shift_val = fmax(0.0, i_local_min);
 
     // Dot product: sum((crop - bg_mean - shift) * g_bar)
-    float dot_val = 0.0f;
+    double dot_val = 0.0;
     for (int p = 0; p < surface_window; ++p) {
-        float v = crop_imgs[base + p] - bg_mean - shift_val;
-        dot_val += v * g_bar[p];
+        double v = (double)crop_imgs[base + p] - bg_mean - shift_val;
+        dot_val += v * (double)g_bar[p];
     }
 
-    float i_hat_proj = dot_val / g_squared_sum;
-    i_hat_proj = fmaxf(0.0f, i_hat_proj);
+    double i_hat_proj = dot_val / g_sq;
+    i_hat_proj = fmax(0.0, i_hat_proj);
 
     // L = (N/2) * log(1 - i_hat^2 * g_sq / denom)
-    float ratio = i_hat_proj * i_hat_proj * g_squared_sum / denom;
-    if (ratio >= 1.0f) ratio = 1.0f - 1e-7f;
-    L[n * nb_crops + c] = (surface_window / 2.0f) * logf(1.0f - ratio);
-}
+    double ratio = i_hat_proj * i_hat_proj * g_sq / denom;
+    if (ratio >= 1.0) ratio = 1.0 - 1e-7;
+    L[n * nb_crops + c] = (float)((surface_window / 2.0) * log(1.0 - ratio));
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
 std::vector<float> likelihood_gpu(
     const std::vector<float>& crop_imgs,
@@ -229,6 +237,259 @@ std::vector<float> image_cropping_gpu(
 
     return cropped;
 }
+
+// ============================================================ // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+// Background estimation CUDA kernel
+// ============================================================
+// One block per frame. Each block:
+//   1. Finds per-frame max, normalizes, quantizes to int bins 0-100
+//   2. Iterates 3x: histogram → mode → std → update mask
+//   3. Outputs final bg_mean and bg_std
+// Shared memory: float reduce[BLOCK_SIZE] + int hist[101]
+
+__global__ void background_kernel( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+    const float* __restrict__ imgs,     // [nb_imgs * pixel_count]
+    float* __restrict__ out_means,      // [nb_imgs]
+    float* __restrict__ out_stds,       // [nb_imgs]
+    int nb_imgs, int pixel_count,
+    double frame0_std                   // std of frame 0 (used for iter 0 of ALL frames)
+) {
+    int frame = blockIdx.x;
+    if (frame >= nb_imgs) return;
+
+    extern __shared__ char smem[];
+    // Use double for reductions to match CPU float64 precision
+    double* s_reduce = (double*)smem;
+    int* s_hist = (int*)(s_reduce + blockDim.x);
+
+    const float* fdata = imgs + frame * pixel_count;
+    int tid = threadIdx.x;
+    int BS = blockDim.x;
+
+    // --- Step 1: per-frame max (parallel reduction) ---
+    double tmax = 0.0;
+    for (int i = tid; i < pixel_count; i += BS)
+        tmax = fmax(tmax, (double)fdata[i]);
+    s_reduce[tid] = tmax;
+    __syncthreads();
+    for (int s = BS / 2; s > 0; s >>= 1) {
+        if (tid < s) s_reduce[tid] = fmax(s_reduce[tid], s_reduce[tid + s]);
+        __syncthreads();
+    }
+    double fmax_val = s_reduce[0];
+    if (fmax_val <= 0.0) fmax_val = 1.0;
+    __syncthreads();
+
+    // --- 3 iterations: histogram → mode → std → mask ---
+    double lo = -1e30, hi = 1e30;
+    double mode_val = 0.0;
+
+    for (int iter = 0; iter < 3; iter++) {
+        // Clear histogram
+        for (int i = tid; i < 101; i += BS) s_hist[i] = 0;
+        __syncthreads();
+
+        // Build histogram + find max_ival among masked pixels // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+        // Match Python: quantize in float32 to replicate (imgs * 100).astype(np.uint8)
+        int t_max_ival = 0;
+        for (int i = tid; i < pixel_count; i += BS) {
+            float normed_f = fdata[i] / (float)fmax_val;
+            int ival = (int)((unsigned char)(normed_f * 100.0f));
+            double val = ival / 100.0;
+            if (val > lo && val < hi) {
+                // np.histogram bin assignment: correct for np.arange float64 edge
+                int b = ival;
+                if (b > 0 && val < b * 0.01)
+                    b--;
+                atomicAdd(&s_hist[b], 1);
+                t_max_ival = max(t_max_ival, b);
+            }
+        }
+
+        // Reduce max_ival (now max_bin after edge correction)
+        s_reduce[tid] = (double)t_max_ival;
+        __syncthreads();
+        for (int s = BS / 2; s > 0; s >>= 1) {
+            if (tid < s) s_reduce[tid] = fmax(s_reduce[tid], s_reduce[tid + s]);
+            __syncthreads();
+        }
+        int max_bin = (int)(s_reduce[0] + 0.5);
+        __syncthreads();
+
+        // np.histogram: nb_bins = max_ival (not max_ival+1), last bin closed
+        // Any values in bins >= nb_bins get clamped into nb_bins-1
+        // Since we already applied edge correction, just use max_bin as nb_bins
+        int nb_bins = max(1, max_bin);
+
+        // Clamp overflow bins into last bin (np.histogram last-bin-closed rule)
+        if (tid == 0) {
+            for (int b = nb_bins; b <= 100; b++) {
+                if (s_hist[b] > 0) {
+                    s_hist[nb_bins - 1] += s_hist[b];
+                    s_hist[b] = 0;
+                }
+            }
+        }
+        __syncthreads();
+
+        // Find mode (thread 0)
+        if (tid == 0) {
+            int mode_bin = 0, mode_count = 0;
+            for (int b = 0; b < nb_bins; b++) {
+                if (s_hist[b] > mode_count) {
+                    mode_count = s_hist[b];
+                    mode_bin = b;
+                }
+            }
+            s_reduce[0] = mode_bin * 0.01 + 0.005;
+        }
+        __syncthreads();
+        mode_val = s_reduce[0];
+        __syncthreads();
+
+        // Compute std: iter 0 uses frame0_std for all frames (matching Python GPU) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+        double mask_std = 0.0;
+        if (iter == 0) {
+            mask_std = frame0_std;
+        } else {
+            double tsum = 0.0, tsum2 = 0.0, tcount = 0.0;
+            for (int i = tid; i < pixel_count; i += BS) {
+                float normed_f = fdata[i] / (float)fmax_val;
+                int ival = (int)((unsigned char)(normed_f * 100.0f));
+                double val = ival / 100.0;
+                if (val > lo && val < hi) {
+                    tsum += val;
+                    tsum2 += val * val;
+                    tcount += 1.0;
+                }
+            }
+            s_reduce[tid] = tsum;
+            __syncthreads();
+            for (int s = BS / 2; s > 0; s >>= 1) {
+                if (tid < s) s_reduce[tid] += s_reduce[tid + s];
+                __syncthreads();
+            }
+            double total_sum = s_reduce[0];
+            __syncthreads();
+            s_reduce[tid] = tsum2;
+            __syncthreads();
+            for (int s = BS / 2; s > 0; s >>= 1) {
+                if (tid < s) s_reduce[tid] += s_reduce[tid + s];
+                __syncthreads();
+            }
+            double total_sum2 = s_reduce[0];
+            __syncthreads();
+            s_reduce[tid] = tcount;
+            __syncthreads();
+            for (int s = BS / 2; s > 0; s >>= 1) {
+                if (tid < s) s_reduce[tid] += s_reduce[tid + s];
+                __syncthreads();
+            }
+            double total_count = s_reduce[0];
+            __syncthreads();
+            if (total_count > 0.5) {
+                double mean_tmp = total_sum / total_count;
+                mask_std = sqrt(fmax(0.0, total_sum2 / total_count - mean_tmp * mean_tmp));
+            }
+        }
+
+        lo = mode_val - 3.0 * mask_std;
+        hi = mode_val + 3.0 * mask_std; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+    }
+
+    // --- Final: compute mean/std from final mask --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+    double tsum = 0.0, tsum2 = 0.0, tcount = 0.0;
+    for (int i = tid; i < pixel_count; i += BS) {
+        float normed_f = fdata[i] / (float)fmax_val;
+        int ival = (int)((unsigned char)(normed_f * 100.0f));
+        double val = ival / 100.0;
+        if (val > lo && val < hi) {
+            tsum += val;
+            tsum2 += val * val;
+            tcount += 1.0;
+        }
+    }
+
+    s_reduce[tid] = tsum;
+    __syncthreads();
+    for (int s = BS / 2; s > 0; s >>= 1) {
+        if (tid < s) s_reduce[tid] += s_reduce[tid + s];
+        __syncthreads();
+    }
+    double final_sum = s_reduce[0];
+    __syncthreads();
+
+    s_reduce[tid] = tsum2;
+    __syncthreads();
+    for (int s = BS / 2; s > 0; s >>= 1) {
+        if (tid < s) s_reduce[tid] += s_reduce[tid + s];
+        __syncthreads();
+    }
+    double final_sum2 = s_reduce[0];
+    __syncthreads();
+
+    s_reduce[tid] = tcount;
+    __syncthreads();
+    for (int s = BS / 2; s > 0; s >>= 1) {
+        if (tid < s) s_reduce[tid] += s_reduce[tid + s];
+        __syncthreads();
+    }
+    double final_count = s_reduce[0];
+
+    if (tid == 0) {
+        if (final_count > 0.5) {
+            double mean_d = final_sum / final_count;
+            out_means[frame] = (float)mean_d;
+            out_stds[frame] = (float)sqrt(fmax(0.0, final_sum2 / final_count - mean_d * mean_d));
+        } else {
+            out_means[frame] = 0.0f;
+            out_stds[frame] = 0.0f;
+        }
+    }
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+
+void compute_background_gpu(
+    const std::vector<float>& imgs,
+    int nb_imgs, int rows, int cols,
+    float* out_means, float* out_stds
+) {
+    int pixel_count = rows * cols;
+
+    // Allocate device memory
+    float *d_imgs, *d_means, *d_stds;
+    size_t imgs_size = (size_t)nb_imgs * pixel_count * sizeof(float);
+    cudaMalloc(&d_imgs, imgs_size);
+    cudaMalloc(&d_means, nb_imgs * sizeof(float));
+    cudaMalloc(&d_stds, nb_imgs * sizeof(float));
+
+    cudaMemcpy(d_imgs, imgs.data(), imgs_size, cudaMemcpyHostToDevice);
+
+    // Pre-compute frame 0's std on CPU (matching Python GPU's flat cp.take behavior) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+    // Frame 0 is already normalized to [0,1] with max=1.0
+    double f0_sum = 0.0, f0_sum2 = 0.0;
+    for (int i = 0; i < pixel_count; ++i) {
+        float normed_f = imgs[i] / 1.0f; // frame 0, fmax=1.0
+        int ival = (int)((unsigned char)(normed_f * 100.0f));
+        double val = ival / 100.0;
+        f0_sum += val;
+        f0_sum2 += val * val;
+    }
+    double f0_mean = f0_sum / pixel_count;
+    double frame0_std = std::sqrt(std::max(0.0, f0_sum2 / pixel_count - f0_mean * f0_mean));
+
+    int block_size = 256;
+    size_t smem_size = block_size * sizeof(double) + 101 * sizeof(int);
+    background_kernel<<<nb_imgs, block_size, smem_size>>>(
+        d_imgs, d_means, d_stds, nb_imgs, pixel_count, frame0_std
+    ); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+
+    cudaMemcpy(out_means, d_means, nb_imgs * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(out_stds, d_stds, nb_imgs * sizeof(float), cudaMemcpyDeviceToHost);
+
+    cudaFree(d_imgs);
+    cudaFree(d_means);
+    cudaFree(d_stds);
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
 } // namespace gpu
 } // namespace freetrace // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:40

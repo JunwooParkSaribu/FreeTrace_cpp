@@ -1,6 +1,18 @@
-# Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
-cmake_minimum_required(VERSION 3.16)
-project(FreeTrace_cpp VERSION 0.1.0 LANGUAGES CXX)
+# Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+cmake_minimum_required(VERSION 3.18)
+
+# Auto-detect CUDA — enable GPU support if nvcc is found // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+include(CheckLanguage)
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
+    project(FreeTrace_cpp VERSION 0.1.0 LANGUAGES CXX CUDA)
+    set(USE_CUDA ON)
+    message(STATUS "CUDA found: ${CMAKE_CUDA_COMPILER} — GPU acceleration enabled")
+else()
+    project(FreeTrace_cpp VERSION 0.1.0 LANGUAGES CXX)
+    set(USE_CUDA OFF)
+    message(STATUS "CUDA not found — GPU acceleration disabled (CPU only)")
+endif() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,7 +23,7 @@ set(ONNXRUNTIME_DIR "" CACHE PATH "Path to ONNX Runtime installation")
 
 # --- Dependencies ---
 
-# OpenMP (optional, parallel localization loops) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+# OpenMP (optional, parallel localization loops)
 find_package(OpenMP QUIET)
 
 # OpenCV (optional, alternative TIFF I/O)
@@ -54,8 +66,13 @@ else()
     endif()
 endif()
 
-# GPU module: stub (CUDA build requires separate setup)
-list(APPEND CORE_SOURCES src/gpu_module_stub.cpp)
+# GPU module: CUDA or stub // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+if(USE_CUDA)
+    list(APPEND CORE_SOURCES src/gpu_module.cu)
+    add_definitions(-DUSE_CUDA)
+else()
+    list(APPEND CORE_SOURCES src/gpu_module_stub.cpp)
+endif() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
 # --- Target ---
 
@@ -63,12 +80,22 @@ add_executable(freetrace ${CORE_SOURCES})
 
 target_include_directories(freetrace PRIVATE include)
 
+# CUDA settings // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+if(USE_CUDA)
+    set_target_properties(freetrace PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    target_link_libraries(freetrace PRIVATE cudart)
+endif() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+
 # AVX2 for x86-simd-sort (used in tracking argsort)
 include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag("-mavx2" HAS_AVX2)
 if(HAS_AVX2)
-    target_compile_options(freetrace PRIVATE -mavx2)
+    target_compile_options(freetrace PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2>)
 endif()
+
+# Disable FP contraction (FMA fusion) for deterministic floating-point results
+# Without this, -O3 can produce different results across compilations
+set_source_files_properties(src/tracking.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 
 # --- Link libraries ---
 
@@ -87,7 +114,7 @@ endif()
 
 if(OpenMP_CXX_FOUND)
     target_link_libraries(freetrace PRIVATE OpenMP::OpenMP_CXX)
-endif() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+endif()
 
 if(USE_ONNXRUNTIME AND EXISTS "${ONNXRUNTIME_DIR}/include/onnxruntime_cxx_api.h")
     target_include_directories(freetrace PRIVATE ${ONNXRUNTIME_DIR}/include)
@@ -104,4 +131,4 @@ if(USE_ONNXRUNTIME AND EXISTS "${ONNXRUNTIME_DIR}/include/onnxruntime_cxx_api.h"
             BUILD_RPATH "${ONNXRUNTIME_DIR}/lib")
     endif()
 endif()
-# Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+# Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14

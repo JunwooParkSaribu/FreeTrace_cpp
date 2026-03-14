@@ -1,0 +1,163 @@
+# Build and release FreeTrace C++ binaries for all platforms
+# Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+#
+# Triggered by pushing a version tag: git tag v1.0.0 && git push --tags
+# Creates a GitHub Release with pre-built binaries for Linux, macOS, and Windows.
+# Each archive includes: freetrace binary + models/ + ONNX Runtime libs (fBm support).
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x64
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-linux-x64-1.24.3.tgz
+            ort_dir: onnxruntime-linux-x64-1.24.3
+            archive_ext: tar.gz
+            lib_glob: "lib/libonnxruntime*.so*"
+
+          - os: macos-13
+            name: macos-x64
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-osx-x86_64-1.24.3.tgz
+            ort_dir: onnxruntime-osx-x86_64-1.24.3
+            archive_ext: tar.gz
+            lib_glob: "lib/libonnxruntime*.dylib"
+
+          - os: macos-latest
+            name: macos-arm64
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-osx-arm64-1.24.3.tgz
+            ort_dir: onnxruntime-osx-arm64-1.24.3
+            archive_ext: tar.gz
+            lib_glob: "lib/libonnxruntime*.dylib"
+
+          - os: windows-latest
+            name: windows-x64
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-1.24.3.zip
+            ort_dir: onnxruntime-win-x64-1.24.3
+            archive_ext: zip
+            lib_glob: "lib/*.dll"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libtiff-dev libpng-dev
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libtiff libpng
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          vcpkg install tiff:x64-windows libpng:x64-windows
+
+      - name: Download ONNX Runtime
+        shell: bash
+        run: |
+          if [[ "${{ matrix.archive_ext }}" == "zip" ]]; then
+            curl -L -o ort.zip "${{ matrix.ort_url }}"
+            unzip -q ort.zip
+          else
+            curl -L -o ort.tgz "${{ matrix.ort_url }}"
+            tar xzf ort.tgz
+          fi
+
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir build && cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_ONNXRUNTIME=ON \
+            -DONNXRUNTIME_DIR=$(pwd)/../${{ matrix.ort_dir }}
+          make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir build
+          cd build
+          cmake .. -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+                   -DUSE_ONNXRUNTIME=ON `
+                   -DONNXRUNTIME_DIR="$PWD/../${{ matrix.ort_dir }}"
+          cmake --build . --config Release
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          DIST="freetrace-${{ matrix.name }}"
+          mkdir -p "$DIST/lib"
+          cp build/freetrace "$DIST/"
+          cp -r models "$DIST/"
+          # Copy ONNX Runtime shared libs
+          cp ${{ matrix.ort_dir }}/${{ matrix.lib_glob }} "$DIST/lib/"
+          # Create wrapper script that sets library path
+          cat > "$DIST/run_freetrace.sh" << 'SCRIPT'
+          #!/bin/bash
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          if [[ "$(uname)" == "Darwin" ]]; then
+            export DYLD_LIBRARY_PATH="$DIR/lib:$DYLD_LIBRARY_PATH"
+          else
+            export LD_LIBRARY_PATH="$DIR/lib:$LD_LIBRARY_PATH"
+          fi
+          exec "$DIR/freetrace" "$@"
+          SCRIPT
+          chmod +x "$DIST/run_freetrace.sh" "$DIST/freetrace"
+          tar czf "$DIST.tar.gz" "$DIST"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $DIST = "freetrace-${{ matrix.name }}"
+          New-Item -ItemType Directory -Path "$DIST" -Force
+          Copy-Item "build/Release/freetrace.exe" "$DIST/"
+          Copy-Item -Recurse "models" "$DIST/"
+          # Copy ONNX Runtime DLLs next to exe
+          Copy-Item "${{ matrix.ort_dir }}/lib/*.dll" "$DIST/"
+          # Copy vcpkg dependency DLLs
+          $vcpkgBin = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"
+          if (Test-Path "$vcpkgBin/tiff.dll") { Copy-Item "$vcpkgBin/tiff*.dll" "$DIST/" }
+          if (Test-Path "$vcpkgBin/libpng16.dll") { Copy-Item "$vcpkgBin/libpng*.dll" "$DIST/" }
+          if (Test-Path "$vcpkgBin/zlib1.dll") { Copy-Item "$vcpkgBin/zlib*.dll" "$DIST/" }
+          if (Test-Path "$vcpkgBin/jpeg62.dll") { Copy-Item "$vcpkgBin/jpeg*.dll" "$DIST/" }
+          Compress-Archive -Path "$DIST" -DestinationPath "$DIST.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freetrace-${{ matrix.name }}
+          path: freetrace-${{ matrix.name }}.${{ matrix.archive_ext }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          generate_release_notes: true
+# Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14

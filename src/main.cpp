@@ -31,7 +31,8 @@ static TrackingOpts parse_tracking_opts(int argc, char* argv[], int start_idx) {
         else if (std::strcmp(argv[i], "--window") == 0 && i + 1 < argc) ++i;
         else if (std::strcmp(argv[i], "--threshold") == 0 && i + 1 < argc) ++i;
         else if (std::strcmp(argv[i], "--shift") == 0 && i + 1 < argc) ++i;
-        else { std::cerr << "Unknown option: " << argv[i] << std::endl; return opts; }
+        else if (std::strcmp(argv[i], "--cpu") == 0) {} // parsed by parse_loc_opts // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+        else { std::cerr << "Unknown option: " << argv[i] << std::endl; return opts; } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     }
     return opts;
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
@@ -70,6 +71,7 @@ static void print_usage() {
               << "    --window N       Window size (default: 7)\n"
               << "    --threshold F    Detection threshold (default: 1.0)\n"
               << "    --shift N        Shift (default: 1)\n"
+              << "    (GPU is used automatically if available)\n"
               << "\n"
               << "  Tracking options:\n"
               << "    --depth N        Graph depth (default: 3)\n"
@@ -94,15 +96,15 @@ static std::string build_loc_csv_path(const std::string& tiff_path, const std::s
 #endif
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
-// Parse localization options from argv
-static void parse_loc_opts(int argc, char* argv[], int start_idx, int& window, float& threshold, int& shift) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+// Parse localization options from argv // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+static void parse_loc_opts(int argc, char* argv[], int start_idx, int& window, float& threshold, int& shift) {
     for (int i = start_idx; i < argc; i++) {
         if (std::strcmp(argv[i], "--window") == 0 && i + 1 < argc) window = std::stoi(argv[++i]);
         else if (std::strcmp(argv[i], "--threshold") == 0 && i + 1 < argc) threshold = std::stof(argv[++i]);
         else if (std::strcmp(argv[i], "--shift") == 0 && i + 1 < argc) shift = std::stoi(argv[++i]);
         // Skip tracking options (parsed by parse_tracking_opts)
     }
-} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
 int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
@@ -121,11 +123,12 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
         auto opts = parse_tracking_opts(argc, argv, 5);
         auto& config = opts.config;
 
-        if (!config.tiff_path.empty()) {
+        if (!config.tiff_path.empty()) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
             int tiff_frames, tiff_h, tiff_w;
             freetrace::read_tiff(config.tiff_path, tiff_frames, tiff_h, tiff_w);
             config.img_rows = tiff_h;
             config.img_cols = tiff_w;
+            nb_frames = tiff_frames;
         }
 
         print_tracking_banner(loc_csv, output, nb_frames, config); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
@@ -133,12 +136,12 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
         return freetrace::run_tracking(loc_csv, output, nb_frames, config) ? 0 : 1;
     }
 
-    // ---- Mode 2: Localization only ----
+    // ---- Mode 2: Localization only ---- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     // freetrace localize <input.tiff> <output_dir> [options]
     if (argc >= 4 && std::string(argv[1]) == "localize") {
         std::string input = argv[2];
         std::string output = argv[3];
-        int window = 7; float threshold = 1.0f; int shift = 1;
+        int window = 7; float threshold = 1.0f; int shift = 1; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
         parse_loc_opts(argc, argv, 4, window, threshold, shift);
 
         std::cout << "FreeTrace C++ — Localization" << std::endl;
@@ -147,17 +150,17 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
         std::cout << "  Window: " << window << ", Threshold: " << threshold
                   << ", Shift: " << shift << std::endl;
 
-        return freetrace::run(input, output, window, threshold, shift, /*verbose=*/true, "") ? 0 : 1;
-    }
+        return freetrace::run(input, output, window, threshold, shift, /*verbose=*/true) ? 0 : 1; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
-    // ---- Mode 3: Full pipeline (localization + tracking) ----
+    // ---- Mode 3: Full pipeline (localization + tracking) ---- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     // freetrace <input.tiff> <output_dir> [options]
     if (argc >= 3 && std::string(argv[1]) != "track" && std::string(argv[1]) != "localize") {
         std::string input = argv[1];
         std::string output = argv[2];
 
         // Parse localization options
-        int window = 7; float threshold = 1.0f; int shift = 1;
+        int window = 7; float threshold = 1.0f; int shift = 1; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
         parse_loc_opts(argc, argv, 3, window, threshold, shift);
 
         // Parse tracking options
@@ -173,7 +176,7 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
         std::cout << "  Window: " << window << ", Threshold: " << threshold
                   << ", Shift: " << shift << std::endl;
 
-        bool lok = freetrace::run(input, output, window, threshold, shift, verbose, "");
+        bool lok = freetrace::run(input, output, window, threshold, shift, verbose); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
         if (!lok) {
             std::cerr << "Localization failed." << std::endl;
             return 1;

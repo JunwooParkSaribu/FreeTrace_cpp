@@ -1879,7 +1879,7 @@ static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropi
     int initial_pick_idx,
     double& cost_sum,
     const std::vector<Node>& last_nodes,
-    bool reconnect_orphans = true) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    bool reconnect_orphans = true) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 {
     int nb_to_optimum = 1 << config.graph_depth; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     (void)nb_to_optimum;
@@ -1901,7 +1901,6 @@ static void greedy_assign_pass( // Modified by Claude (claude-opus-4-6, Anthropi
     std::map<Path, int> start_indice_map;
     bool initial_ = true;
     Path prev_lowest = {source_node};
-
     while (true) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         // Rebuild cost_copy (prune stale entries) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
         std::map<Path, double> cost_copy;
@@ -2154,7 +2153,8 @@ SelectResult select_opt_graph2(const std::set<Node>& final_graph_node_set_hashed
     // Split into connected subgraphs // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     auto subgraphs = split_to_subgraphs(next_graph, source_node);
 
-    for (auto& sub_graph_ : subgraphs) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    for (int sub_idx = 0; sub_idx < (int)subgraphs.size(); sub_idx++) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+        auto& sub_graph_ = subgraphs[sub_idx];
         // Phase 1: try NB_TO_OPTIMUM alternatives // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         std::vector<double> cost_sums(nb_to_optimum, -1e-5);
 
@@ -2171,15 +2171,15 @@ SelectResult select_opt_graph2(const std::set<Node>& final_graph_node_set_hashed
                               first_step ? nullptr : &alpha_values,
                               first_step ? nullptr : &k_values,
                               hpn_copy, lowest_idx, cost_sums[lowest_idx],
-                              last_nodes);
+                              last_nodes, true); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
         }
 
-        // Find best starting index — strict comparison like Python's np.argmin // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        // Find best starting index — strict comparison like Python's np.argmin // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
         for (auto& cs : cost_sums) { if (cs < 0) cs = 99999.0; }
         int lowest_cost_idx = 0;
         for (int i = 1; i < (int)cost_sums.size(); i++) {
             if (cost_sums[i] < cost_sums[lowest_cost_idx]) lowest_cost_idx = i;
-        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
         // Phase 2: rebuild with best starting index into selected_graph // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         DiGraph sub_copy2 = sub_graph_.copy();
@@ -2192,7 +2192,7 @@ SelectResult select_opt_graph2(const std::set<Node>& final_graph_node_set_hashed
                           first_step ? nullptr : &alpha_values,
                           first_step ? nullptr : &k_values,
                           hpn2, lowest_cost_idx, dummy_cost,
-                          last_nodes, false);
+                          last_nodes, false); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     }
 
     // Check for orphan nodes // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -2278,7 +2278,6 @@ std::vector<TrajectoryObj> forecast(const Localizations& locs, // Modified by Cl
             selected_sub_graph = sr.selected_graph;
             has_orphan = sr.has_orphan;
         }
-
         first_construction = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         light_prev_graph = DiGraph();
         light_prev_graph.add_node(source_node);
@@ -3365,7 +3364,7 @@ void make_hk_distribution_image(const std::string& path, // Modified by Claude (
 
     // Y-axis label: "K (generalised diffusion coefficient)" — vertical (90 CW) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     {
-        std::string ylabel = "K (generalised diffusion coefficient)";
+        std::string ylabel = "K (generalised diffusion coefficient, px^2/frame^2H)";  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
         int text_height = (int)ylabel.size() * 6 * scale;
         int center_y = margin_top + ph / 2;
         int text_x = 4; // left side
@@ -3517,10 +3516,10 @@ static std::string derive_output_base(const TrackingConfig& config, const std::s
     return fname;
 }
 
-bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
                   const std::string& output_path,
                   int nb_frames,
-                  const TrackingConfig& config) {
+                  TrackingConfig config) {
     if (config.verbose) std::cerr << "Reading localization CSV: " << loc_csv_path << std::endl;
     auto loc = read_localization_csv(loc_csv_path, nb_frames);
     if (loc.empty()) {
@@ -3578,19 +3577,30 @@ bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude
                 break;
             }
         }
-        if (!g_qt_loaded && config.verbose) {
-            std::cerr << "Warning: qt_99.bin not found, abnormal detection will be limited" << std::endl;
+        if (!g_qt_loaded) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+            std::cerr << "Error: qt_99.bin is required to run FreeTrace tracking." << std::endl;
+            std::cerr << "Searched in:";
+            for (const auto& md : mdirs) std::cerr << " " << md << psep << "qt_99.bin";
+            std::cerr << std::endl;
+            return false;
         }
     }
 
-    // Load trajectory color table
+    // Load trajectory color table (required) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     {
         for (const auto& md : mdirs) {
             if (load_traj_colors(md + psep + "traj_colors.bin")) break;
         }
-    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        if (!g_traj_colors_loaded) {
+            std::cerr << "Error: traj_colors.bin is required to run FreeTrace tracking." << std::endl;
+            std::cerr << "Searched in:";
+            for (const auto& md : mdirs) std::cerr << " " << md << psep << "traj_colors.bin";
+            std::cerr << std::endl;
+            return false;
+        }
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
-    // Load NN models if requested (fBm mode or explicit --nn) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    // Load NN models if requested (fBm mode) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     if (config.use_nn) {
         for (const auto& md : mdirs) {
             if (load_nn_models(g_nn_models, md)) {
@@ -3598,10 +3608,14 @@ bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude
                 break;
             }
         }
-        if (!g_nn_models.loaded && config.verbose) {
-            std::cerr << "Warning: ONNX models not found, using fixed alpha/K" << std::endl;
+        if (!g_nn_models.loaded) {
+            std::cerr << "Warning: NN models (reg_model_*.onnx, reg_k_model.onnx, k_model_weights.bin) not found." << std::endl;
+            std::cerr << "  Falling back to fBm=OFF mode (fixed default alpha and K)." << std::endl;
+            config.use_nn = false;
+            config.fbm_mode = false;
+            config.hk_output = false;
         }
-    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
     // Run forecast
     if (config.verbose) std::cerr << "Starting trajectory inference..." << std::endl;

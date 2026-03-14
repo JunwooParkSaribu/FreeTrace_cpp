@@ -1,6 +1,7 @@
 #include "image_pad.h" // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11 13:20
 #include <cmath>
 #include <numeric>
+#include <random>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -134,7 +135,7 @@ std::vector<float> image_cropping(
     return cropped; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 }
 
-std::vector<float> likelihood( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+std::vector<float> likelihood( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     const std::vector<float>& crop_imgs,
     const Image2D& gauss_grid,
     const std::vector<float>& bg_squared_sums,
@@ -151,48 +152,48 @@ std::vector<float> likelihood( // Modified by Claude (claude-opus-4-6, Anthropic
         for (int j = 0; j < window_size2; ++j)
             g_bar[i * window_size2 + j] = gauss_grid.data[i * gauss_grid.cols + j] - g_mean;
 
-    // g_squared_sum = sum(g_bar^2)
-    float g_squared_sum = 0.0f;
+    // g_squared_sum = sum(g_bar^2) — use double for precision
+    double g_squared_sum = 0.0;
     for (int i = 0; i < surface_window; ++i)
-        g_squared_sum += g_bar[i] * g_bar[i];
+        g_squared_sum += (double)g_bar[i] * (double)g_bar[i];
 
-    // Result: [nb_imgs * nb_crops] // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    // Result: [nb_imgs * nb_crops]
     std::vector<float> L(nb_imgs * nb_crops, 0.0f);
 
     #pragma omp parallel for schedule(static)
     for (int n = 0; n < nb_imgs; ++n) {
-        float bg_mean = bg_means[n];
-        float denom = bg_squared_sums[n] - surface_window * bg_mean;
-        if (std::abs(denom) < 1e-12f) denom = 1e-12f;
+        double bg_mean = (double)bg_means[n];
+        double denom = (double)bg_squared_sums[n] - surface_window * bg_mean;
+        if (std::abs(denom) < 1e-12) denom = 1e-12;
 
         for (int c = 0; c < nb_crops; ++c) {
             int base = n * nb_crops * surface_window + c * surface_window;
 
             // i_hat = crop - bg_mean, then subtract max(0, min(i_hat))
-            float i_local_min = 1e30f;
+            double i_local_min = 1e30;
             for (int p = 0; p < surface_window; ++p) {
-                float v = crop_imgs[base + p] - bg_mean;
+                double v = (double)crop_imgs[base + p] - bg_mean;
                 i_local_min = std::min(i_local_min, v);
             }
-            float shift_val = std::max(0.0f, i_local_min);
+            double shift_val = std::max(0.0, i_local_min);
 
             // i_hat_proj = dot(i_hat - shift, g_bar) / g_squared_sum
-            float dot_val = 0.0f;
+            double dot_val = 0.0;
             for (int p = 0; p < surface_window; ++p) {
-                float v = crop_imgs[base + p] - bg_mean - shift_val;
-                dot_val += v * g_bar[p];
+                double v = (double)crop_imgs[base + p] - bg_mean - shift_val;
+                dot_val += v * (double)g_bar[p];
             }
-            float i_hat_proj = dot_val / g_squared_sum;
-            i_hat_proj = std::max(0.0f, i_hat_proj);
+            double i_hat_proj = dot_val / g_squared_sum;
+            i_hat_proj = std::max(0.0, i_hat_proj);
 
             // L = (N/2) * log(1 - i_hat^2 * g_squared_sum / denom)
-            float ratio = i_hat_proj * i_hat_proj * g_squared_sum / denom;
-            if (ratio >= 1.0f) ratio = 1.0f - 1e-7f;
-            L[n * nb_crops + c] = (surface_window / 2.0f) * std::log(1.0f - ratio);
+            double ratio = i_hat_proj * i_hat_proj * g_squared_sum / denom;
+            if (ratio >= 1.0) ratio = 1.0 - 1e-7;
+            L[n * nb_crops + c] = (float)((surface_window / 2.0) * std::log(1.0 - ratio));
         }
     }
     return L;
-} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
 std::vector<float> mapping(
     const std::vector<float>& c_likelihood,
@@ -220,50 +221,213 @@ std::vector<float> mapping(
     return h_map;
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
-void add_block_noise( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+// Compute mean and std of a sub-block (matching numpy's mean/std with ddof=0)
+static void block_mean_std(
+    const std::vector<float>& imgs, int base,
+    int ext_cols, int r0, int r1, int c0, int c1,
+    double& mean, double& sd
+) {
+    double sum = 0.0;
+    int cnt = (r1 - r0) * (c1 - c0);
+    if (cnt <= 0) { mean = 0; sd = 0; return; }
+    for (int r = r0; r < r1; ++r)
+        for (int c = c0; c < c1; ++c)
+            sum += imgs[base + r * ext_cols + c];
+    mean = sum / cnt;
+    double sum2 = 0.0;
+    for (int r = r0; r < r1; ++r)
+        for (int c = c0; c < c1; ++c) {
+            double d = imgs[base + r * ext_cols + c] - mean;
+            sum2 += d * d;
+        }
+    sd = std::sqrt(sum2 / cnt);
+}
+
+void add_block_noise( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     std::vector<float>& ext_imgs,
     int nb_imgs, int ext_rows, int ext_cols,
-    int extend
+    int extend,
+    NumpyRNG* external_rng
 ) {
     int gap = extend / 2;
-    std::mt19937 rng(42);
+    NumpyRNG local_rng(42);
+    NumpyRNG& rng = external_rng ? *external_rng : local_rng;
 
-    // Helper lambda: fill a block with Gaussian noise matching stats of a reference block
-    auto fill_noise = [&](int n, int dst_r0, int dst_r1, int dst_c0, int dst_c1,
+    // Build row_indice and col_indice matching Python's range(0, ext_rows, gap) etc.
+    std::vector<int> row_indice, col_indice;
+    for (int r = 0; r < ext_rows; r += gap) row_indice.push_back(r);
+    for (int c = 0; c < ext_cols; c += gap) col_indice.push_back(c);
+
+    // Helper: fill a block for ALL frames sequentially (matching Python's per-frame loop)
+    // Python: for m, std in zip(crop_means, crop_stds):
+    //             np.random.normal(loc=m, scale=std, size=(rows, cols))
+    // This generates rows*cols normals per frame, in row-major order
+    auto fill_block = [&](int dst_r0, int dst_r1, int dst_c0, int dst_c1,
                           int ref_r0, int ref_r1, int ref_c0, int ref_c1) {
-        if (dst_r1 <= dst_r0 || dst_c1 <= dst_c0) return;
-        if (ref_r1 <= ref_r0 || ref_c1 <= ref_c0) return;
-        // Compute mean and std of reference
-        float sum = 0.0f, sum2 = 0.0f;
-        int cnt = 0;
-        for (int r = ref_r0; r < ref_r1; ++r)
-            for (int c = ref_c0; c < ref_c1; ++c) {
-                float v = ext_imgs[n * ext_rows * ext_cols + r * ext_cols + c];
-                sum += v; sum2 += v * v; cnt++;
-            }
-        float mean = (cnt > 0) ? sum / cnt : 0.0f;
-        float var = (cnt > 1) ? sum2 / cnt - mean * mean : 0.0f;
-        float sd = (var > 0) ? std::sqrt(var) : 0.0f;
-        std::normal_distribution<float> dist(mean, sd);
-        for (int r = dst_r0; r < dst_r1; ++r)
-            for (int c = dst_c0; c < dst_c1; ++c)
-                ext_imgs[n * ext_rows * ext_cols + r * ext_cols + c] = dist(rng);
+        int dst_h = dst_r1 - dst_r0;
+        int dst_w = dst_c1 - dst_c0;
+        int ref_h = ref_r1 - ref_r0;
+        int ref_w = ref_c1 - ref_c0;
+        if (dst_h <= 0 || dst_w <= 0 || ref_h <= 0 || ref_w <= 0) return false;
+        for (int n = 0; n < nb_imgs; ++n) {
+            int base = n * ext_rows * ext_cols;
+            double mean, sd;
+            block_mean_std(ext_imgs, base, ext_cols, ref_r0, ref_r1, ref_c0, ref_c1, mean, sd);
+            // Generate dst_h * dst_w normals in row-major order
+            for (int r = dst_r0; r < dst_r1; ++r)
+                for (int c = dst_c0; c < dst_c1; ++c)
+                    ext_imgs[base + r * ext_cols + c] = rng.normal(mean, sd);
+        }
+        return true;
     };
 
-    for (int n = 0; n < nb_imgs; ++n) {
-        // Top border
-        fill_noise(n, 0, gap, gap, ext_cols - gap,
-                      gap, 2 * gap, gap, ext_cols - gap);
-        // Right border
-        fill_noise(n, 0, ext_rows, ext_cols - gap, ext_cols,
-                      0, ext_rows, ext_cols - 2 * gap, ext_cols - gap);
-        // Bottom border
-        fill_noise(n, ext_rows - gap, ext_rows, gap, ext_cols - gap,
-                      ext_rows - 2 * gap, ext_rows - gap, gap, ext_cols - gap);
-        // Left border
-        fill_noise(n, 0, ext_rows, 0, gap,
-                      0, ext_rows, gap, 2 * gap);
+    // Helper for smoothed blocks: reference is average of two sub-blocks
+    auto fill_block_smoothed = [&](int dst_r0, int dst_r1, int dst_c0, int dst_c1,
+                                   int refA_r0, int refA_r1, int refA_c0, int refA_c1,
+                                   int refB_r0, int refB_r1, int refB_c0, int refB_c1) {
+        int dst_h = dst_r1 - dst_r0;
+        int dst_w = dst_c1 - dst_c0;
+        if (dst_h <= 0 || dst_w <= 0) return;
+        int refA_h = refA_r1 - refA_r0, refA_w = refA_c1 - refA_c0;
+        int refB_h = refB_r1 - refB_r0, refB_w = refB_c1 - refB_c0;
+        if (refA_h <= 0 || refA_w <= 0 || refB_h <= 0 || refB_w <= 0) return;
+        for (int n = 0; n < nb_imgs; ++n) {
+            int base = n * ext_rows * ext_cols;
+            // Compute mean/std of averaged block (A+B)/2
+            int cnt = refA_h * refA_w; // both blocks should be same size
+            double sum = 0.0;
+            for (int i = 0; i < refA_h; ++i)
+                for (int j = 0; j < refA_w; ++j) {
+                    double a = ext_imgs[base + (refA_r0 + i) * ext_cols + (refA_c0 + j)];
+                    double b = ext_imgs[base + (refB_r0 + i) * ext_cols + (refB_c0 + j)];
+                    sum += (a + b) / 2.0;
+                }
+            double mean = sum / cnt;
+            double sum2 = 0.0;
+            for (int i = 0; i < refA_h; ++i)
+                for (int j = 0; j < refA_w; ++j) {
+                    double a = ext_imgs[base + (refA_r0 + i) * ext_cols + (refA_c0 + j)];
+                    double b = ext_imgs[base + (refB_r0 + i) * ext_cols + (refB_c0 + j)];
+                    double d = (a + b) / 2.0 - mean;
+                    sum2 += d * d;
+                }
+            double sd = std::sqrt(sum2 / cnt);
+            for (int r = dst_r0; r < dst_r1; ++r)
+                for (int c = dst_c0; c < dst_c1; ++c)
+                    ext_imgs[base + r * ext_cols + c] = rng.normal(mean, sd);
+        }
+    };
+
+    // ---- STEP 1: Top border ----
+    // Python: for c in col_indice:
+    //   ref = imgs[:, gap:2*gap, c:min(ext_cols-gap, c+gap)]
+    //   dst = imgs[:, 0:gap, c:min(ext_cols-gap, c+gap)]
+    for (int ci = 0; ci < (int)col_indice.size(); ++ci) {
+        int c = col_indice[ci];
+        int c1 = std::min(ext_cols - gap, c + gap);
+        if (c1 <= c) break; // crop_img.shape[2] == 0
+        fill_block(0, gap, c, c1,
+                   gap, 2 * gap, c, c1);
     }
-} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+
+    // ---- STEP 2: Right border ----
+    // Python: for r in row_indice:
+    //   ref = imgs[:, r:min(ext_rows-gap, r+gap), ext_cols-2*gap:ext_cols-gap]
+    //   dst = imgs[:, r:min(ext_rows-gap, r+gap), ext_cols-gap:ext_cols]
+    for (int ri = 0; ri < (int)row_indice.size(); ++ri) {
+        int r = row_indice[ri];
+        int r1 = std::min(ext_rows - gap, r + gap);
+        if (r1 <= r) break; // crop_img.shape[1] == 0
+        fill_block(r, r1, ext_cols - gap, ext_cols,
+                   r, r1, ext_cols - 2 * gap, ext_cols - gap);
+    }
+
+    // ---- STEP 3: Bottom border (reversed col order) ----
+    // Python: for c in col_indice[::-1]:
+    //   ref = imgs[:, ext_rows-2*gap:ext_rows-gap, c:min(ext_cols, c+gap)]
+    //   dst = imgs[:, ext_rows-gap:ext_rows, c:min(ext_cols, c+gap)]
+    for (int ci = (int)col_indice.size() - 1; ci >= 0; --ci) {
+        int c = col_indice[ci];
+        int c1 = std::min(ext_cols, c + gap);
+        if (c1 <= c) continue; // crop_img.shape[2] == 0
+        fill_block(ext_rows - gap, ext_rows, c, c1,
+                   ext_rows - 2 * gap, ext_rows - gap, c, c1);
+    }
+
+    // ---- STEP 4: Left border ----
+    // Python: for r in row_indice:
+    //   ref = imgs[:, r:min(ext_rows, r+gap), gap:2*gap]
+    //   dst = imgs[:, r:min(ext_rows, r+gap), 0:gap]
+    for (int ri = 0; ri < (int)row_indice.size(); ++ri) {
+        int r = row_indice[ri];
+        int r1 = std::min(ext_rows, r + gap);
+        fill_block(r, r1, 0, gap,
+                   r, r1, gap, 2 * gap);
+    }
+
+    // ---- STEP 5: Smoothing - top border (col_indice[1:-1]) ----
+    // Python: for c in col_indice[1:-1]:
+    //   csize = min(ext_cols, c+2*gap) - c - gap
+    //   refA = imgs[:, 0:gap, c-csize:c]
+    //   refB = imgs[:, 0:gap, c+gap:c+gap+csize]
+    //   ref = (refA + refB) / 2
+    //   dst = imgs[:, 0:gap, c:min(ext_cols, c+gap)]
+    for (int ci = 1; ci < (int)col_indice.size() - 1; ++ci) {
+        int c = col_indice[ci];
+        int csize = std::min(ext_cols, c + 2 * gap) - c - gap;
+        int dc1 = std::min(ext_cols, c + gap);
+        fill_block_smoothed(0, gap, c, dc1,
+                            0, gap, c - csize, c,
+                            0, gap, c + gap, c + gap + csize);
+    }
+
+    // ---- STEP 6: Smoothing - right border (row_indice[1:-1]) ----
+    // Python: for r in row_indice[1:-1]:
+    //   rsize = min(ext_rows, r+2*gap) - r - gap
+    //   refA = imgs[:, r-rsize:r, ext_cols-2*gap:ext_cols-gap]
+    //   refB = imgs[:, r+gap:r+gap+rsize, ext_cols-2*gap:ext_cols-gap]
+    //   ref = (refA + refB) / 2
+    //   dst = imgs[:, r:min(ext_rows, r+gap), ext_cols-gap:ext_cols]
+    for (int ri = 1; ri < (int)row_indice.size() - 1; ++ri) {
+        int r = row_indice[ri];
+        int rsize = std::min(ext_rows, r + 2 * gap) - r - gap;
+        int dr1 = std::min(ext_rows, r + gap);
+        fill_block_smoothed(r, dr1, ext_cols - gap, ext_cols,
+                            r - rsize, r, ext_cols - 2 * gap, ext_cols - gap,
+                            r + gap, r + gap + rsize, ext_cols - 2 * gap, ext_cols - gap);
+    }
+
+    // ---- STEP 7: Smoothing - bottom border (col_indice[1:-1]) ----
+    // Python: for c in col_indice[1:-1]:
+    //   csize = min(ext_cols, c+2*gap) - c - gap
+    //   refA = imgs[:, ext_rows-2*gap:ext_rows-gap, c-csize:c]
+    //   refB = imgs[:, ext_rows-2*gap:ext_rows-gap, c+gap:c+gap+csize]
+    //   ref = (refA + refB) / 2
+    //   dst = imgs[:, ext_rows-gap:ext_rows, c:min(ext_cols, c+gap)]
+    for (int ci = 1; ci < (int)col_indice.size() - 1; ++ci) {
+        int c = col_indice[ci];
+        int csize = std::min(ext_cols, c + 2 * gap) - c - gap;
+        int dc1 = std::min(ext_cols, c + gap);
+        fill_block_smoothed(ext_rows - gap, ext_rows, c, dc1,
+                            ext_rows - 2 * gap, ext_rows - gap, c - csize, c,
+                            ext_rows - 2 * gap, ext_rows - gap, c + gap, c + gap + csize);
+    }
+
+    // ---- STEP 8: Smoothing - left border (row_indice[1:-1]) ---- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+    // Python: for r in row_indice[1:-1]:
+    //   rsize = min(ext_rows, r+2*gap) - r - gap
+    //   refA = imgs[:, r-rsize:r, col_indice[0]:col_indice[0]+gap]  (= 0:gap, left padding)
+    //   refB = imgs[:, r+gap:r+gap+rsize, col_indice[0]:col_indice[0]+gap]
+    //   ref = (refA + refB) / 2
+    //   dst = imgs[:, r:min(ext_rows, r+gap), 0:gap]
+    for (int ri = 1; ri < (int)row_indice.size() - 1; ++ri) {
+        int r = row_indice[ri];
+        int rsize = std::min(ext_rows, r + 2 * gap) - r - gap;
+        int dr1 = std::min(ext_rows, r + gap);
+        fill_block_smoothed(r, dr1, 0, gap,
+                            r - rsize, r, 0, gap,
+                            r + gap, r + gap + rsize, 0, gap);
+    }
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
 } // namespace freetrace
