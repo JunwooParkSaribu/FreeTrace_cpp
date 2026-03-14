@@ -118,7 +118,7 @@ FreeTrace C++ supports **Linux**, **macOS**, and **Windows**.
 
 ```bash
 sudo apt update && sudo apt install -y build-essential cmake libtiff-dev libpng-dev
-cd ~/Desktop/FreeTrace_cpp    # adjust to your FreeTrace_cpp location
+cd /path/to/FreeTrace_cpp
 ```
 
 **Without fBm** (basic tracking):
@@ -158,7 +158,7 @@ export LD_LIBRARY_PATH=$(pwd)/../onnxruntime-linux-x64-1.24.3/lib:$LD_LIBRARY_PA
 
 ```bash
 brew install cmake libtiff libpng
-cd ~/Desktop/FreeTrace_cpp    # adjust to your FreeTrace_cpp location
+cd /path/to/FreeTrace_cpp
 ```
 
 > Apple Silicon (M1/M2/M3/M4) does not support AVX2. The code falls back to `std::sort` automatically.
@@ -192,7 +192,7 @@ Requires **Visual Studio 2019+** (with "Desktop development with C++") and **CMa
 cd C:\; git clone https://github.com/microsoft/vcpkg.git; cd vcpkg; .\bootstrap-vcpkg.bat; .\vcpkg install tiff:x64-windows libpng:x64-windows
 
 # Go to FreeTrace_cpp
-cd $env:USERPROFILE\Desktop\FreeTrace_cpp    # adjust to your FreeTrace_cpp location
+cd C:\path\to\FreeTrace_cpp
 ```
 
 **Without fBm:**
