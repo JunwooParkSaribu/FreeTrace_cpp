@@ -4,6 +4,8 @@ A high-performance C++ port of [FreeTrace](https://github.com/JunwooParkSaribu/F
 
 This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic AI), ported from the original Python/Cython project authored by **Junwoo PARK** (junwoo.park@sorbonne-universite.fr, Sorbonne Université).
 
+*This README and codebase are written by Claude (claude-opus-4-6, Anthropic AI).*
+
 **Data privacy:** FreeTrace runs entirely on your local machine. No data is transmitted to any external server. Your images, localizations, and trajectories never leave your computer.
 
 ## Quick Reference — Tracking Modes
@@ -13,7 +15,7 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 | **NN models** | Loaded (alpha & K inferred per trajectory) | Not loaded |
 | **Alpha / K** | Predicted by ConvLSTM / Dense NN | Fixed: alpha=1.0, K=0.3 |
 | **H-K output** | `_diffusion.csv` + `_diffusion_distribution.png` | Not produced |
-| **With GPU** | Localization + NN on GPU (fast) | Localization on GPU | <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14 -->
+| **With GPU** | Localization + NN on GPU (fast) | Localization on GPU |
 | **Without GPU** | Localization + NN on CPU (slower) | Localization on CPU |
 
 **Defaults:**
@@ -22,7 +24,7 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 - Cutoff: **3** (minimum trajectory length)
 - Jump threshold: **auto** (inferred from data; use `--jump` to override)
 
-**GPU behavior:** FreeTrace automatically detects GPU availability at startup. When built with `-DUSE_CUDA=ON`, both localization (CUDA kernels) and NN inference (ONNX Runtime CUDA) run on GPU. Use `--cpu` to force CPU mode. <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14 -->
+**GPU behavior:** FreeTrace automatically detects GPU availability at startup. When built with `-DUSE_CUDA=ON`, both localization (CUDA kernels) and NN inference (ONNX Runtime CUDA) run on GPU. Use `--cpu` to force CPU mode.
 - `GPU detected (N GB free). Using CUDA acceleration.` — localization on GPU
 - `NN inference: GPU (CUDA) — fast` — tracking NN on GPU
 
@@ -46,9 +48,9 @@ GPU requires building with `-DUSE_CUDA=ON`, the ONNX Runtime **GPU** package, an
 
 ## About
 
-FreeTrace localizes and tracks fluorescent particles in microscopy video data (TIFF stacks). // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+FreeTrace localizes and tracks fluorescent particles in microscopy video data (TIFF stacks).
 
-### Localization // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+### Localization
 1. **Background estimation** — iterative mode-based per-frame background with threshold computation
 2. **Sliding-window likelihood detection** — log-likelihood ratio maps using Gaussian PSF templates
 3. **Non-maximum suppression (NMS)** — score-sorted detection with spatial masking
@@ -56,25 +58,25 @@ FreeTrace localizes and tracks fluorescent particles in microscopy video data (T
 
 The backward pass (multi-scale deflation for overlapping particles) is structurally implemented but disabled by default (`deflation=0`), matching the Python FreeTrace default. Deflation is disabled because it fails critically on low SNR images.
 
-### Tracking // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-1. **Segmentation** — greedy nearest-neighbor matching to extract jump distributions // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-2. **Jump threshold estimation** — simplified GMM (std-based) or user-specified fixed threshold // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-3. **Graph-based linking** — directed graph construction with distance-based edge building // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-4. **Multi-hypothesis optimization** — greedy path selection evaluating 2^depth alternatives per subgraph // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-5. **fBm Cauchy cost** — fractional Brownian motion cost function with qt_99 abnormal detection // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-6. **Sliding-window forecast** — main tracking loop advancing through time steps // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-7. **Trajectory visualization** — colored trajectory overlay on black background (libpng) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+### Tracking
+1. **Segmentation** — greedy nearest-neighbor matching to extract jump distributions
+2. **Jump threshold estimation** — simplified GMM (std-based) or user-specified fixed threshold
+3. **Graph-based linking** — directed graph construction with distance-based edge building
+4. **Multi-hypothesis optimization** — greedy path selection evaluating 2^depth alternatives per subgraph
+5. **fBm Cauchy cost** — fractional Brownian motion cost function with qt_99 abnormal detection
+6. **Sliding-window forecast** — main tracking loop advancing through time steps
+7. **Trajectory visualization** — colored trajectory overlay on black background (libpng)
 
-### Verification // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+### Verification
 
-**Localization**: 930/930 detections match, max position error 0.0005 px, max rho error 1.6e-6. // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+**Localization**: 930/930 detections match, max position error 0.0005 px, max rho error 1.6e-6.
 
-**Tracking (without NN)**: // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+**Tracking (without NN)**:
 - sample0 (100 frames, 108×102): 1770/1773 Python points in C++ (99.8%)
 - sample1 (350 frames, 110×120): 1382/1384 Python points in C++ (99.9%)
 - Minor differences from greedy tie-breaking order (std::map vs Python dict iteration)
 
-**Tracking (with NN, GPU)** — Python TF+GPU vs C++ ONNX+GPU: // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+**Tracking (with NN, GPU)** — Python TF+GPU vs C++ ONNX+GPU:
 
 | Dataset | Frames | Py Pts | C++ Pts | Match% | MaxDiff (px) |
 |---------|--------|--------|---------|--------|-------------|
@@ -87,13 +89,13 @@ The backward pass (multi-scale deflation for overlapping particles) is structura
 | sample6 | 40 | 592 | 592 | 100% | 0.000616 |
 | **TOTAL** | | **62510** | **62512** | **99.98%** | |
 
-Tiny differences (~0.02% of points) are due to TF vs ONNX Runtime floating-point divergence in NN inference (alpha prediction differs by ~1e-5, K by ~1e-7). These are inherent to different math library implementations between frameworks and cannot be eliminated. With fixed alpha/K values (no NN), Python and C++ produce **100% identical** trajectories across all tested parameter combinations (5 alpha × 4 K values × 5 datasets = 100 tests, all PASS), confirming the tracking algorithm itself is an exact match. <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14 -->
+Tiny differences (~0.02% of points) are due to TF vs ONNX Runtime floating-point divergence in NN inference (alpha prediction differs by ~1e-5, K by ~1e-7). These are inherent to different math library implementations between frameworks and cannot be eliminated. With fixed alpha/K values (no NN), Python and C++ produce **100% identical** trajectories across all tested parameter combinations (5 alpha × 4 K values × 5 datasets = 100 tests, all PASS), confirming the tracking algorithm itself is an exact match.
 
 **Difference probability estimate:** In tested datasets, ~0.5% of trajectories are affected by NN divergence (e.g., 3/614 trajectories in a 100-frame dataset with jump=13). All affected points still match at 100% — the differences are purely in how points are grouped into trajectories (split/merge at trajectory boundaries). The probability of any individual trajectory being affected is negligible for short trajectories and increases slightly for longer, more complex linking scenarios where tiny cost differences can tip the greedy optimizer to a different path.
 
 **NN prediction standalone**: 20/20 BM/fBM trajectories match within 1e-6 (worst 3.58e-07) when both use ONNX Runtime.
 
-## Pipeline Architecture <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14 -->
+## Pipeline Architecture
 
 The full pipeline (`freetrace <input.tiff> <output_dir>`) runs two stages: **localization** then **tracking**. GPU/CPU dispatch and fBm mode determine which code paths are used.
 
@@ -159,7 +161,7 @@ FreeTrace_cpp/
 │   ├── regression.h       # Gaussian fitting (Guo algorithm), coefficient packing
 │   ├── cost_function.h    # fBm Cauchy log-PDF cost function
 │   ├── localization.h     # Full localization pipeline structs and declarations
-│   └── tracking.h         # Graph-based tracking pipeline declarations // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+│   └── tracking.h         # Graph-based tracking pipeline declarations
 ├── src/
 │   ├── main.cpp           # CLI entry point (localization + tracking modes)
 │   ├── image_pad.cpp      # Image operations (cropping, likelihood, mapping, noise)
@@ -167,7 +169,7 @@ FreeTrace_cpp/
 │   ├── cost_function.cpp  # Cost function for trajectory linking
 │   ├── localization.cpp   # Complete localization pipeline
 │   ├── tracking.cpp       # Complete tracking pipeline (~2900 lines)
-│   ├── nn_inference.cpp   # ONNX Runtime NN inference (alpha + K prediction) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+│   ├── nn_inference.cpp   # ONNX Runtime NN inference (alpha + K prediction)
 │   └── gpu_module_stub.cpp # GPU module stub
 ├── include/
 │   └── nn_inference.h     # NN models struct and function declarations
@@ -188,7 +190,7 @@ FreeTrace_cpp/
 | `regression` | Complete | guo_algorithm (6x6 Householder QR), pack_vars, unpack_coefs |
 | `cost_function` | Complete | predict_cauchy (fBm Cauchy log-PDF) |
 | `localization` | Complete | Full forward + backward pipeline: read_tiff, compute_background, gauss_psf, region_max_filter, image_regression, bi_variate_normal_pdf, subtract_pdf, batch processing |
-| `tracking` | Complete | DiGraph, segmentation, greedy matching, fBm Cauchy cost, multi-hypothesis optimization, forecast loop, trajectory visualization | // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+| `tracking` | Complete | DiGraph, segmentation, greedy matching, fBm Cauchy cost, multi-hypothesis optimization, forecast loop, trajectory visualization |
 | `nn_inference` | Complete | ONNX Runtime alpha/K prediction (GPU+CPU), ConvLSTM alpha models, Dense K model (direct fast path + ONNX fallback), batched inference |
 
 ## Build
@@ -203,7 +205,7 @@ FreeTrace C++ supports **Linux**, **macOS**, and **Windows**. You can build with
 | libtiff | **Yes** (or OpenCV) | Reading TIFF microscopy stacks |
 | libpng | Recommended | Trajectory visualization images |
 | ONNX Runtime | Optional | NN inference for fBm mode (default ON; use `--no-fbm` to disable) |
-| NVIDIA GPU + CUDA 12.x | Optional | GPU-accelerated localization and NN inference (build with `-DUSE_CUDA=ON`) | <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14 -->
+| NVIDIA GPU + CUDA 12.x | Optional | GPU-accelerated localization and NN inference (build with `-DUSE_CUDA=ON`) |
 
 ---
 
@@ -235,7 +237,7 @@ g++ -std=c++17 -O2 -mavx2 -DUSE_LIBTIFF -DUSE_LIBPNG -Iinclude \
     -o freetrace -ltiff -lpng
 ```
 
-#### Step 2b: Build with fBm support + GPU acceleration (recommended) <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14 -->
+#### Step 2b: Build with fBm support + GPU acceleration (recommended)
 
 This builds FreeTrace with both **GPU-accelerated localization** (CUDA kernels for image cropping, likelihood, and background estimation) and **GPU-accelerated NN inference** (ONNX Runtime CUDA provider for fBm tracking). GPU is auto-detected at runtime; use `--cpu` to force CPU mode.
 
@@ -279,7 +281,7 @@ export LD_LIBRARY_PATH=$(pwd)/../$ORT_DIR/lib:$LD_LIBRARY_PATH
 FreeTrace auto-detects GPU at startup and prints:
 - `GPU detected (N GB free). Using CUDA acceleration.` — localization runs on GPU (80% VRAM batch sizing)
 - `NN inference: GPU (CUDA) — fast` — tracking NN runs on GPU
-- Use `--cpu` to force CPU mode even when GPU is available <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14 -->
+- Use `--cpu` to force CPU mode even when GPU is available
 
 #### Step 2c: Build with fBm support (ONNX Runtime CPU only — no GPU needed)
 
@@ -515,7 +517,7 @@ Usage:
 
 ## Usage
 
-### Full pipeline (localization + tracking) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+### Full pipeline (localization + tracking)
 
 The simplest way to use FreeTrace — just provide a TIFF and output directory:
 ```bash
@@ -541,7 +543,7 @@ This runs localization first, then automatically feeds the result into tracking.
 - `{name}_diffusion.csv` — H and K per trajectory (fBm mode only)
 - `{name}_diffusion_distribution.png` — H-K distribution plot (fBm mode only)
 
-### Localization only // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+### Localization only
 ```bash
 ./freetrace localize <input.tiff> <output_dir> [options]
 ```
@@ -555,11 +557,11 @@ This runs localization first, then automatically feeds the result into tracking.
 - `--window N` — window size (default: 7)
 - `--threshold F` — detection threshold multiplier (default: 1.0)
 - `--shift N` — shift (default: 1)
-- `--cpu` — force CPU mode (disable GPU even if available) <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14 -->
+- `--cpu` — force CPU mode (disable GPU even if available)
 
-**Output columns**: `frame, x, y, z, xvar, yvar, rho, norm_cst, intensity, window_size` — identical to the Python FreeTrace output format.
+**Output columns:** `frame, x, y, z, xvar, yvar, rho, norm_cst, intensity, window_size` — identical to the Python FreeTrace output format.
 
-### Tracking only // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+### Tracking only
 ```bash
 ./freetrace track <loc.csv> <output_dir> <nb_frames> [options]
 ```
@@ -588,7 +590,7 @@ This runs localization first, then automatically feeds the result into tracking.
 ### As a library
 ```cpp
 #include "localization.h"
-#include "tracking.h" // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+#include "tracking.h"
 
 // Localization
 freetrace::run("input.tiff", "output_dir/",
@@ -597,7 +599,7 @@ freetrace::run("input.tiff", "output_dir/",
                /*shift=*/1,
                /*verbose=*/true);
 
-// Tracking (defaults: depth=3, cutoff=3, jump=auto, fBm=ON) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+// Tracking (defaults: depth=3, cutoff=3, jump=auto, fBm=ON)
 freetrace::TrackingConfig config;
 config.tiff_path = "input.tiff";       // for output naming + image dimensions
 freetrace::run_tracking("output_dir/input_loc.csv", "output_dir/", 100, config);
@@ -608,7 +610,7 @@ freetrace::run_tracking("output_dir/input_loc.csv", "output_dir/", 100, config);
 
 ## Paper
 
-- **FreeTrace** on bioRxiv: https://doi.org/10.64898/2026.01.08.698486 <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13 -->
+- **FreeTrace** on bioRxiv: https://doi.org/10.64898/2026.01.08.698486
 
 ## Original Project
 
@@ -622,7 +624,7 @@ This C++ port follows the same license as the original FreeTrace project (GPLv3+
 
 ---
 
-## Performance <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14 -->
+## Performance
 
 Benchmarks on a 512×512 100-frame fluorescence microscopy dataset (testsample5, Linux x86_64):
 
@@ -646,7 +648,7 @@ Porting FreeTrace from Python to C++ was one of the most technically demanding p
 
 **What I learned.** Numerical reproducibility across languages is harder than it looks. Two correct implementations of the same algorithm can diverge when their inputs differ by one bit in the 52nd mantissa position. The scientific computing ecosystem hides many such differences behind convenient APIs — different BLAS implementations, different default precisions, different parsing conventions. Getting exact match forced me to understand every one of these layers, from CSV parsing to cost accumulation to graph search.
 
-**Performance.** The C++ port achieves **17–54x speedup** over Python for tracking with fBm mode (e.g., 96s → 5.5s, or 359s → 6.6s on a 512×512, 100-frame dataset). Without fBm (no NN), speedups are 3–7x. The NN inference layer uses ONNX Runtime with optional GPU acceleration, replacing TensorFlow. <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14 -->
+**Performance.** The C++ port achieves **17–54x speedup** over Python for tracking with fBm mode (e.g., 96s → 5.5s, or 359s → 6.6s on a 512×512, 100-frame dataset). Without fBm (no NN), speedups are 3–7x. The NN inference layer uses ONNX Runtime with optional GPU acceleration, replacing TensorFlow.
 
 Working with Junwoo on this project has been a genuine collaboration — his deep understanding of the physics and the algorithm guided my implementation at every step, and his rigorous testing standards (100% point-level AND trajectory-level match, no exceptions) pushed me to find bugs I would have otherwise dismissed as acceptable numerical noise.
 
