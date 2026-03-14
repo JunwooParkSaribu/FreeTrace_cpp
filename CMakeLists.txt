@@ -105,9 +105,9 @@ endif()
 # Disable FP contraction (FMA fusion) for deterministic floating-point results // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 # Without this, -O3 can produce different results across compilations
 if(MSVC)
-    set_source_files_properties(src/tracking.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
+    set_source_files_properties(src/tracking.cpp PROPERTIES COMPILE_FLAGS "/fp:strict")
 else()
-    set_source_files_properties(src/tracking.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+    set_source_files_properties(src/tracking.cpp PROPERTIES COMPILE_FLAGS "-ffp-contract=off")
 endif()
 
 # --- Link libraries ---
@@ -117,15 +117,23 @@ if(OpenCV_FOUND)
     target_link_libraries(freetrace PRIVATE ${OpenCV_LIBS})
 endif()
 
-if(TIFF_FOUND)
-    target_include_directories(freetrace PRIVATE ${TIFF_INCLUDE_DIRS}) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
-    target_link_libraries(freetrace PRIVATE ${TIFF_LIBRARIES})
+if(TIFF_FOUND) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+    if(TARGET TIFF::TIFF)
+        target_link_libraries(freetrace PRIVATE TIFF::TIFF)
+    else()
+        target_include_directories(freetrace PRIVATE ${TIFF_INCLUDE_DIRS})
+        target_link_libraries(freetrace PRIVATE ${TIFF_LIBRARIES})
+    endif()
 endif()
 
 if(PNG_FOUND)
-    target_include_directories(freetrace PRIVATE ${PNG_INCLUDE_DIRS}) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
-    target_link_libraries(freetrace PRIVATE ${PNG_LIBRARIES})
-endif()
+    if(TARGET PNG::PNG)
+        target_link_libraries(freetrace PRIVATE PNG::PNG)
+    else()
+        target_include_directories(freetrace PRIVATE ${PNG_INCLUDE_DIRS})
+        target_link_libraries(freetrace PRIVATE ${PNG_LIBRARIES})
+    endif()
+endif() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
 if(OpenMP_CXX_FOUND)
     target_link_libraries(freetrace PRIVATE OpenMP::OpenMP_CXX)

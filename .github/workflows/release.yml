@@ -62,10 +62,11 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install libtiff libpng
 
-      - name: Install dependencies (Windows)
+      - name: Install dependencies (Windows) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          vcpkg install tiff:x64-windows libpng:x64-windows
+          vcpkg install tiff:x64-windows libpng:x64-windows zlib:x64-windows
 
       - name: Download ONNX Runtime
         shell: bash
