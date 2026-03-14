@@ -248,9 +248,14 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
 
         Ort::AllocatorWithDefaultOptions alloc;
 
-        for (int n : models.reg_model_nums) {
+        for (int n : models.reg_model_nums) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
             std::string path = models_dir + "/reg_model_" + std::to_string(n) + ".onnx";
+#ifdef _WIN32
+            std::wstring wpath(path.begin(), path.end());
+            auto* session = new Ort::Session(*env, wpath.c_str(), opts);
+#else
             auto* session = new Ort::Session(*env, path.c_str(), opts);
+#endif
             models.alpha_sessions[n] = session;
             // Cache input/output names
             models.alpha_input_names[n] = std::string(session->GetInputNameAllocated(0, alloc).get());
@@ -258,7 +263,12 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
         }
 
         std::string k_path = models_dir + "/reg_k_model.onnx";
+#ifdef _WIN32
+        std::wstring wk_path(k_path.begin(), k_path.end());
+        auto* k_sess = new Ort::Session(*env, wk_path.c_str(), opts);
+#else
         auto* k_sess = new Ort::Session(*env, k_path.c_str(), opts);
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
         models.k_session = k_sess;
         models.k_input_name = std::string(k_sess->GetInputNameAllocated(0, alloc).get());
         models.k_output_name = std::string(k_sess->GetOutputNameAllocated(0, alloc).get());
