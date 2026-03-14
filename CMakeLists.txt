@@ -17,6 +17,11 @@ endif() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# MSVC compatibility // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+if(MSVC)
+    add_definitions(-D_USE_MATH_DEFINES -DNOMINMAX)
+endif()
+
 # --- Options ---
 option(USE_ONNXRUNTIME "Enable ONNX Runtime for NN inference (fBm mode)" OFF)
 set(ONNXRUNTIME_DIR "" CACHE PATH "Path to ONNX Runtime installation")
@@ -93,9 +98,13 @@ if(HAS_AVX2)
     target_compile_options(freetrace PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2>)
 endif()
 
-# Disable FP contraction (FMA fusion) for deterministic floating-point results
+# Disable FP contraction (FMA fusion) for deterministic floating-point results // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 # Without this, -O3 can produce different results across compilations
-set_source_files_properties(src/tracking.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+if(MSVC)
+    set_source_files_properties(src/tracking.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
+else()
+    set_source_files_properties(src/tracking.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+endif()
 
 # --- Link libraries ---
 
@@ -105,10 +114,12 @@ if(OpenCV_FOUND)
 endif()
 
 if(TIFF_FOUND)
+    target_include_directories(freetrace PRIVATE ${TIFF_INCLUDE_DIRS}) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     target_link_libraries(freetrace PRIVATE ${TIFF_LIBRARIES})
 endif()
 
 if(PNG_FOUND)
+    target_include_directories(freetrace PRIVATE ${PNG_INCLUDE_DIRS}) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     target_link_libraries(freetrace PRIVATE ${PNG_LIBRARIES})
 endif()
 
