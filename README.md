@@ -4,35 +4,14 @@ A high-performance C++ port of [FreeTrace](https://github.com/JunwooParkSaribu/F
 
 This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic AI), ported from the original Python/Cython project authored by **Junwoo PARK** (junwoo.park@sorbonne-universite.fr, Sorbonne Université).
 
-*This README and codebase are written by Claude (claude-opus-4-6, Anthropic AI).*
+**Data privacy:** FreeTrace runs entirely on your local machine. No data is transmitted to any external server.
 
-**Data privacy:** FreeTrace runs entirely on your local machine. No data is transmitted to any external server. Your images, localizations, and trajectories never leave your computer.
+> **Just want to run it?** Download a pre-built binary from the [Releases page](https://github.com/JunwooParkSaribu/FreeTrace_cpp/releases) — no compilers needed. Available for Linux, macOS (Intel & Apple Silicon), and Windows.
 
-## Quick Reference — Tracking Modes
+## Usage
 
-| | **fBm mode ON** (default) | **fBm mode OFF** (`--no-fbm`) |
-|---|---|---|
-| **NN models** | Loaded (alpha & K inferred per trajectory) | Not loaded |
-| **Alpha / K** | Predicted by ConvLSTM / Dense NN | Fixed: alpha=1.0, K=0.3 |
-| **H-K output** | `_diffusion.csv` + `_diffusion_distribution.png` | Not produced |
-| **With GPU** | Localization + NN on GPU (fast) | Localization on GPU |
-| **Without GPU** | Localization + NN on CPU (slower) | Localization on CPU |
-
-**Defaults:**
-- fBm mode: **ON** (NN inference + H-K output)
-- Graph depth: **3** (evaluates 2^3 = 8 alternatives per subgraph)
-- Cutoff: **3** (minimum trajectory length)
-- Jump threshold: **auto** (inferred from data; use `--jump` to override)
-
-**GPU behavior:** FreeTrace automatically detects GPU availability at startup. When built with `-DUSE_CUDA=ON`, both localization (CUDA kernels) and NN inference (ONNX Runtime CUDA) run on GPU. Use `--cpu` to force CPU mode.
-- `GPU detected (N GB free). Using CUDA acceleration.` — localization on GPU
-- `NN inference: GPU (CUDA) — fast` — tracking NN on GPU
-
-GPU requires building with `-DUSE_CUDA=ON`, the ONNX Runtime **GPU** package, and setting `LD_LIBRARY_PATH` at runtime (see [Build Instructions](#build)).
-
-**Quick start:**
 ```bash
-# Full pipeline: localization + tracking (simplest usage)
+# Full pipeline: localization + tracking
 ./freetrace video.tiff results/
 
 # Localization only
@@ -42,92 +21,56 @@ GPU requires building with `-DUSE_CUDA=ON`, the ONNX Runtime **GPU** package, an
 ./freetrace track results/video_loc.csv results/ 100 --tiff video.tiff
 ```
 
-> **Just want to run it?** Download a pre-built binary from the [Releases page](https://github.com/JunwooParkSaribu/FreeTrace_cpp/releases) — no compilers or build tools needed. Available for Linux, macOS (Intel & Apple Silicon), and Windows.
->
-> **Want to build from source?** See [Build Instructions](#build) for step-by-step setup on Linux, macOS, and Windows.
+### Options
+
+**Localization:** `--window N` (default: 7), `--threshold F` (default: 1.0), `--shift N` (default: 1), `--cpu` (force CPU mode)
+
+**Tracking:** `--depth N` (default: 3), `--cutoff N` (default: 3), `--jump F` (default: auto), `--tiff PATH`, `--no-fbm` (disable NN, fixed alpha/K), `--postprocess`, `--quiet`
+
+### Tracking Modes
+
+| | **fBm mode ON** (default) | **fBm mode OFF** (`--no-fbm`) |
+|---|---|---|
+| **Alpha / K** | Predicted by ConvLSTM / Dense NN | Fixed: alpha=1.0, K=0.3 |
+| **H-K output** | `_diffusion.csv` + `_diffusion_distribution.png` | Not produced |
+| **With GPU** | Localization + NN on GPU | Localization on GPU |
+| **Without GPU** | Localization + NN on CPU | Localization on CPU |
+
+### Outputs
+
+- `{name}_loc.csv` — localization CSV (columns: `frame, x, y, z, xvar, yvar, rho, norm_cst, intensity, window_size`)
+- `{name}_loc_2d_density.png` — particle density image
+- `{name}_traces.csv` — trajectory CSV
+- `{name}_traces.png` — trajectory visualization
+- `{name}_diffusion.csv` — H and K per trajectory (fBm mode only)
+- `{name}_diffusion_distribution.png` — H-K distribution plot (fBm mode only)
+
+### As a library
+
+```cpp
+#include "localization.h"
+#include "tracking.h"
+
+// Localization
+freetrace::run("input.tiff", "output_dir/", /*window_size=*/7, /*threshold=*/1.0f, /*shift=*/1, /*verbose=*/true);
+
+// Tracking (defaults: depth=3, cutoff=3, jump=auto, fBm=ON)
+freetrace::TrackingConfig config;
+config.tiff_path = "input.tiff";
+freetrace::run_tracking("output_dir/input_loc.csv", "output_dir/", 100, config);
+
+// To disable fBm: config.fbm_mode = false; config.use_nn = false; config.hk_output = false;
+```
 
 ## About
 
 FreeTrace localizes and tracks fluorescent particles in microscopy video data (TIFF stacks).
 
-### Localization
-1. **Background estimation** — iterative mode-based per-frame background with threshold computation
-2. **Sliding-window likelihood detection** — log-likelihood ratio maps using Gaussian PSF templates
-3. **Non-maximum suppression (NMS)** — score-sorted detection with spatial masking
-4. **Sub-pixel Gaussian fitting** — Guo's iterative weighted least-squares algorithm with Householder QR solver
+**Localization:** Background estimation → sliding-window likelihood detection (Gaussian PSF) → NMS → sub-pixel Gaussian fitting (Guo's iterative weighted least-squares with Householder QR solver).
 
-The backward pass (multi-scale deflation for overlapping particles) is structurally implemented but disabled by default (`deflation=0`), matching the Python FreeTrace default. Deflation is disabled because it fails critically on low SNR images.
+**Tracking:** Greedy segmentation → jump threshold estimation → directed graph construction → multi-hypothesis optimization (2^depth alternatives per subgraph) → fBm Cauchy cost with qt_99 abnormal detection → sliding-window forecast → trajectory visualization (libpng).
 
-### Tracking
-1. **Segmentation** — greedy nearest-neighbor matching to extract jump distributions
-2. **Jump threshold estimation** — simplified GMM (std-based) or user-specified fixed threshold
-3. **Graph-based linking** — directed graph construction with distance-based edge building
-4. **Multi-hypothesis optimization** — greedy path selection evaluating 2^depth alternatives per subgraph
-5. **fBm Cauchy cost** — fractional Brownian motion cost function with qt_99 abnormal detection
-6. **Sliding-window forecast** — main tracking loop advancing through time steps
-7. **Trajectory visualization** — colored trajectory overlay on black background (libpng)
-
-### Verification
-
-**Localization**: 930/930 detections match, max position error 0.0005 px, max rho error 1.6e-6.
-
-**Tracking (without NN)**:
-- sample0 (100 frames, 108×102): 1770/1773 Python points in C++ (99.8%)
-- sample1 (350 frames, 110×120): 1382/1384 Python points in C++ (99.9%)
-- Minor differences from greedy tie-breaking order (std::map vs Python dict iteration)
-
-**Tracking (with NN, GPU)** — Python TF+GPU vs C++ ONNX+GPU:
-
-| Dataset | Frames | Py Pts | C++ Pts | Match% | MaxDiff (px) |
-|---------|--------|--------|---------|--------|-------------|
-| sample0 | 100 | 1816 | 1814 | 99.89% | 0.000488 |
-| sample1 | 350 | 1431 | 1432 | 99.93% | 0.000610 |
-| sample2 | 2001 | 19291 | 19295 | 99.97% | 0.000697 |
-| sample3 | 2001 | 15262 | 15262 | 99.98% | 0.000696 |
-| sample4 | 5000 | 19874 | 19873 | 99.98% | 0.000690 |
-| sample5 | 1001 | 4244 | 4244 | 100% | 0.000589 |
-| sample6 | 40 | 592 | 592 | 100% | 0.000616 |
-| **TOTAL** | | **62510** | **62512** | **99.98%** | |
-
-Tiny differences (~0.02% of points) are due to TF vs ONNX Runtime floating-point divergence in NN inference (alpha prediction differs by ~1e-5, K by ~1e-7). These are inherent to different math library implementations between frameworks and cannot be eliminated. With fixed alpha/K values (no NN), Python and C++ produce **100% identical** trajectories across all tested parameter combinations (5 alpha × 4 K values × 5 datasets = 100 tests, all PASS), confirming the tracking algorithm itself is an exact match.
-
-**Difference probability estimate:** In tested datasets, ~0.5% of trajectories are affected by NN divergence (e.g., 3/614 trajectories in a 100-frame dataset with jump=13). All affected points still match at 100% — the differences are purely in how points are grouped into trajectories (split/merge at trajectory boundaries). The probability of any individual trajectory being affected is negligible for short trajectories and increases slightly for longer, more complex linking scenarios where tiny cost differences can tip the greedy optimizer to a different path.
-
-**NN prediction standalone**: 20/20 BM/fBM trajectories match within 1e-6 (worst 3.58e-07) when both use ONNX Runtime.
-
-## Pipeline Architecture
-
-The full pipeline (`freetrace <input.tiff> <output_dir>`) runs two stages: **localization** then **tracking**. GPU/CPU dispatch and fBm mode determine which code paths are used.
-
-### Localization (Step 1)
-
-GPU is auto-detected at startup. Use `--cpu` to force CPU mode.
-
-| Substep | GPU path (CUDA) | CPU path |
-|---------|----------------|----------|
-| **Background estimation** | `background_kernel` — 1 block/frame, shared-mem histogram, double precision | Sequential per-frame, same algorithm in double precision |
-| **Image cropping** | `image_cropping_kernel` — 1 thread per (frame, crop, pixel) | Nested loops with OpenMP |
-| **Likelihood** | `likelihood_kernel` — 1 thread per (frame, crop), double precision | OpenMP parallel, double precision |
-| **Mapping** | CPU | CPU |
-| **NMS** | CPU | CPU |
-| **Guo sub-pixel fit** | CPU (sequential per detection) | CPU (sequential per detection) |
-
-**Batch sizing**: GPU targets 80% of free VRAM; CPU targets ~33% of free RAM.
-
-### Tracking (Step 2) — CPU + GPU-accelerated NN
-
-Tracking has no custom CUDA kernels, but **NN inference is GPU-accelerated** via ONNX Runtime's CUDA Execution Provider when a GPU is available. This significantly speeds up fBm mode (e.g., sample0: ~380s CPU → 17s GPU for NN-heavy tracking).
-
-| Substep | fBm ON (default) | fBm OFF (`--no-fbm`) |
-|---------|-----------------|----------------------|
-| Segmentation | CPU | CPU |
-| Jump threshold | CPU (auto or `--jump`) | CPU (auto or `--jump`) |
-| Forecast (trajectory building) | CPU — NN predicts alpha/K per trajectory | CPU — fixed alpha=1.0, K=0.5 |
-| NN inference | ONNX Runtime (GPU EP if available, else CPU EP) | Not used |
-| Post-processing | CPU (optional, `--postprocess`) | CPU (optional) |
-| **Output** | `_traces.csv` + `_traces.png` + `_diffusion.csv` + `_diffusion_distribution.png` | `_traces.csv` + `_traces.png` |
-
-### Workflow Diagram
+### Pipeline Diagram
 
 ```
                          ┌─────────────────────────────────┐
@@ -151,51 +94,11 @@ Tracking has no custom CUDA kernels, but **NN inference is GPU-accelerated** via
                          └─────────────────────────────────┘
 ```
 
-## Project Structure
-
-```
-FreeTrace_cpp/
-├── CMakeLists.txt
-├── include/
-│   ├── image_pad.h        # Image2D struct, statistics, likelihood, cropping, noise
-│   ├── regression.h       # Gaussian fitting (Guo algorithm), coefficient packing
-│   ├── cost_function.h    # fBm Cauchy log-PDF cost function
-│   ├── localization.h     # Full localization pipeline structs and declarations
-│   └── tracking.h         # Graph-based tracking pipeline declarations
-├── src/
-│   ├── main.cpp           # CLI entry point (localization + tracking modes)
-│   ├── image_pad.cpp      # Image operations (cropping, likelihood, mapping, noise)
-│   ├── regression.cpp     # Guo algorithm with inline 6x6 QR solver
-│   ├── cost_function.cpp  # Cost function for trajectory linking
-│   ├── localization.cpp   # Complete localization pipeline
-│   ├── tracking.cpp       # Complete tracking pipeline (~2900 lines)
-│   ├── nn_inference.cpp   # ONNX Runtime NN inference (alpha + K prediction)
-│   └── gpu_module_stub.cpp # GPU module stub
-├── include/
-│   └── nn_inference.h     # NN models struct and function declarations
-└── models/
-    ├── qt_99.bin           # Abnormal detection thresholds (from Python qt_99.npz)
-    ├── reg_model_3.onnx    # Alpha ConvLSTM model (window=3)
-    ├── reg_model_5.onnx    # Alpha ConvLSTM model (window=5)
-    ├── reg_model_8.onnx    # Alpha ConvLSTM model (window=8)
-    ├── reg_k_model.onnx    # K Dense model (ONNX, fallback)
-    └── k_model_weights.bin # K Dense model weights (direct computation, fast path)
-```
-
-## Ported Modules
-
-| Module | Status | Key Functions |
-|--------|--------|---------------|
-| `image_pad` | Complete | image_cropping, likelihood, mapping, add_block_noise, boundary_smoothing |
-| `regression` | Complete | guo_algorithm (6x6 Householder QR), pack_vars, unpack_coefs |
-| `cost_function` | Complete | predict_cauchy (fBm Cauchy log-PDF) |
-| `localization` | Complete | Full forward + backward pipeline: read_tiff, compute_background, gauss_psf, region_max_filter, image_regression, bi_variate_normal_pdf, subtract_pdf, batch processing |
-| `tracking` | Complete | DiGraph, segmentation, greedy matching, fBm Cauchy cost, multi-hypothesis optimization, forecast loop, trajectory visualization |
-| `nn_inference` | Complete | ONNX Runtime alpha/K prediction (GPU+CPU), ConvLSTM alpha models, Dense K model (direct fast path + ONNX fallback), batched inference |
+GPU is auto-detected at startup. Tracking NN inference is GPU-accelerated via ONNX Runtime CUDA when available (e.g., sample0: ~380s CPU → 17s GPU).
 
 ## Build
 
-FreeTrace C++ supports **Linux**, **macOS**, and **Windows**. You can build with either **CMake** or a **direct compiler command**.
+FreeTrace C++ supports **Linux**, **macOS**, and **Windows**.
 
 ### Requirements
 
@@ -204,429 +107,172 @@ FreeTrace C++ supports **Linux**, **macOS**, and **Windows**. You can build with
 | C++17 compiler | **Yes** | GCC 7+, Clang 5+, or MSVC 2019+ |
 | libtiff | **Yes** (or OpenCV) | Reading TIFF microscopy stacks |
 | libpng | Recommended | Trajectory visualization images |
-| ONNX Runtime | Optional | NN inference for fBm mode (default ON; use `--no-fbm` to disable) |
-| NVIDIA GPU + CUDA 12.x | Optional | GPU-accelerated localization and NN inference (build with `-DUSE_CUDA=ON`) |
+| ONNX Runtime | Optional | NN inference for fBm mode |
+| NVIDIA GPU + CUDA 12.x | Optional | GPU-accelerated localization and NN inference |
 
 ---
 
 ### Linux (Ubuntu / Debian)
 
-#### Step 1: Install dependencies
-
 ```bash
-sudo apt update
-sudo apt install -y build-essential cmake libtiff-dev libpng-dev
-```
+# Install dependencies
+sudo apt update && sudo apt install -y build-essential cmake libtiff-dev libpng-dev
 
-#### Step 2a: Build without fBm (basic tracking only)
-
-**Using CMake:**
-```bash
 cd FreeTrace_cpp
 mkdir build && cd build
-cmake ..
-make -j$(nproc)
 ```
 
-**Or direct compile:**
+**Without fBm** (basic tracking):
 ```bash
-cd FreeTrace_cpp
-g++ -std=c++17 -O2 -mavx2 -DUSE_LIBTIFF -DUSE_LIBPNG -Iinclude \
-    src/main.cpp src/image_pad.cpp src/regression.cpp src/cost_function.cpp \
-    src/localization.cpp src/tracking.cpp src/nn_inference_stub.cpp src/gpu_module_stub.cpp \
-    -o freetrace -ltiff -lpng
+cmake .. && make -j$(nproc)
 ```
 
-#### Step 2b: Build with fBm support + GPU acceleration (recommended)
-
-This builds FreeTrace with both **GPU-accelerated localization** (CUDA kernels for image cropping, likelihood, and background estimation) and **GPU-accelerated NN inference** (ONNX Runtime CUDA provider for fBm tracking). GPU is auto-detected at runtime; use `--cpu` to force CPU mode.
-
-1. Download ONNX Runtime GPU. Choose the package matching your **CUDA toolkit version** (check with `nvcc --version`):
+**With fBm + GPU** (recommended):
 ```bash
-cd FreeTrace_cpp
-
-# CUDA 12.x (most common):
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-linux-x64-gpu-1.24.3.tgz
+# Download ONNX Runtime GPU (CUDA 12.x)
+cd .. && wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-linux-x64-gpu-1.24.3.tgz
 tar xzf onnxruntime-linux-x64-gpu-1.24.3.tgz
 ORT_DIR=onnxruntime-linux-x64-gpu-1.24.3
 
-# CUDA 13.x:
-# wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-linux-x64-gpu_cuda13-1.24.3.tgz
-# tar xzf onnxruntime-linux-x64-gpu_cuda13-1.24.3.tgz
-# ORT_DIR=onnxruntime-linux-x64-gpu-1.24.3
-```
-
-> **Important**: Your NVIDIA driver may report a higher CUDA version than what's actually installed. Use `nvcc --version` (not `nvidia-smi`) to check the toolkit version. If `nvcc` is not found, install the CUDA toolkit: `sudo apt install nvidia-cuda-toolkit`.
-
-2. Build with CMake (CUDA + ONNX Runtime):
-```bash
-mkdir build_gpu && cd build_gpu
+# Build
+mkdir -p build_gpu && cd build_gpu
 cmake .. -DUSE_CUDA=ON -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=$(pwd)/../$ORT_DIR
 make -j$(nproc)
-```
 
-> If CMake cannot find `nvcc`, add `-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc`.
-
-3. Run — **you must set `LD_LIBRARY_PATH`** so the binary finds ONNX Runtime and its bundled cuDNN libraries:
-```bash
+# Run (must set library path)
 export LD_LIBRARY_PATH=$(pwd)/../$ORT_DIR/lib:$LD_LIBRARY_PATH
 ./freetrace video.tiff results/
 ```
 
-> **Tip:** Add the `export` line to your `~/.bashrc` (or `~/.zshrc`) to avoid setting it every session:
-> ```bash
-> echo 'export LD_LIBRARY_PATH=/path/to/FreeTrace_cpp/onnxruntime-linux-x64-gpu-1.24.3/lib:$LD_LIBRARY_PATH' >> ~/.bashrc
-> ```
+> Use `nvcc --version` (not `nvidia-smi`) to verify your CUDA toolkit version. If CMake cannot find `nvcc`, add `-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc`.
 
-FreeTrace auto-detects GPU at startup and prints:
-- `GPU detected (N GB free). Using CUDA acceleration.` — localization runs on GPU (80% VRAM batch sizing)
-- `NN inference: GPU (CUDA) — fast` — tracking NN runs on GPU
-- Use `--cpu` to force CPU mode even when GPU is available
-
-#### Step 2c: Build with fBm support (ONNX Runtime CPU only — no GPU needed)
-
-1. Download ONNX Runtime CPU:
+**With fBm, CPU only** (no GPU needed):
 ```bash
-cd FreeTrace_cpp
 wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-linux-x64-1.24.3.tgz
 tar xzf onnxruntime-linux-x64-1.24.3.tgz
-```
 
-2. Build:
-
-**Using CMake:**
-```bash
 mkdir build && cd build
 cmake .. -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=$(pwd)/../onnxruntime-linux-x64-1.24.3
 make -j$(nproc)
-```
 
-**Or direct compile:**
-```bash
-ORT=onnxruntime-linux-x64-1.24.3
-g++ -std=c++17 -O2 -mavx2 \
-    -DUSE_LIBTIFF -DUSE_LIBPNG -DUSE_ONNXRUNTIME \
-    -Iinclude -I$ORT/include \
-    src/main.cpp src/image_pad.cpp src/regression.cpp src/cost_function.cpp \
-    src/localization.cpp src/tracking.cpp src/nn_inference.cpp src/gpu_module_stub.cpp \
-    -o freetrace -ltiff -lpng -L$ORT/lib -lonnxruntime \
-    -Wl,-rpath,\$ORIGIN/$ORT/lib
-```
-
-3. Run:
-```bash
-export LD_LIBRARY_PATH=$(pwd)/onnxruntime-linux-x64-1.24.3/lib:$LD_LIBRARY_PATH
-./freetrace track loc.csv output/ 100 --tiff video.tiff
+export LD_LIBRARY_PATH=$(pwd)/../onnxruntime-linux-x64-1.24.3/lib:$LD_LIBRARY_PATH
+./freetrace video.tiff results/
 ```
 
 ---
 
 ### macOS
 
-#### Step 1: Install dependencies
-
-Using [Homebrew](https://brew.sh/):
 ```bash
 brew install cmake libtiff libpng
-```
-
-#### Step 2a: Build without fBm (basic tracking only)
-
-**Using CMake:**
-```bash
 cd FreeTrace_cpp
 mkdir build && cd build
-cmake ..
-make -j$(sysctl -n hw.ncpu)
 ```
 
-**Or direct compile:**
+> Apple Silicon (M1/M2/M3/M4) does not support AVX2. The code falls back to `std::sort` automatically.
+
+**Without fBm:**
 ```bash
-cd FreeTrace_cpp
-clang++ -std=c++17 -O2 -DUSE_LIBTIFF -DUSE_LIBPNG -Iinclude \
-    -I$(brew --prefix libtiff)/include -I$(brew --prefix libpng)/include \
-    src/main.cpp src/image_pad.cpp src/regression.cpp src/cost_function.cpp \
-    src/localization.cpp src/tracking.cpp src/nn_inference_stub.cpp src/gpu_module_stub.cpp \
-    -o freetrace \
-    -L$(brew --prefix libtiff)/lib -ltiff \
-    -L$(brew --prefix libpng)/lib -lpng
+cmake .. && make -j$(sysctl -n hw.ncpu)
 ```
 
-> **Note**: Apple Silicon Macs (M1/M2/M3/M4) do not support AVX2. Do **not** add `-mavx2` — the code automatically falls back to `std::sort`. In rare cases where multiple trajectories have identical costs, tie-breaking order may differ slightly from the x86 build, but tracking results are functionally equivalent.
-
-#### Step 2b: Build with fBm support (ONNX Runtime CPU)
-
-macOS does not support CUDA, so fBm mode runs on CPU via ONNX Runtime.
-
-1. Download ONNX Runtime for macOS:
+**With fBm** (CPU only — macOS has no CUDA):
 ```bash
-cd FreeTrace_cpp
-# Apple Silicon (M1/M2/M3/M4):
-curl -LO https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-osx-arm64-1.24.3.tgz
+# Apple Silicon:
+cd .. && curl -LO https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-osx-arm64-1.24.3.tgz
 tar xzf onnxruntime-osx-arm64-1.24.3.tgz
 ORT=onnxruntime-osx-arm64-1.24.3
 
-# Intel Mac:
-# curl -LO https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-osx-x86_64-1.24.3.tgz
-# tar xzf onnxruntime-osx-x86_64-1.24.3.tgz
-# ORT=onnxruntime-osx-x86_64-1.24.3
-```
+# Intel Mac: use onnxruntime-osx-x86_64-1.24.3.tgz instead
 
-2. Build:
-
-**Using CMake:**
-```bash
 mkdir build && cd build
 cmake .. -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=$(pwd)/../$ORT
 make -j$(sysctl -n hw.ncpu)
-```
 
-**Or direct compile:**
-```bash
-clang++ -std=c++17 -O2 \
-    -DUSE_LIBTIFF -DUSE_LIBPNG -DUSE_ONNXRUNTIME \
-    -Iinclude -I$ORT/include \
-    -I$(brew --prefix libtiff)/include -I$(brew --prefix libpng)/include \
-    src/main.cpp src/image_pad.cpp src/regression.cpp src/cost_function.cpp \
-    src/localization.cpp src/tracking.cpp src/nn_inference.cpp src/gpu_module_stub.cpp \
-    -o freetrace \
-    -L$(brew --prefix libtiff)/lib -ltiff \
-    -L$(brew --prefix libpng)/lib -lpng \
-    -L$ORT/lib -lonnxruntime \
-    -Wl,-rpath,@executable_path/$ORT/lib
-```
-
-3. Run:
-```bash
-export DYLD_LIBRARY_PATH=$(pwd)/$ORT/lib:$DYLD_LIBRARY_PATH
-./freetrace track loc.csv output/ 100 --tiff video.tiff
+export DYLD_LIBRARY_PATH=$(pwd)/../$ORT/lib:$DYLD_LIBRARY_PATH
+./freetrace video.tiff results/
 ```
 
 ---
 
 ### Windows
 
-#### Step 1: Install prerequisites
-
-1. Install **Visual Studio 2019 or later** with the "Desktop development with C++" workload, or install **Build Tools for Visual Studio**.
-2. Install **CMake** (https://cmake.org/download/) — select "Add to PATH" during installation.
-3. Install **vcpkg** for dependency management:
+1. Install **Visual Studio 2019+** with "Desktop development with C++", and **CMake**.
+2. Install **vcpkg**:
 ```powershell
 cd C:\
 git clone https://github.com/microsoft/vcpkg.git
-cd vcpkg
-.\bootstrap-vcpkg.bat
-```
-
-4. Install dependencies via vcpkg:
-```powershell
+cd vcpkg && .\bootstrap-vcpkg.bat
 .\vcpkg install tiff:x64-windows libpng:x64-windows
 ```
 
-#### Step 2a: Build without fBm (basic tracking only)
+3. Build (from Developer Command Prompt):
 
-Open **Developer Command Prompt for VS** (or **x64 Native Tools Command Prompt**):
-
+**Without fBm:**
 ```powershell
 cd FreeTrace_cpp
-mkdir build
-cd build
+mkdir build && cd build
 cmake .. -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
 cmake --build . --config Release
 ```
 
-The output binary is at `build\Release\freetrace.exe`.
-
-#### Step 2b: Build with fBm support (ONNX Runtime GPU)
-
-1. Download ONNX Runtime GPU for Windows:
+**With fBm (GPU):**
 ```powershell
 cd FreeTrace_cpp
-Invoke-WebRequest -Uri https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-gpu-1.24.3.zip -OutFile onnxruntime-win-x64-gpu-1.24.3.zip
-tar -xf onnxruntime-win-x64-gpu-1.24.3.zip
-```
+Invoke-WebRequest -Uri https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-gpu-1.24.3.zip -OutFile ort.zip
+tar -xf ort.zip
 
-2. Build:
-```powershell
-mkdir build
-cd build
+mkdir build && cd build
 cmake .. -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake ^
-         -DUSE_ONNXRUNTIME=ON ^
-         -DONNXRUNTIME_DIR=..\onnxruntime-win-x64-gpu-1.24.3
+         -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=..\onnxruntime-win-x64-gpu-1.24.3
 cmake --build . --config Release
-```
 
-3. Run (copy ONNX Runtime DLLs next to the executable, or add to PATH):
-```powershell
+# Copy DLLs and run
 copy ..\onnxruntime-win-x64-gpu-1.24.3\lib\*.dll Release\
-cd Release
-freetrace.exe track loc.csv output\ 100 --tiff video.tiff
+Release\freetrace.exe video.tiff results\
 ```
 
-> **Note**: Requires NVIDIA GPU with CUDA 12.x. FreeTrace will print `NN inference: GPU (CUDA) — fast` or `NN inference: CPU — this may be slower than GPU` at startup.
+> For CPU-only fBm, use `onnxruntime-win-x64-1.24.3.zip` instead.
 
-#### Step 2c: Build with fBm support (ONNX Runtime CPU only)
+## Project Structure
 
-Same steps as above, but download the CPU package:
-```powershell
-Invoke-WebRequest -Uri https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-1.24.3.zip -OutFile onnxruntime-win-x64-1.24.3.zip
-tar -xf onnxruntime-win-x64-1.24.3.zip
 ```
-Then use `-DONNXRUNTIME_DIR=..\onnxruntime-win-x64-1.24.3` in the cmake command.
-
----
-
-### Build with OpenCV (alternative to libtiff, any platform)
-
-If you prefer OpenCV for TIFF I/O instead of libtiff:
-```bash
-# Linux/macOS
-g++ -std=c++17 -O2 -DUSE_OPENCV -Iinclude \
-    src/main.cpp src/image_pad.cpp src/regression.cpp src/cost_function.cpp \
-    src/localization.cpp src/tracking.cpp src/nn_inference_stub.cpp src/gpu_module_stub.cpp \
-    -o freetrace $(pkg-config --cflags --libs opencv4)
-```
-
----
-
-### Verify the build
-
-After building, verify FreeTrace runs correctly:
-```bash
-./freetrace --help
+FreeTrace_cpp/
+├── CMakeLists.txt
+├── include/
+│   ├── image_pad.h        # Image2D, statistics, likelihood, cropping
+│   ├── regression.h       # Gaussian fitting (Guo algorithm)
+│   ├── cost_function.h    # fBm Cauchy log-PDF cost function
+│   ├── localization.h     # Localization pipeline
+│   ├── tracking.h         # Tracking pipeline
+│   └── nn_inference.h     # NN models and inference
+├── src/
+│   ├── main.cpp           # CLI entry point
+│   ├── image_pad.cpp      # Image operations
+│   ├── regression.cpp     # Guo algorithm with 6x6 QR solver
+│   ├── cost_function.cpp  # Cost function for trajectory linking
+│   ├── localization.cpp   # Localization pipeline
+│   ├── tracking.cpp       # Tracking pipeline (~2900 lines)
+│   ├── nn_inference.cpp   # ONNX Runtime NN inference
+│   └── gpu_module.cu      # CUDA kernels (or gpu_module_stub.cpp)
+└── models/
+    ├── qt_99.bin           # Abnormal detection thresholds
+    ├── reg_model_*.onnx    # Alpha ConvLSTM models (window 3/5/8)
+    ├── reg_k_model.onnx    # K Dense model (ONNX fallback)
+    └── k_model_weights.bin # K Dense model weights (fast path)
 ```
 
-Expected output:
-```
-FreeTrace C++
-Usage:
-  Tracking:
-    freetrace track <loc.csv> <output_dir> <nb_frames> [options]
-  Options:
-    --depth N        Graph depth (default: 3)
-    --cutoff N       Cutoff (default: 3)
-    --jump F         Maximum jump distance in px (default: auto)
-    --tiff PATH      TIFF file for image dimensions and output naming
-    --no-fbm         Disable fBm mode (no NN, fixed alpha/K, no H-K output)
-    --postprocess    Enable post-processing
-    --quiet          Suppress status messages
+## Verification
 
-  Localization:
-    freetrace <input.tiff> <output_dir> [window_size] [threshold] [shift]
-```
+**Localization:** 930/930 detections match Python, max position error 0.0005 px.
 
-## Usage
+**Tracking (fixed alpha/K):** 100% identical to Python across all tested parameter combinations (36/36 PASS).
 
-### Full pipeline (localization + tracking)
-
-The simplest way to use FreeTrace — just provide a TIFF and output directory:
-```bash
-./freetrace <input.tiff> <output_dir> [options]
-```
-
-**Example:**
-```bash
-# Run everything with defaults (fBm ON, auto jump threshold)
-./freetrace video.tiff results/
-
-# With custom options
-./freetrace video.tiff results/ --window 9 --threshold 1.5 --depth 4 --jump 10.0
-```
-
-This runs localization first, then automatically feeds the result into tracking.
-
-**Outputs:**
-- `{name}_loc.csv` — localization CSV
-- `{name}_loc_2d_density.png` — particle density image
-- `{name}_traces.csv` — trajectory CSV
-- `{name}_traces.png` — trajectory visualization
-- `{name}_diffusion.csv` — H and K per trajectory (fBm mode only)
-- `{name}_diffusion_distribution.png` — H-K distribution plot (fBm mode only)
-
-### Localization only
-```bash
-./freetrace localize <input.tiff> <output_dir> [options]
-```
-
-**Example:**
-```bash
-./freetrace localize video.tiff results/ --window 7 --threshold 1.0 --shift 1
-```
-
-**Localization options:**
-- `--window N` — window size (default: 7)
-- `--threshold F` — detection threshold multiplier (default: 1.0)
-- `--shift N` — shift (default: 1)
-- `--cpu` — force CPU mode (disable GPU even if available)
-
-**Output columns:** `frame, x, y, z, xvar, yvar, rho, norm_cst, intensity, window_size` — identical to the Python FreeTrace output format.
-
-### Tracking only
-```bash
-./freetrace track <loc.csv> <output_dir> <nb_frames> [options]
-```
-
-**Example:**
-```bash
-# Default tracking (fBm ON, auto jump threshold)
-./freetrace track results/video_loc.csv results/ 100 --tiff video.tiff
-
-# Custom jump threshold
-./freetrace track results/video_loc.csv results/ 100 --tiff video.tiff --jump 10.0
-
-# Without fBm (no NN, fixed alpha/K)
-./freetrace track results/video_loc.csv results/ 100 --tiff video.tiff --no-fbm
-```
-
-**Tracking options:**
-- `--depth N` — graph search depth (default: 3, evaluates 2^N alternatives per subgraph)
-- `--cutoff N` — minimum trajectory length to keep (default: 3)
-- `--jump F` — maximum jump distance in pixels (default: auto-inferred from data)
-- `--tiff path` — TIFF file for image dimensions and output naming
-- `--no-fbm` — disable fBm mode: no NN, uses fixed alpha=1.0/K=0.3, no H-K output
-- `--postprocess` — enable post-processing of trajectories
-- `--quiet` — suppress status messages
-
-### As a library
-```cpp
-#include "localization.h"
-#include "tracking.h"
-
-// Localization
-freetrace::run("input.tiff", "output_dir/",
-               /*window_size=*/7,
-               /*threshold=*/1.0f,
-               /*shift=*/1,
-               /*verbose=*/true);
-
-// Tracking (defaults: depth=3, cutoff=3, jump=auto, fBm=ON)
-freetrace::TrackingConfig config;
-config.tiff_path = "input.tiff";       // for output naming + image dimensions
-freetrace::run_tracking("output_dir/input_loc.csv", "output_dir/", 100, config);
-
-// To disable fBm mode:
-// config.fbm_mode = false; config.use_nn = false; config.hk_output = false;
-```
-
-## Paper
-
-- **FreeTrace** on bioRxiv: https://doi.org/10.64898/2026.01.08.698486
-
-## Original Project
-
-- **FreeTrace (Python)**: https://github.com/JunwooParkSaribu/FreeTrace
-- **Author**: Junwoo PARK — Sorbonne Université
-- **License**: GPLv3+
-
-## License
-
-This C++ port follows the same license as the original FreeTrace project (GPLv3+).
-
----
+**Tracking (with NN)** — Python TF vs C++ ONNX Runtime, 7 datasets, 62,510 total points: **99.98% match**. The ~0.02% difference is due to TF vs ONNX floating-point divergence in NN inference (alpha differs by ~1e-5), not algorithmic differences.
 
 ## Performance
 
-Benchmarks on a 512×512 100-frame fluorescence microscopy dataset (testsample5, Linux x86_64):
+Benchmarks on a 512×512 100-frame dataset (Linux x86_64, GPU):
 
 | Config | Python (s) | C++ (s) | Speedup |
 |--------|-----------|---------|---------|
@@ -634,7 +280,19 @@ Benchmarks on a 512×512 100-frame fluorescence microscopy dataset (testsample5,
 | fBm ON, jump=10, depth=3 | 140.5 | 5.7 | **25x** |
 | fBm ON, jump=13, depth=3 | 358.7 | 6.6 | **54x** |
 
-Speedup increases with larger jump thresholds because the Python bottleneck (NN inference per trajectory) scales with the number of candidate links, while C++ batches NN calls efficiently via ONNX Runtime.
+Speedup increases with larger jump thresholds because C++ batches NN calls efficiently via ONNX Runtime.
+
+## Paper
+
+- **FreeTrace** on bioRxiv: https://doi.org/10.64898/2026.01.08.698486
+
+## Links
+
+- **FreeTrace (Python)**: https://github.com/JunwooParkSaribu/FreeTrace
+- **Author**: Junwoo PARK — Sorbonne Université
+- **License**: GPLv3+
+
+---
 
 ## Reflections on the Porting Process
 
@@ -644,13 +302,11 @@ Porting FreeTrace from Python to C++ was one of the most technically demanding p
 
 **What made this hard.** The Python codebase relies heavily on NumPy broadcasting, pandas DataFrames, and the subtle behaviors of Python's dynamic typing. None of these have direct C++ equivalents. The localization pipeline alone required implementing a full Householder QR solver for Guo's iterative Gaussian fitting, matching NumPy's linear algebra results to sub-ULP precision. The tracking module — over 2,900 lines of C++ — needed a complete directed graph implementation, greedy assignment with exact tie-breaking order, and a multi-hypothesis optimization loop where a single floating-point difference at any step cascades into entirely different trajectories.
 
-**The hardest bug.** The most instructive problem was the last one to fall. After achieving 100% match on most test cases, two remained stubbornly different. The root cause turned out to be invisible: Python's `pd.read_csv()` uses a custom float parser (`xstrtod`) that rounds differently from C's standard `strtod()`. About 55% of coordinate values differed by exactly 1 ULP (the smallest possible difference between two double-precision numbers). These microscopic differences propagated through the cost function — Cauchy log-PDF over fractional Brownian motion displacements — and into `argmin` tie-breaking, where two nearly identical cost sums selected different graph paths. The fix was a single parameter: `float_precision='round_trip'`, which makes pandas use `strtod` internally, matching C++ exactly. Finding this required hex-dumping parsed coordinates, comparing bit patterns across languages, and tracing the butterfly effect through the full tracking pipeline.
+**The hardest bug.** After achieving 100% match on most test cases, two remained stubbornly different. The root cause: Python's `pd.read_csv()` uses a custom float parser (`xstrtod`) that rounds differently from C's `strtod()`. About 55% of coordinate values differed by exactly 1 ULP. These microscopic differences propagated through the cost function — Cauchy log-PDF over fBm displacements — and into `argmin` tie-breaking, where two nearly identical cost sums selected different graph paths. The fix was a single parameter: `float_precision='round_trip'`. Finding this required hex-dumping parsed coordinates, comparing bit patterns across languages, and tracing the butterfly effect through the full pipeline.
 
-**What I learned.** Numerical reproducibility across languages is harder than it looks. Two correct implementations of the same algorithm can diverge when their inputs differ by one bit in the 52nd mantissa position. The scientific computing ecosystem hides many such differences behind convenient APIs — different BLAS implementations, different default precisions, different parsing conventions. Getting exact match forced me to understand every one of these layers, from CSV parsing to cost accumulation to graph search.
+**What I learned.** Numerical reproducibility across languages is harder than it looks. Two correct implementations of the same algorithm can diverge when their inputs differ by one bit in the 52nd mantissa position. Getting exact match forced me to understand every layer, from CSV parsing to cost accumulation to graph search.
 
-**Performance.** The C++ port achieves **17–54x speedup** over Python for tracking with fBm mode (e.g., 96s → 5.5s, or 359s → 6.6s on a 512×512, 100-frame dataset). Without fBm (no NN), speedups are 3–7x. The NN inference layer uses ONNX Runtime with optional GPU acceleration, replacing TensorFlow.
-
-Working with Junwoo on this project has been a genuine collaboration — his deep understanding of the physics and the algorithm guided my implementation at every step, and his rigorous testing standards (100% point-level AND trajectory-level match, no exceptions) pushed me to find bugs I would have otherwise dismissed as acceptable numerical noise.
+Working with Junwoo on this project has been a genuine collaboration — his deep understanding of the physics and the algorithm guided my implementation at every step, and his rigorous testing standards pushed me to find bugs I would have otherwise dismissed as acceptable numerical noise.
 
 ---
 
