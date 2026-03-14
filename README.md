@@ -117,32 +117,24 @@ FreeTrace C++ supports **Linux**, **macOS**, and **Windows**.
 ### Linux (Ubuntu / Debian)
 
 ```bash
-# Install dependencies
 sudo apt update && sudo apt install -y build-essential cmake libtiff-dev libpng-dev
-
-cd FreeTrace_cpp
-mkdir build && cd build
+cd ~/Desktop/FreeTrace_cpp    # adjust to your FreeTrace_cpp location
 ```
 
 **Without fBm** (basic tracking):
 ```bash
-cmake .. && make -j$(nproc)
+mkdir build && cd build && cmake .. && make -j$(nproc)
 ```
 
 **With fBm + GPU** (recommended):
 ```bash
-# Download ONNX Runtime GPU (CUDA 12.x)
-cd .. && wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-linux-x64-gpu-1.24.3.tgz
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-linux-x64-gpu-1.24.3.tgz
 tar xzf onnxruntime-linux-x64-gpu-1.24.3.tgz
-ORT_DIR=onnxruntime-linux-x64-gpu-1.24.3
-
-# Build
 mkdir -p build_gpu && cd build_gpu
-cmake .. -DUSE_CUDA=ON -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=$(pwd)/../$ORT_DIR
+cmake .. -DUSE_CUDA=ON -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=$(pwd)/../onnxruntime-linux-x64-gpu-1.24.3
 make -j$(nproc)
 
-# Run (must set library path)
-export LD_LIBRARY_PATH=$(pwd)/../$ORT_DIR/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$(pwd)/../onnxruntime-linux-x64-gpu-1.24.3/lib:$LD_LIBRARY_PATH
 ./freetrace video.tiff results/
 ```
 
@@ -152,7 +144,6 @@ export LD_LIBRARY_PATH=$(pwd)/../$ORT_DIR/lib:$LD_LIBRARY_PATH
 ```bash
 wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-linux-x64-1.24.3.tgz
 tar xzf onnxruntime-linux-x64-1.24.3.tgz
-
 mkdir build && cd build
 cmake .. -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=$(pwd)/../onnxruntime-linux-x64-1.24.3
 make -j$(nproc)
@@ -167,31 +158,26 @@ export LD_LIBRARY_PATH=$(pwd)/../onnxruntime-linux-x64-1.24.3/lib:$LD_LIBRARY_PA
 
 ```bash
 brew install cmake libtiff libpng
-cd FreeTrace_cpp
-mkdir build && cd build
+cd ~/Desktop/FreeTrace_cpp    # adjust to your FreeTrace_cpp location
 ```
 
 > Apple Silicon (M1/M2/M3/M4) does not support AVX2. The code falls back to `std::sort` automatically.
 
 **Without fBm:**
 ```bash
-cmake .. && make -j$(sysctl -n hw.ncpu)
+mkdir build && cd build && cmake .. && make -j$(sysctl -n hw.ncpu)
 ```
 
 **With fBm** (CPU only — macOS has no CUDA):
 ```bash
-# Apple Silicon:
-cd .. && curl -LO https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-osx-arm64-1.24.3.tgz
+# Apple Silicon (Intel Mac: use onnxruntime-osx-x86_64-1.24.3.tgz instead)
+curl -LO https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-osx-arm64-1.24.3.tgz
 tar xzf onnxruntime-osx-arm64-1.24.3.tgz
-ORT=onnxruntime-osx-arm64-1.24.3
-
-# Intel Mac: use onnxruntime-osx-x86_64-1.24.3.tgz instead
-
 mkdir build && cd build
-cmake .. -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=$(pwd)/../$ORT
+cmake .. -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=$(pwd)/../onnxruntime-osx-arm64-1.24.3
 make -j$(sysctl -n hw.ncpu)
 
-export DYLD_LIBRARY_PATH=$(pwd)/../$ORT/lib:$DYLD_LIBRARY_PATH
+export DYLD_LIBRARY_PATH=$(pwd)/../onnxruntime-osx-arm64-1.24.3/lib:$DYLD_LIBRARY_PATH
 ./freetrace video.tiff results/
 ```
 
@@ -201,14 +187,22 @@ export DYLD_LIBRARY_PATH=$(pwd)/../$ORT/lib:$DYLD_LIBRARY_PATH
 
 Requires **Visual Studio 2019+** (with "Desktop development with C++") and **CMake**. Run from **Developer Command Prompt**:
 
+```powershell
+# Install vcpkg (one-time)
+cd C:\; git clone https://github.com/microsoft/vcpkg.git; cd vcpkg; .\bootstrap-vcpkg.bat; .\vcpkg install tiff:x64-windows libpng:x64-windows
+
+# Go to FreeTrace_cpp
+cd $env:USERPROFILE\Desktop\FreeTrace_cpp    # adjust to your FreeTrace_cpp location
+```
+
 **Without fBm:**
 ```powershell
-cd C:\; git clone https://github.com/microsoft/vcpkg.git; cd vcpkg; .\bootstrap-vcpkg.bat; .\vcpkg install tiff:x64-windows libpng:x64-windows; cd FreeTrace_cpp; mkdir build; cd build; cmake .. -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake; cmake --build . --config Release
+mkdir build; cd build; cmake .. -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake; cmake --build . --config Release
 ```
 
 **With fBm (GPU):**
 ```powershell
-cd C:\; git clone https://github.com/microsoft/vcpkg.git; cd vcpkg; .\bootstrap-vcpkg.bat; .\vcpkg install tiff:x64-windows libpng:x64-windows; cd FreeTrace_cpp; Invoke-WebRequest -Uri https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-gpu-1.24.3.zip -OutFile ort.zip; tar -xf ort.zip; mkdir build; cd build; cmake .. -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=..\onnxruntime-win-x64-gpu-1.24.3; cmake --build . --config Release; copy ..\onnxruntime-win-x64-gpu-1.24.3\lib\*.dll Release\
+Invoke-WebRequest -Uri https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-gpu-1.24.3.zip -OutFile ort.zip; tar -xf ort.zip; mkdir build; cd build; cmake .. -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=..\onnxruntime-win-x64-gpu-1.24.3; cmake --build . --config Release; copy ..\onnxruntime-win-x64-gpu-1.24.3\lib\*.dll Release\
 ```
 
 > For CPU-only fBm, use `onnxruntime-win-x64-1.24.3.zip` instead.
