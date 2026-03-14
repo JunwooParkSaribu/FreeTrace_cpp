@@ -129,12 +129,9 @@ jobs:
           Copy-Item -Recurse "models" "$DIST/"
           # Copy ONNX Runtime DLLs next to exe
           Copy-Item "${{ matrix.ort_dir }}/lib/*.dll" "$DIST/"
-          # Copy vcpkg dependency DLLs
+          # Copy all vcpkg dependency DLLs (tiff, png, zlib, jpeg, lzma, etc.) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
           $vcpkgBin = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"
-          if (Test-Path "$vcpkgBin/tiff.dll") { Copy-Item "$vcpkgBin/tiff*.dll" "$DIST/" }
-          if (Test-Path "$vcpkgBin/libpng16.dll") { Copy-Item "$vcpkgBin/libpng*.dll" "$DIST/" }
-          if (Test-Path "$vcpkgBin/zlib1.dll") { Copy-Item "$vcpkgBin/zlib*.dll" "$DIST/" }
-          if (Test-Path "$vcpkgBin/jpeg62.dll") { Copy-Item "$vcpkgBin/jpeg*.dll" "$DIST/" }
+          Get-ChildItem "$vcpkgBin/*.dll" | Copy-Item -Destination "$DIST/"
           Compress-Archive -Path "$DIST" -DestinationPath "$DIST.zip"
 
       - name: Upload artifact
