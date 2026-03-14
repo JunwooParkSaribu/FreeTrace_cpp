@@ -18,6 +18,7 @@ permissions:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -26,13 +27,6 @@ jobs:
             ort_dir: onnxruntime-linux-x64-1.24.3
             archive_ext: tar.gz
             lib_glob: "lib/libonnxruntime*.so*"
-
-          - os: macos-14
-            name: macos-x64
-            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-osx-x86_64-1.24.3.tgz
-            ort_dir: onnxruntime-osx-x86_64-1.24.3
-            archive_ext: tar.gz
-            lib_glob: "lib/libonnxruntime*.dylib"
 
           - os: macos-latest
             name: macos-arm64
