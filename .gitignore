@@ -31,7 +31,7 @@ onnxruntime-*/
 x86-simd-sort/
 
 # Test data, debug scripts, and outputs
-test_*/
+test_*
 inputs/
 outputs_*/
 debug_*.py
