@@ -8,6 +8,14 @@
 #include <cassert>
 #include <random>
 #include <iomanip>
+#include <cstdlib>
+#ifdef _WIN32 // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <sys/sysctl.h>
+#else
+#include <sys/sysinfo.h>
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -25,6 +33,25 @@
 
 // Global GPU flag — set once at startup in run()
 static bool USE_GPU = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:50
+
+// Get available system RAM in GB // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+static int get_available_ram_gb() {
+#ifdef _WIN32
+    MEMORYSTATUSEX memInfo;
+    memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+    GlobalMemoryStatusEx(&memInfo);
+    return static_cast<int>(memInfo.ullAvailPhys / (1024ULL * 1024 * 1024));
+#elif defined(__APPLE__)
+    int64_t phys_mem = 0;
+    size_t len = sizeof(phys_mem);
+    sysctlbyname("hw.memsize", &phys_mem, &len, nullptr, 0);
+    return static_cast<int>(phys_mem / (1024LL * 1024 * 1024));
+#else
+    struct sysinfo si;
+    sysinfo(&si);
+    return static_cast<int>((static_cast<uint64_t>(si.freeram) * si.mem_unit) / (1024ULL * 1024 * 1024));
+#endif
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
 namespace freetrace {
 
@@ -176,90 +203,124 @@ BackgroundResult compute_background(
     const std::vector<float>& imgs, int nb_imgs, int rows, int cols,
     const std::vector<WinParams>& window_sizes, float alpha
 ) {
-    std::vector<float> norm_imgs(imgs.size());
-    for (int n = 0; n < nb_imgs; ++n) {
-        float fmax = 0.0f;
-        int base = n * rows * cols;
-        for (int i = 0; i < rows * cols; ++i)
-            fmax = std::max(fmax, imgs[base + i]);
-        if (fmax > 0.0f)
-            for (int i = 0; i < rows * cols; ++i)
-                norm_imgs[base + i] = imgs[base + i] / fmax;
-    }
-
-    const double bins = 0.01; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 11:00
     std::vector<float> bg_means(nb_imgs, 0.0f);
     std::vector<float> bg_stds(nb_imgs, 0.0f);
 
-    for (int n = 0; n < nb_imgs; ++n) {
-        int base = n * rows * cols;
+    if (USE_GPU) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+        // GPU path: histogram-based background estimation in CUDA kernel
+        gpu::compute_background_gpu(imgs, nb_imgs, rows, cols, bg_means.data(), bg_stds.data());
+    } else { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+        // CPU path — match Python GPU gpu_module.background() exactly
         int pixel_count = rows * cols;
 
-        // Match Python: (norm * 100).astype(np.uint8) / 100
-        // Python uint8/int division yields float64; use integer bin indices to avoid
-        // float division rounding issues (int(0.29/0.01)==28, but np.histogram gives 29)
-        std::vector<int> bg_ibin(pixel_count);       // integer bin index (0-100)
-        std::vector<double> bg_val(pixel_count);     // float64 value = ibin / 100.0
-        for (int i = 0; i < pixel_count; ++i) {
-            int ival = static_cast<int>(norm_imgs[base + i] * 100);
-            bg_ibin[i] = ival;
-            bg_val[i] = ival / 100.0;               // same as Python uint8(x)/100 → float64
+        // Pre-quantize all frames
+        std::vector<std::vector<double>> all_bg_val(nb_imgs, std::vector<double>(pixel_count));
+        std::vector<std::vector<int>> all_bg_ibin(nb_imgs, std::vector<int>(pixel_count));
+        for (int n = 0; n < nb_imgs; ++n) {
+            int base = n * pixel_count;
+            double fmax_d = 0.0;
+            for (int i = 0; i < pixel_count; ++i)
+                fmax_d = std::max(fmax_d, (double)imgs[base + i]);
+            if (fmax_d <= 0.0) fmax_d = 1.0;
+            for (int i = 0; i < pixel_count; ++i) {
+                float normed_f = imgs[base + i] / static_cast<float>(fmax_d);
+                int ival = static_cast<int>(static_cast<uint8_t>(normed_f * 100.0f));
+                all_bg_val[n][i] = ival / 100.0;
+                all_bg_ibin[n][i] = ival;
+            }
         }
 
-        std::vector<int> args(pixel_count);
-        std::iota(args.begin(), args.end(), 0);
-        std::vector<int> post_mask = args;
+        // Per-frame state: post_mask, mode_val, mask_std
+        std::vector<std::vector<int>> all_post_mask(nb_imgs);
+        std::vector<double> all_mode_val(nb_imgs, 0.0);
+        std::vector<double> all_mask_std(nb_imgs, 0.0);
+        for (int n = 0; n < nb_imgs; ++n) {
+            all_post_mask[n].resize(pixel_count);
+            std::iota(all_post_mask[n].begin(), all_post_mask[n].end(), 0);
+        }
 
-        double mode_val = 0.0, mask_std = 0.0;
+        // 3 iterations matching Python GPU gpu_module.background()
         for (int iter = 0; iter < 3; ++iter) {
-            if (post_mask.empty()) break;
-            double max_val_d = 0.0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 11:30
-            for (int idx : post_mask)
-                max_val_d = std::max(max_val_d, bg_val[idx]);
+            // Step 1: histogram + mode per frame
+            for (int n = 0; n < nb_imgs; ++n) {
+                auto& post_mask = all_post_mask[n];
+                auto& bg_val = all_bg_val[n];
+                auto& bg_ibin = all_bg_ibin[n];
+                if (post_mask.empty()) continue;
 
-            // Build bin edges exactly like np.arange(0, max_val + 0.01, 0.01):
-            // np.arange computes each edge as start + k * step in float64
-            int nb_edges = static_cast<int>((max_val_d + bins) / bins + 0.5);
-            if (nb_edges < 2) nb_edges = 2;
-            int nb_bins = nb_edges - 1;
-            std::vector<double> bin_edges(nb_edges);
-            for (int k = 0; k < nb_edges; ++k)
-                bin_edges[k] = k * bins;  // matches np.arange float64 arithmetic
+                int max_ival = 0;
+                for (int idx : post_mask)
+                    max_ival = std::max(max_ival, bg_ibin[idx]);
+                int nb_bins = std::max(1, max_ival);
 
-            std::vector<int> hist(nb_bins, 0);
-            for (int idx : post_mask) {
-                // np.histogram: bin i contains values where edge[i] <= v < edge[i+1]
-                // Last bin is right-inclusive: edge[n-1] <= v <= edge[n]
-                auto it = std::upper_bound(bin_edges.begin(), bin_edges.end(), bg_val[idx]);
-                int bin = static_cast<int>(it - bin_edges.begin()) - 1;
-                bin = std::max(0, std::min(bin, nb_bins - 1));
-                hist[bin]++;
-            } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 11:30
-            int mode_bin = std::distance(hist.begin(), std::max_element(hist.begin(), hist.end()));
-            mode_val = mode_bin * bins + bins / 2.0;
+                std::vector<int> hist(nb_bins, 0);
+                for (int idx : post_mask) {
+                    int b = bg_ibin[idx];
+                    if (b > 0 && bg_val[idx] < b * 0.01) b--;
+                    if (b >= nb_bins) b = nb_bins - 1;
+                    hist[b]++;
+                }
+                int mode_bin = 0, mode_count = 0;
+                for (int b = 0; b < nb_bins; ++b) {
+                    if (hist[b] > mode_count) { mode_count = hist[b]; mode_bin = b; }
+                }
+                all_mode_val[n] = mode_bin * 0.01 + 0.005;
+            }
 
-            double sum = 0.0, sum2 = 0.0;
-            for (int idx : post_mask) { sum += bg_val[idx]; sum2 += bg_val[idx] * bg_val[idx]; }
-            double mean_tmp = sum / post_mask.size();
-            mask_std = std::sqrt(std::max(0.0, sum2 / post_mask.size() - mean_tmp * mean_tmp));
+            // Step 2: std computation — match Python GPU's cp.take flat indexing
+            if (iter == 0) {
+                // Python GPU iter 0: cp.std(cp.take(bg_intensities, post_mask_args), axis=1)
+                // cp.take with flat indexing means ALL frames use frame 0's data
+                // because post_mask_args[n] = [0,1,...,pixel_count-1] for all n
+                double sum0 = 0.0, sum0_2 = 0.0;
+                auto& bg_val0 = all_bg_val[0];
+                for (int i = 0; i < pixel_count; ++i) {
+                    sum0 += bg_val0[i];
+                    sum0_2 += bg_val0[i] * bg_val0[i];
+                }
+                double mean0 = sum0 / pixel_count;
+                double std0 = std::sqrt(std::max(0.0, sum0_2 / pixel_count - mean0 * mean0));
+                for (int n = 0; n < nb_imgs; ++n)
+                    all_mask_std[n] = std0;
+            } else {
+                // iter 1,2: per-frame std from masked values
+                for (int n = 0; n < nb_imgs; ++n) {
+                    auto& post_mask = all_post_mask[n];
+                    auto& bg_val = all_bg_val[n];
+                    if (post_mask.empty()) { all_mask_std[n] = 0.0; continue; }
+                    double sum = 0.0, sum2 = 0.0;
+                    for (int idx : post_mask) { sum += bg_val[idx]; sum2 += bg_val[idx] * bg_val[idx]; }
+                    double mean_tmp = sum / post_mask.size();
+                    all_mask_std[n] = std::sqrt(std::max(0.0, sum2 / post_mask.size() - mean_tmp * mean_tmp));
+                }
+            }
 
-            std::vector<int> new_mask;
-            double lo = mode_val - 3.0 * mask_std;
-            double hi = mode_val + 3.0 * mask_std;
-            for (int idx : args)
-                if (bg_val[idx] > lo && bg_val[idx] < hi)
-                    new_mask.push_back(idx);
-            post_mask = new_mask;
+            // Step 3: rebuild masks
+            for (int n = 0; n < nb_imgs; ++n) {
+                auto& bg_val = all_bg_val[n];
+                double lo = all_mode_val[n] - 3.0 * all_mask_std[n];
+                double hi = all_mode_val[n] + 3.0 * all_mask_std[n];
+                std::vector<int> new_mask;
+                for (int i = 0; i < pixel_count; ++i)
+                    if (bg_val[i] > lo && bg_val[i] < hi)
+                        new_mask.push_back(i);
+                all_post_mask[n] = std::move(new_mask);
+            }
         }
 
-        if (!post_mask.empty()) {
-            double sum = 0.0, sum2 = 0.0;
-            for (int idx : post_mask) { sum += bg_val[idx]; sum2 += bg_val[idx] * bg_val[idx]; }
-            double mean_d = sum / post_mask.size();
-            bg_means[n] = static_cast<float>(mean_d);
-            bg_stds[n] = static_cast<float>(std::sqrt(std::max(0.0, sum2 / post_mask.size() - mean_d * mean_d)));
+        // Final: compute mean/std from final mask
+        for (int n = 0; n < nb_imgs; ++n) {
+            auto& post_mask = all_post_mask[n];
+            auto& bg_val = all_bg_val[n];
+            if (!post_mask.empty()) {
+                double sum = 0.0, sum2 = 0.0;
+                for (int idx : post_mask) { sum += bg_val[idx]; sum2 += bg_val[idx] * bg_val[idx]; }
+                double mean_d = sum / post_mask.size();
+                bg_means[n] = static_cast<float>(mean_d);
+                bg_stds[n] = static_cast<float>(std::sqrt(std::max(0.0, sum2 / post_mask.size() - mean_d * mean_d)));
+            }
         }
-    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 11:00
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
     BackgroundResult result;
     for (auto& ws : window_sizes) {
@@ -630,10 +691,11 @@ static void params_gen(int win_s,
 // Core localization (forward + backward) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 // ============================================================
 
-LocalizationResult localize(
+LocalizationResult localize( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     const std::vector<float>& imgs, int nb_imgs, int rows, int cols,
     int window_size, float threshold_alpha, int shift,
-    int deflation_loop_backward
+    int deflation_loop_backward,
+    NumpyRNG* external_rng
 ) {
     // Generate window params
     std::vector<WinParams> single_ws, multi_ws;
@@ -665,11 +727,11 @@ LocalizationResult localize(
                 ext_imgs[n * ext_rows * ext_cols + (r + half_ext) * ext_cols + (c + half_ext)] =
                     imgs[n * rows * cols + r * cols + c];
 
-    // Add block noise to borders // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-    add_block_noise(ext_imgs, nb_imgs, ext_rows, ext_cols, extend);
+    // Add block noise to borders // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+    add_block_noise(ext_imgs, nb_imgs, ext_rows, ext_cols, extend, external_rng);
+
 
     // Background means (per-frame scalar)
-    float bg_ws_key = static_cast<float>(multi_ws[0].w);
     auto& bg_vec = bg_result.bgs[multi_ws[0].w];
     std::vector<float> bg_means(nb_imgs);
     for (int n = 0; n < nb_imgs; ++n)
@@ -788,8 +850,6 @@ LocalizationResult localize(
         std::vector<DetIndex> indices;
         for (int n = 0; n < nb_imgs; ++n)
             indices.insert(indices.end(), per_frame_indices[n].begin(), per_frame_indices[n].end());
-        // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
-
         if (!indices.empty()) {
             int ws = ws0.w;
             int win_area = ws * ws;
@@ -1242,7 +1302,7 @@ LocalizationResult localize_from_ext( // Modified by Claude (claude-opus-4-6, An
 // Top-level run
 // ============================================================
 
-bool run(const std::string& input_video_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+bool run(const std::string& input_video_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
          const std::string& output_path,
          int window_size,
          float threshold,
@@ -1257,8 +1317,10 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
         return false;
     }
 
-    // Detect GPU availability // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:50
+    // GPU detection: always use GPU if available // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     USE_GPU = gpu::is_available();
+    // TEMP: allow forcing CPU via env var for comparison testing
+    if (std::getenv("FREETRACE_FORCE_CPU")) USE_GPU = false;
     if (verbose) {
         std::cout << "Loaded " << nb_frames << " frames (" << height << "x" << width << ")" << std::endl;
         if (USE_GPU) {
@@ -1266,19 +1328,24 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
         } else {
             std::cout << "No GPU detected. Running on CPU." << std::endl;
         }
-    }
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
-    // Batch size — GPU uses larger batches (matching Python gpu_module logic) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:50
-    int ws2 = window_size * window_size;
+    // Batch size — match Python's formula exactly // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     int div_q;
+    int ws2 = window_size * window_size;
     if (USE_GPU) {
+        // Python: int(64 * 512 * 512 / h / w * (7**2 / ws**2) * MEM_SIZE / 24 * shift**2)
         int mem_gb = gpu::get_gpu_mem_size();
-        div_q = static_cast<int>(64.0 * 512 * 512 / height / width * (49.0 / ws2) * mem_gb / 24.0);
-        div_q = std::max(div_q, 1);
+        div_q = static_cast<int>(64.0 * 512.0 * 512.0 / height / width * (49.0 / ws2) * mem_gb / 24.0 * shift * shift);
     } else {
+        // Python: min(50, int(2.7 * 4194304 / h / w * (7**2 / ws**2)))
         div_q = std::min(50, static_cast<int>(2.7 * 4194304.0 / height / width * (49.0 / ws2)));
-        div_q = std::max(div_q, 1);
     }
+    div_q = std::max(div_q, 1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+
+    // TEMP: override batch size for comparison testing
+    if (const char* env_bs = std::getenv("FREETRACE_BATCH_SIZE"))
+        div_q = std::atoi(env_bs);
 
     if (verbose)
         std::cout << "Batch size: " << div_q << std::endl;
@@ -1315,27 +1382,33 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
     }
 
     int frame_size = height * width;
-    int ext_frame_size = ext_rows * ext_cols; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    int ext_frame_size = ext_rows * ext_cols;
+
+    // Create a persistent RNG (seed=42) that carries state across batches, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+    // matching Python which calls add_block_noise once for all frames.
+    NumpyRNG batch_rng(42);
+
     for (int batch_start = 0; batch_start < nb_frames; batch_start += div_q) {
         int batch_end = std::min(batch_start + div_q, nb_frames);
         int batch_n = batch_end - batch_start;
 
-        LocalizationResult batch_result; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        LocalizationResult batch_result;
 
         if (!ext_imgs_path.empty()) {
-            // Use pre-computed extended images // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            // Use pre-computed extended images
             std::vector<float> batch_ext(batch_n * ext_frame_size);
             for (int i = 0; i < batch_n * ext_frame_size; ++i)
-                batch_ext[i] = loaded_ext_imgs[batch_start * ext_frame_size + i]; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                batch_ext[i] = loaded_ext_imgs[batch_start * ext_frame_size + i];
             batch_result = localize_from_ext(batch_ext, batch_n, height, width,
-                                             ext_rows, ext_cols, window_size, threshold, shift, extend); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                                             ext_rows, ext_cols, window_size, threshold, shift, extend);
         } else {
-            // Normal path: generate noise internally // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+            // Normal path: pass persistent RNG so noise sequence is continuous across batches
             std::vector<float> batch_imgs(batch_n * frame_size);
             for (int i = 0; i < batch_n * frame_size; ++i)
                 batch_imgs[i] = images[batch_start * frame_size + i];
             batch_result = localize(batch_imgs, batch_n, height, width,
-                                     window_size, threshold, shift, /*deflation_loop_backward=*/0); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+                                     window_size, threshold, shift, /*deflation_loop_backward=*/0,
+                                     &batch_rng);
         }
 
         // Merge results with correct frame offset
@@ -1345,7 +1418,7 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
             result.pdfs[global_frame] = std::move(batch_result.pdfs[i]);
             result.infos[global_frame] = std::move(batch_result.infos[i]);
         }
-    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
     // Count total detections
     int total = 0;

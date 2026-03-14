@@ -102,10 +102,11 @@ void subtract_pdf(
 );
 
 // --- Core localization function (forward + backward) ---
-LocalizationResult localize(
+LocalizationResult localize( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     const std::vector<float>& imgs, int nb_imgs, int rows, int cols,
     int window_size, float threshold_alpha, int shift = 1,
-    int deflation_loop_backward = 0
+    int deflation_loop_backward = 0,
+    NumpyRNG* external_rng = nullptr
 );
 
 // --- Core localization from pre-built extended images --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
@@ -117,13 +118,13 @@ LocalizationResult localize_from_ext(
 );
 
 // --- Top-level run function ---
-bool run(const std::string& input_video_path,
+bool run(const std::string& input_video_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
          const std::string& output_path,
          int window_size = 7,
          float threshold = 1.0f,
          int shift = 1,
          bool verbose = false,
-         const std::string& ext_imgs_path = ""); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+         const std::string& ext_imgs_path = ""); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
 // --- 2D density image generation --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 void make_loc_depth_image(const std::string& output_path,

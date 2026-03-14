@@ -219,9 +219,9 @@ void make_hk_distribution_image(const std::string& path, // Modified by Claude (
                                 const std::vector<double>& K_vals);
 
 // --- Top-level tracking entry point --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+bool run_tracking(const std::string& loc_csv_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
                   const std::string& output_path,
                   int nb_frames,
-                  const TrackingConfig& config = {});
+                  TrackingConfig config = {});
 
 } // namespace freetrace

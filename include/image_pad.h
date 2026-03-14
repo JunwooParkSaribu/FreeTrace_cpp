@@ -53,11 +53,46 @@ std::vector<float> mapping(
     int nb_img, int row_shape, int col_shape, int shift
 );
 
+// Numpy-compatible RNG for deterministic padding noise // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+class NumpyRNG {
+public:
+    std::mt19937 mt;
+    bool has_gauss;
+    double gauss_cache;
+
+    NumpyRNG(uint32_t seed) : mt(seed), has_gauss(false), gauss_cache(0.0) {}
+
+    double rk_double() {
+        uint32_t a = mt() >> 5;
+        uint32_t b = mt() >> 6;
+        return (a * 67108864.0 + b) / 9007199254740992.0;
+    }
+
+    double rk_gauss() {
+        if (has_gauss) { has_gauss = false; return gauss_cache; }
+        double f, x1, x2, r2;
+        do {
+            x1 = 2.0 * rk_double() - 1.0;
+            x2 = 2.0 * rk_double() - 1.0;
+            r2 = x1 * x1 + x2 * x2;
+        } while (r2 >= 1.0 || r2 == 0.0);
+        f = std::sqrt(-2.0 * std::log(r2) / r2);
+        gauss_cache = f * x1;
+        has_gauss = true;
+        return f * x2;
+    }
+
+    float normal(double loc, double scale) {
+        return static_cast<float>(loc + scale * rk_gauss());
+    }
+}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+
 // Add block noise to extended image borders (Gaussian noise matching local statistics)
 void add_block_noise(
     std::vector<float>& ext_imgs,
     int nb_imgs, int ext_rows, int ext_cols,
-    int extend
-); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    int extend,
+    NumpyRNG* external_rng = nullptr
+); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
 } // namespace freetrace

@@ -1,13 +1,15 @@
 # Build
 build/
+build_gpu/
 cmake-build-*/
 *.o
 *.a
 *.so
 *.dylib
 
-# Binary
+# Binaries
 freetrace
+freetrace_*
 
 # IDE
 .vscode/
@@ -23,11 +25,17 @@ Thumbs.db
 
 # ONNX Runtime (downloaded separately)
 onnxruntime-*/
+*.tgz
 
-# Test data and outputs
+# External dependencies (downloaded separately)
+x86-simd-sort/
+
+# Test data, debug scripts, and outputs
 test_*/
 inputs/
 outputs_*/
+debug_*.py
 *.bin
 !models/qt_99.bin
 !models/traj_colors.bin
+!models/k_model_weights.bin
