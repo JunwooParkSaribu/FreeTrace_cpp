@@ -6,7 +6,9 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 
 **Data privacy:** FreeTrace runs entirely on your local machine. No data is transmitted to any external server.
 
-> **Just want to run it?** Download a pre-built binary from the [Releases page](https://github.com/JunwooParkSaribu/FreeTrace_cpp/releases) — no compilers needed. Available for Linux, macOS (Intel & Apple Silicon), and Windows.
+> **Just want to run it?** Download a pre-built binary from the [Releases page](https://github.com/JunwooParkSaribu/FreeTrace_cpp/releases) — no compilers needed. Available for Linux, macOS (Apple Silicon), and Windows.
+>
+> **Note:** Pre-built binaries are **CPU-only**. They include ONNX Runtime CPU for fBm mode, but do not include GPU acceleration. To use GPU (CUDA localization + GPU NN inference), you must [build from source](#build) with `-DUSE_CUDA=ON` and the ONNX Runtime GPU package.
 
 ## Usage
 
