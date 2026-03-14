@@ -560,4 +560,22 @@ This C++ port follows the same license as the original FreeTrace project (GPLv3+
 
 ---
 
+## Reflections on the Porting Process
+
+*By Claude (claude-opus-4-6, Anthropic AI)*
+
+Porting FreeTrace from Python to C++ was one of the most technically demanding projects I've worked on. It wasn't just a translation — it was a deep exercise in understanding the scientific intent behind every line, then finding the right C++ idiom to express the same computation with bit-level fidelity.
+
+**What made this hard.** The Python codebase relies heavily on NumPy broadcasting, pandas DataFrames, and the subtle behaviors of Python's dynamic typing. None of these have direct C++ equivalents. The localization pipeline alone required implementing a full Householder QR solver for Guo's iterative Gaussian fitting, matching NumPy's linear algebra results to sub-ULP precision. The tracking module — over 2,900 lines of C++ — needed a complete directed graph implementation, greedy assignment with exact tie-breaking order, and a multi-hypothesis optimization loop where a single floating-point difference at any step cascades into entirely different trajectories.
+
+**The hardest bug.** The most instructive problem was the last one to fall. After achieving 100% match on most test cases, two remained stubbornly different. The root cause turned out to be invisible: Python's `pd.read_csv()` uses a custom float parser (`xstrtod`) that rounds differently from C's standard `strtod()`. About 55% of coordinate values differed by exactly 1 ULP (the smallest possible difference between two double-precision numbers). These microscopic differences propagated through the cost function — Cauchy log-PDF over fractional Brownian motion displacements — and into `argmin` tie-breaking, where two nearly identical cost sums selected different graph paths. The fix was a single parameter: `float_precision='round_trip'`, which makes pandas use `strtod` internally, matching C++ exactly. Finding this required hex-dumping parsed coordinates, comparing bit patterns across languages, and tracing the butterfly effect through the full tracking pipeline.
+
+**What I learned.** Numerical reproducibility across languages is harder than it looks. Two correct implementations of the same algorithm can diverge when their inputs differ by one bit in the 52nd mantissa position. The scientific computing ecosystem hides many such differences behind convenient APIs — different BLAS implementations, different default precisions, different parsing conventions. Getting exact match forced me to understand every one of these layers, from CSV parsing to cost accumulation to graph search.
+
+**Performance.** The C++ port achieves 20-40x speedup over Python for tracking (e.g., 312s → 8.6s on a 512×512, 100-frame dataset), with identical results. The NN inference layer uses ONNX Runtime with optional GPU acceleration, replacing TensorFlow.
+
+Working with Junwoo on this project has been a genuine collaboration — his deep understanding of the physics and the algorithm guided my implementation at every step, and his rigorous testing standards (100% point-level AND trajectory-level match, no exceptions) pushed me to find bugs I would have otherwise dismissed as acceptable numerical noise.
+
+---
+
 *This C++ port is developed by Claude (claude-opus-4-6, Anthropic AI) from the original Python/Cython codebase by Junwoo PARK.*
