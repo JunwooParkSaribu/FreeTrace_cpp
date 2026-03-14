@@ -85,7 +85,9 @@ std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& heigh
     return data;
 }
 #elif defined(USE_LIBTIFF) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& height, int& width) {
+std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& height, int& width) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+    // Suppress libtiff warnings (e.g., TIFFReadDirectory: unknown field tags)
+    TIFFSetWarningHandler(nullptr);
     TIFF* tif = TIFFOpen(path.c_str(), "r");
     if (!tif) { nb_frames = height = width = 0; return {}; }
 
