@@ -91,11 +91,15 @@ if(USE_CUDA)
     target_link_libraries(freetrace PRIVATE cudart)
 endif() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
-# AVX2 for x86-simd-sort (used in tracking argsort)
+# AVX2 for x86-simd-sort (used in tracking argsort) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+# Only enable if both compiler supports AVX2 AND the x86-simd-sort headers are present
 include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag("-mavx2" HAS_AVX2)
-if(HAS_AVX2)
+if(HAS_AVX2 AND EXISTS "${CMAKE_SOURCE_DIR}/x86-simd-sort/src/x86simdsort-static-incl.h")
     target_compile_options(freetrace PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2>)
+    message(STATUS "AVX2 enabled with x86-simd-sort")
+else()
+    message(STATUS "AVX2 disabled (x86-simd-sort not found or AVX2 not supported)")
 endif()
 
 # Disable FP contraction (FMA fusion) for deterministic floating-point results // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
