@@ -17,7 +17,7 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 
 ## Motivation and Reflection (Edited by the author)
 
-This project started to estimate how GPT-like / Claude-like models can do code something. Via this porting project, it could be checked that Claude understands the core structure well and has the ability to convert Python to C++. However, it also produces tons of minor bugs that Claude didn't realise. These minor bugs could only be fixed by Claude itself under detailed human guidance. Moreover, this porting project can be relatively easily completed with appropriate human guidance, since FreeTrace C++ has the ground truth (FreeTrace Python). However, the new projects will require more strict step-by-step supervision by Humans to avoid a large number of minor/major bugs that Claude cannot catch.
+This project started to estimate how GPT-like / Claude-like models can do code something. Via this porting project, it could be checked that Claude understands the core structure well and has the ability to convert Python to C++. However, it also produced tons of minor bugs that Claude didn't realise. These minor bugs could only be fixed by Claude itself under detailed human guidance. Moreover, this porting project can be relatively easily completed with appropriate human guidance, since FreeTrace C++ has the ground truth (FreeTrace Python). However, the new projects will require more strict step-by-step supervision by Humans to avoid a large number of minor/major bugs that Claude cannot catch.
 
 ---
 
