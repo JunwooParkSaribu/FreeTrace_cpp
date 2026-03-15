@@ -114,10 +114,10 @@ Source: "{#StagingDir}\msvcp140.dll"; DestDir: "{app}"; Flags: ignoreversion ski
 Source: "{#StagingDir}\concrt140.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon\freetrace_icon.ico"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\icon\freetrace_icon.ico"
 Name: "{group}\{#MyAppName} (CLI)"; Filename: "cmd.exe"; Parameters: "/k ""{app}\freetrace.exe"" --help"; WorkingDir: "{app}"; IconFilename: "{app}\icon\freetrace_icon.ico"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\icon\freetrace_icon.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon; IconFilename: "{app}\icon\freetrace_icon.ico"
 
 [Registry]
 ; Add to PATH if user selected that task
