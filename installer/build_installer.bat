@@ -347,9 +347,18 @@ copy "!CUDNN_DIR!\bin\cudnn_engines_runtime_compiled64_!CUDNN_MAJOR!.dll" "!STAG
 copy "!CUDNN_DIR!\bin\cudnn_heuristic64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
 copy "!CUDNN_DIR!\bin\cudnn_adv64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
 
-REM --- zlib (needed by cuDNN/libtiff) ---
+REM --- zlibwapi.dll (required by cuDNN 9.x for heuristic engine) ---
 copy "!CUDNN_DIR!\bin\zlibwapi.dll" "!STAGING!\" >nul 2>&1
 copy "!CUDA_DIR!\bin\zlibwapi.dll" "!STAGING!\" >nul 2>&1
+if not exist "!STAGING!\zlibwapi.dll" (
+    echo     Downloading zlibwapi.dll for cuDNN ...
+    curl.exe -L --progress-bar -o "!DEPS!\zlib123dllx64.zip" "https://www.winimage.com/zLibDll/zlib123dllx64.zip"
+    if not errorlevel 1 (
+        tar -xf "!DEPS!\zlib123dllx64.zip" -C "!DEPS!" dll_x64/zlibwapi.dll 2>nul
+        copy "!DEPS!\dll_x64\zlibwapi.dll" "!STAGING!\" >nul 2>&1
+        del "!DEPS!\zlib123dllx64.zip" >nul 2>&1
+    )
+)
 
 REM --- libtiff + libpng + zlib (from vcpkg) ---
 copy "!VCPKG_INSTALLED!\bin\tiff.dll" "!STAGING!\" >nul 2>&1
