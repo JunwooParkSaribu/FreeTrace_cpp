@@ -1695,7 +1695,8 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
     } else {
         div_q = std::min(50, static_cast<int>(2.7 * 4194304.0 / height / width * (49.0 / ws2)));
     }
-    div_q = std::max(div_q, 1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+    div_q = std::max(div_q, 1);
+    if (USE_GPU && batch_size <= 0) div_q = std::min(div_q, 100); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 
     if (verbose)
         std::cout << "Batch size: " << div_q << std::endl;
