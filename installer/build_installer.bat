@@ -17,7 +17,7 @@ exit /b %ERRORLEVEL%
 :main
 setlocal enabledelayedexpansion
 
-pushd "%~dp0.." & set "ROOT=%CD%" & popd
+for %%I in ("%~dp0..") do set "ROOT=%%~fI"
 set DEPS=%~dp0deps
 set STAGING=%ROOT%\installer_staging
 set BUILD_DIR=%ROOT%\build_win
