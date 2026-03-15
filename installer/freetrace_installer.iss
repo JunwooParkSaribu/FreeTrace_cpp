@@ -15,7 +15,7 @@
 #define MyAppVersion "1.6.0.4"
 #define MyAppPublisher "Junwoo PARK"
 #define MyAppURL "https://github.com/JunwooParkSaribu/FreeTrace_cpp"
-#define MyAppExeName "FreeTrace.exe"
+#define MyAppExeName "FreeTrace_GUI.exe"
 #define StagingDir "..\installer_staging"
 
 [Setup]
@@ -55,7 +55,7 @@ Name: "addtopath"; Description: "Add FreeTrace to system PATH"; GroupDescription
 [Files]
 ; === Main executables ===
 Source: "{#StagingDir}\freetrace.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#StagingDir}\FreeTrace.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StagingDir}\FreeTrace_GUI.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; === Model files ===
 Source: "{#StagingDir}\models\*"; DestDir: "{app}\models"; Flags: ignoreversion recursesubdirs

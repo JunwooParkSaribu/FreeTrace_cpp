@@ -33,7 +33,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='FreeTrace',
+    name='FreeTrace_GUI',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

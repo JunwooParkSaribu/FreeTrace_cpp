@@ -298,7 +298,7 @@ REM ============================================================
 REM  Step 2: Build FreeTrace.exe (GUI) with PyInstaller
 REM ============================================================
 echo.
-echo === Step 2: Building FreeTrace.exe (GUI) ===
+echo === Step 2: Building FreeTrace_GUI.exe ===
 python -m pip install pyinstaller PyQt6 --quiet
 python -m PyInstaller "%ROOT%\gui.spec" --noconfirm --clean --distpath "%ROOT%\dist" --workpath "%ROOT%\build_pyinstaller"
 if errorlevel 1 (echo ERROR: PyInstaller failed && exit /b 1)
@@ -315,7 +315,7 @@ mkdir "%STAGING%\models"
 REM --- Main executables ---
 copy "%BUILD_DIR%\Release\freetrace.exe" "%STAGING%\" >nul 2>&1
 if not exist "%STAGING%\freetrace.exe" copy "%BUILD_DIR%\freetrace.exe" "%STAGING%\" >nul
-copy "%ROOT%\dist\FreeTrace.exe" "%STAGING%\" >nul
+copy "%ROOT%\dist\FreeTrace_GUI.exe" "%STAGING%\" >nul
 
 REM --- Model files ---
 copy "%ROOT%\models\*.onnx" "%STAGING%\models\" >nul
