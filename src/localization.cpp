@@ -1746,6 +1746,9 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
         int batch_end = std::min(batch_start + div_q, nb_frames);
         int batch_n = batch_end - batch_start;
 
+        if (verbose) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+            std::cerr << "\rLocalizing frame " << batch_start << "-" << batch_end << " / " << nb_frames << std::flush;
+
         LocalizationResult batch_result;
 
         if (!ext_imgs_path.empty()) {
@@ -1773,6 +1776,8 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
             result.infos[global_frame] = std::move(batch_result.infos[i]);
         }
     } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+
+    if (verbose) std::cerr << std::endl; // end progress line // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 
     // Count total detections
     int total = 0;

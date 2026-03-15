@@ -2938,9 +2938,12 @@ void write_hk_csv(const std::string& path, // Modified by Claude (claude-opus-4-
         all_ys.push_back(std::move(ys));
     }
 
-    // Batched alpha + k prediction (few ONNX calls instead of N) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    // Batched alpha + k prediction (few ONNX calls instead of N) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+    std::cerr << "Estimating H for " << trajectories.size() << " trajectories..." << std::flush;
     auto alpha_batch = predict_alpha_nn_batch(g_nn_models, all_xs, all_ys);
+    std::cerr << " done.\nEstimating K..." << std::flush;
     auto k_batch = predict_k_nn_batch(g_nn_models, all_xs, all_ys);
+    std::cerr << " done." << std::endl;
 
     for (int i = 0; i < (int)trajectories.size(); i++) {
         float alpha = alpha_batch[i];
