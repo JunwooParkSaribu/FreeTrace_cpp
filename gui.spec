@@ -43,5 +43,5 @@ exe = EXE(
     console=False,           # No console window — it's a GUI app
     disable_windowed_traceback=False,
     argv_emulation=False,
-    icon=None,               # Set to 'icon.ico' if you have one
+    icon=os.path.join(script_dir, 'icon', 'freetrace_icon.ico'),  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 )

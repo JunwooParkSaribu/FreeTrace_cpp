@@ -12,6 +12,7 @@ freetrace
 freetrace_*
 !installer/freetrace_installer.iss
 !icon/freetrace_icon.png
+!icon/freetrace_icon.ico
 
 # IDE
 .vscode/
