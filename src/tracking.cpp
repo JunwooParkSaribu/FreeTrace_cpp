@@ -3486,7 +3486,7 @@ static const char PATH_SEP = '/';
 // Helper: build model search paths (CWD, parent, loc_csv dir, exe dir) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 static std::vector<std::string> model_search_dirs(const std::string& loc_csv_path) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     std::string sep(1, PATH_SEP);
-    std::vector<std::string> dirs = {"models", ".." + sep + "models"};
+    std::vector<std::string> dirs = {"models", ".." + sep + "models", ".." + sep + ".." + sep + "models"}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
     auto slash = rfind_path_sep(loc_csv_path);
     if (slash != std::string::npos)
         dirs.push_back(loc_csv_path.substr(0, slash) + sep + ".." + sep + "models");
@@ -3494,6 +3494,7 @@ static std::vector<std::string> model_search_dirs(const std::string& loc_csv_pat
     if (!ed.empty()) {
         dirs.push_back(ed + sep + "models");
         dirs.push_back(ed + sep + ".." + sep + "models");
+        dirs.push_back(ed + sep + ".." + sep + ".." + sep + "models"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
     }
     return dirs;
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
