@@ -117,26 +117,39 @@ REM ============================================================
 REM --- 0a: Find or download cuDNN ---
 echo [0a] Looking for cuDNN !CUDNN_VERSION! (Blackwell-compatible) ...
 set "CUDNN_DIR="
-REM Check deps folder for exact version
+set "CUDNN_BIN="
+REM Check deps folder for exact version (bin\ or bin\x64\)
 for /d %%D in ("!DEPS!\cudnn-windows-x86_64-!CUDNN_VERSION!*") do (
-    if exist "%%D\bin\cudnn64_!CUDNN_MAJOR!.dll" (
+    if exist "%%D\bin\x64\cudnn64_!CUDNN_MAJOR!.dll" (
         set "CUDNN_DIR=%%D"
-        echo     Found: %%D
+        set "CUDNN_BIN=%%D\bin\x64"
+        echo     Found: %%D (bin\x64)
+    ) else if exist "%%D\bin\cudnn64_!CUDNN_MAJOR!.dll" (
+        set "CUDNN_DIR=%%D"
+        set "CUDNN_BIN=%%D\bin"
+        echo     Found: %%D (bin)
     )
 )
 if defined CUDNN_DIR goto :cudnn_done
-REM Check if cuDNN 9.7+ is in CUDA dir
+REM Check if cuDNN is in CUDA dir
 if exist "!CUDA_DIR!\bin\cudnn64_!CUDNN_MAJOR!.dll" (
     set "CUDNN_DIR=!CUDA_DIR!"
+    set "CUDNN_BIN=!CUDA_DIR!\bin"
     echo     Found in CUDA dir: !CUDA_DIR!
     echo     WARNING: Cannot verify cuDNN version. Ensure it is 9.7+ for Blackwell.
     goto :cudnn_done
 )
-REM Check deps folder for any cuDNN 9
+REM Check deps folder for any cuDNN 9 (bin\ or bin\x64\)
 for /d %%D in ("!DEPS!\cudnn-*") do (
-    if exist "%%D\bin\cudnn64_!CUDNN_MAJOR!.dll" (
+    if exist "%%D\bin\x64\cudnn64_!CUDNN_MAJOR!.dll" (
         set "CUDNN_DIR=%%D"
-        echo     Found: %%D
+        set "CUDNN_BIN=%%D\bin\x64"
+        echo     Found: %%D (bin\x64)
+        echo     WARNING: Cannot verify cuDNN version. Ensure it is 9.7+ for Blackwell.
+    ) else if exist "%%D\bin\cudnn64_!CUDNN_MAJOR!.dll" (
+        set "CUDNN_DIR=%%D"
+        set "CUDNN_BIN=%%D\bin"
+        echo     Found: %%D (bin)
         echo     WARNING: Cannot verify cuDNN version. Ensure it is 9.7+ for Blackwell.
     )
 )
@@ -158,13 +171,20 @@ echo     Extracting ...
 tar -xf "!CUDNN_ZIP!" -C "!DEPS!"
 del "!CUDNN_ZIP!"
 for /d %%D in ("!DEPS!\cudnn-*") do (
-    if exist "%%D\bin\cudnn64_!CUDNN_MAJOR!.dll" set "CUDNN_DIR=%%D"
+    if exist "%%D\bin\x64\cudnn64_!CUDNN_MAJOR!.dll" (
+        set "CUDNN_DIR=%%D"
+        set "CUDNN_BIN=%%D\bin\x64"
+    ) else if exist "%%D\bin\cudnn64_!CUDNN_MAJOR!.dll" (
+        set "CUDNN_DIR=%%D"
+        set "CUDNN_BIN=%%D\bin"
+    )
 )
 if not defined CUDNN_DIR (
     echo ERROR: cuDNN extraction failed -- cudnn64_!CUDNN_MAJOR!.dll not found.
     exit /b 1
 )
 echo     Extracted to: !CUDNN_DIR!
+echo     DLLs in: !CUDNN_BIN!
 :cudnn_done
 
 REM --- 0b: Find or download ONNX Runtime GPU ---
@@ -286,7 +306,7 @@ echo.
 echo ============================================================
 echo Dependencies ready:
 echo   CUDA:         !CUDA_DIR!
-echo   cuDNN:        !CUDNN_DIR! (9.7+ for Blackwell)
+echo   cuDNN:        !CUDNN_BIN! (9.20+ for Blackwell)
 echo   ONNX Runtime: !ORT_DIR!
 echo   vcpkg:        !VCPKG_ROOT!
 echo   Inno Setup:   !ISCC_CMD!
@@ -358,18 +378,18 @@ copy "!CUDA_DIR!\bin\cusparse64_12.dll" "!STAGING!\" >nul 2>&1
 copy "!CUDA_DIR!\bin\nvJitLink_120_0.dll" "!STAGING!\" >nul 2>&1
 copy "!CUDA_DIR!\bin\nvrtc64_120_0.dll" "!STAGING!\" >nul 2>&1
 
-REM --- cuDNN 9.x DLLs ---
-copy "!CUDNN_DIR!\bin\cudnn64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul
-copy "!CUDNN_DIR!\bin\cudnn_cnn64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
-copy "!CUDNN_DIR!\bin\cudnn_ops64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
-copy "!CUDNN_DIR!\bin\cudnn_graph64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
-copy "!CUDNN_DIR!\bin\cudnn_engines_precompiled64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
-copy "!CUDNN_DIR!\bin\cudnn_engines_runtime_compiled64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
-copy "!CUDNN_DIR!\bin\cudnn_heuristic64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
-copy "!CUDNN_DIR!\bin\cudnn_adv64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
+REM --- cuDNN 9.x DLLs (from CUDNN_BIN which may be bin\ or bin\x64\) ---
+copy "!CUDNN_BIN!\cudnn64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul
+copy "!CUDNN_BIN!\cudnn_cnn64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
+copy "!CUDNN_BIN!\cudnn_ops64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
+copy "!CUDNN_BIN!\cudnn_graph64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
+copy "!CUDNN_BIN!\cudnn_engines_precompiled64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
+copy "!CUDNN_BIN!\cudnn_engines_runtime_compiled64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
+copy "!CUDNN_BIN!\cudnn_heuristic64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
+copy "!CUDNN_BIN!\cudnn_adv64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul 2>&1
 
 REM --- zlibwapi.dll (required by cuDNN 9.x for heuristic engine) ---
-copy "!CUDNN_DIR!\bin\zlibwapi.dll" "!STAGING!\" >nul 2>&1
+copy "!CUDNN_BIN!\zlibwapi.dll" "!STAGING!\" >nul 2>&1
 copy "!CUDA_DIR!\bin\zlibwapi.dll" "!STAGING!\" >nul 2>&1
 if not exist "!STAGING!\zlibwapi.dll" (
     echo     Downloading zlibwapi.dll for cuDNN ...
