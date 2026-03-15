@@ -222,21 +222,25 @@ static int model_selection(const NNModels& models, int length) {
 
 bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     try {
-        auto* env = new Ort::Env(ORT_LOGGING_LEVEL_FATAL, "freetrace"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
+        auto* env = new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "freetrace"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
         models.env = env;
 
         Ort::SessionOptions opts;
         opts.SetIntraOpNumThreads(1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-        bool gpu_enabled = false;
+        bool gpu_enabled = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
         try {
             OrtCUDAProviderOptions cuda_opts;
             cuda_opts.device_id = 0;
+            cuda_opts.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchDefault;
+            cuda_opts.do_copy_in_default_stream = 1;
+            // Use cuDNN conv_use_max_workspace to avoid heuristic failures
+            cuda_opts.cudnn_conv_use_max_workspace = 1;
             opts.AppendExecutionProvider_CUDA(cuda_opts);
             gpu_enabled = true;
         } catch (...) {
-        }
+        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
 
         models.reg_model_nums = {3, 5, 8};
         models.crits = {3, 5, 8, 8192};
