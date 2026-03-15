@@ -67,16 +67,16 @@ Source: "{#StagingDir}\onnxruntime.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\onnxruntime_providers_cuda.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#StagingDir}\onnxruntime_providers_shared.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
-; === CUDA 12.x runtime DLLs ===
+; === CUDA 12.x runtime DLLs (wildcards for CUDA version independence) ===
 Source: "{#StagingDir}\cudart64_12.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\cublas64_12.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\cublasLt64_12.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#StagingDir}\cufft64_11.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "{#StagingDir}\curand64_10.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "{#StagingDir}\cusolver64_11.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "{#StagingDir}\cusparse64_12.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "{#StagingDir}\nvJitLink_120_0.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "{#StagingDir}\nvrtc64_120_0.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#StagingDir}\cufft64_*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#StagingDir}\curand64_*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#StagingDir}\cusolver64_*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#StagingDir}\cusparse64_*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#StagingDir}\nvJitLink_*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#StagingDir}\nvrtc64_*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 ; === cuDNN 9.x DLLs ===
 Source: "{#StagingDir}\cudnn64_9.dll"; DestDir: "{app}"; Flags: ignoreversion
