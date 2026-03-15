@@ -185,7 +185,7 @@ export DYLD_LIBRARY_PATH=$(pwd)/../onnxruntime-osx-arm64-1.24.3/lib:$DYLD_LIBRAR
 
 ### Windows
 
-Requires **Visual Studio 2019+** (with "Desktop development with C++") and **CMake**. Run from **Developer Command Prompt**:
+Requires [**Visual Studio 2022**](https://visualstudio.microsoft.com/vs/older-downloads/) (with "Desktop development with C++"), **CMake**, and [**CUDA Toolkit 12.x**](https://developer.nvidia.com/cuda-downloads) for GPU support. Run from **Developer Command Prompt**:
 
 ```powershell
 # Install vcpkg (one-time)
@@ -207,7 +207,7 @@ Invoke-WebRequest -Uri https://github.com/microsoft/onnxruntime/releases/downloa
 
 > For CPU-only fBm, use `onnxruntime-win-x64-1.24.3.zip` instead.
 >
-> **CUDA + Visual Studio:** If CMake reports "No CUDA toolset found", your VS version may be too new for your CUDA toolkit. Install [**Visual Studio 2022**](https://visualstudio.microsoft.com/vs/older-downloads/) (with "Desktop development with C++") and add `-G "Visual Studio 17 2022"` to the cmake command.
+> **Note:** CUDA 12.x requires Visual Studio 2022. Newer VS versions (2025/2026) are not yet supported by NVIDIA. If you have multiple VS versions installed, add `-G "Visual Studio 17 2022"` to the cmake command.
 
 ## Project Structure
 
