@@ -26,7 +26,7 @@ set "BUILD_DIR=!ROOT!\build_win"
 
 REM --- Version config (change these to update dependencies) ---
 set "ORT_VERSION=1.24.3"
-set "CUDNN_VERSION=9.8.0.87"
+set "CUDNN_VERSION=9.2.1.18"
 set "CUDNN_MAJOR=9"
 
 echo ============================================================
