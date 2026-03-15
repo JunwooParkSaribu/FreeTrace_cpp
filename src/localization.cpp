@@ -1332,18 +1332,23 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
         }
     } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
-    // Batch size — match Python's formula exactly // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+    // Batch size — use 70% of available VRAM // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
     int div_q;
     int ws2 = window_size * window_size;
     if (USE_GPU) {
-        // Python: int(64 * 512 * 512 / h / w * (7**2 / ws**2) * MEM_SIZE / 24 * shift**2)
-        int mem_gb = gpu::get_gpu_mem_size();
-        div_q = static_cast<int>(64.0 * 512.0 * 512.0 / height / width * (49.0 / ws2) * mem_gb / 24.0 * shift * shift);
+        // Estimate peak VRAM per frame: cropping is the dominant allocation
+        // d_ext: (h+ext)*(w+ext)*4, d_cropped: nb_crops*ws²*4
+        int extend = window_size;
+        int ext_h = height + extend, ext_w = width + extend;
+        int nb_crops_est = ((height + 1) / shift) * ((width + 1) / shift); // approximate
+        size_t per_frame = (size_t)ext_h * ext_w * sizeof(float) + (size_t)nb_crops_est * ws2 * sizeof(float);
+        size_t free_mem = gpu::get_gpu_free_mem_bytes();
+        div_q = static_cast<int>(0.7 * free_mem / per_frame);
     } else {
         // Python: min(50, int(2.7 * 4194304 / h / w * (7**2 / ws**2)))
         div_q = std::min(50, static_cast<int>(2.7 * 4194304.0 / height / width * (49.0 / ws2)));
     }
-    div_q = std::max(div_q, 1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+    div_q = std::max(div_q, 1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 
     // TEMP: override batch size for comparison testing
     if (const char* env_bs = std::getenv("FREETRACE_BATCH_SIZE"))
