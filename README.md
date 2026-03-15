@@ -208,7 +208,7 @@ mkdir build; cd build; cmake .. -G "Visual Studio 17 2022" "-DCMAKE_TOOLCHAIN_FI
 ```powershell
 Invoke-WebRequest -Uri https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-gpu-1.24.3.zip -OutFile ort.zip; tar -xf ort.zip; mkdir build; cd build; cmake .. -G "Visual Studio 17 2022" "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" "-DUSE_ONNXRUNTIME=ON" "-DONNXRUNTIME_DIR=..\onnxruntime-win-x64-gpu-1.24.3"; cmake --build . --config Release; copy ..\onnxruntime-win-x64-gpu-1.24.3\lib\*.dll Release\
 ```
-> Copy cuDNN DLLs from `bin/` into the `Release/` folder before running.
+> **Important:** After extracting cuDNN, copy **all DLLs** from cuDNN's `bin/` folder into the `Release/` folder. Without this, you will get `cudnn64_9.dll not found` errors at runtime.
 
 > For CPU-only fBm, use `onnxruntime-win-x64-1.24.3.zip` instead.
 >
