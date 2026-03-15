@@ -10,6 +10,11 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 >
 > **Note:** Pre-built binaries are **CPU-only**. They include ONNX Runtime CPU for fBm mode, but do not include GPU acceleration. To use GPU (CUDA localization + GPU NN inference), you must [build from source](#build) with `-DUSE_CUDA=ON` and the ONNX Runtime GPU package.
 
+# Motivation
+
+This project is started to estimate How GPT-like / Cluade-like models can do code something. Claude understands well the core structure and convert Python to C++. However, it also produces tons of minor bugs, that Claude couldn't find by himself. These minor bugs can only fixed in acceptable limited time by Claude under the detailed guide of Human. Therefore, this porting project can relatively easily done under the guidance of Human, since FreeTrace C++ has the Ground-truth (FreeTrace Python), However, the new starting projects should be need more strict step-by-step supervison of Humans, to aovid tons of minor / major bugs unfixable. 
+
+
 ## Usage
 
 ```bash
