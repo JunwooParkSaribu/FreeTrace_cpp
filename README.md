@@ -187,7 +187,7 @@ export DYLD_LIBRARY_PATH=$(pwd)/../onnxruntime-osx-arm64-1.24.3/lib:$DYLD_LIBRAR
 
 Install in this order (GPU support):
 1. [**Visual Studio 2022**](https://visualstudio.microsoft.com/vs/older-downloads/) — select "Desktop development with C++"
-2. **CMake**
+2. [**CMake**](https://cmake.org/download/)
 
 Run from **Developer Command Prompt**:
 
