@@ -39,7 +39,7 @@ Compression=lzma2/fast
 SolidCompression=yes
 ; Appearance
 WizardStyle=modern
-SetupIconFile=
+SetupIconFile={#StagingDir}\icon\freetrace_icon.ico
 LicenseFile=
 ; Privileges — install per-user by default (no admin needed)
 PrivilegesRequired=lowest
@@ -114,10 +114,10 @@ Source: "{#StagingDir}\msvcp140.dll"; DestDir: "{app}"; Flags: ignoreversion ski
 Source: "{#StagingDir}\concrt140.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{group}\{#MyAppName} (CLI)"; Filename: "cmd.exe"; Parameters: "/k ""{app}\freetrace.exe"" --help"; WorkingDir: "{app}"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon\freetrace_icon.ico"
+Name: "{group}\{#MyAppName} (CLI)"; Filename: "cmd.exe"; Parameters: "/k ""{app}\freetrace.exe"" --help"; WorkingDir: "{app}"; IconFilename: "{app}\icon\freetrace_icon.ico"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\icon\freetrace_icon.ico"
 
 [Registry]
 ; Add to PATH if user selected that task
