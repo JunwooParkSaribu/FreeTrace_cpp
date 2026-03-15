@@ -11,6 +11,7 @@ cmake-build-*/
 freetrace
 freetrace_*
 !installer/freetrace_installer.iss
+!installer/freetrace_installer_rtx5000.iss
 !icon/freetrace_icon.png
 !icon/freetrace_icon.ico
 
@@ -41,6 +42,7 @@ x86-simd-sort/
 
 # Installer build artifacts
 installer_staging/
+installer_staging_rtx5000/
 installer/deps/
 build_win/
 build_debug/
