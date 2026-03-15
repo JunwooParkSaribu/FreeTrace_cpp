@@ -60,6 +60,9 @@ Source: "{#StagingDir}\FreeTrace_GUI.exe"; DestDir: "{app}"; Flags: ignoreversio
 ; === Model files ===
 Source: "{#StagingDir}\models\*"; DestDir: "{app}\models"; Flags: ignoreversion recursesubdirs
 
+; === Icon ===
+Source: "{#StagingDir}\icon\*"; DestDir: "{app}\icon"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
+
 ; === ONNX Runtime DLLs ===
 Source: "{#StagingDir}\onnxruntime.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\onnxruntime_providers_cuda.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist

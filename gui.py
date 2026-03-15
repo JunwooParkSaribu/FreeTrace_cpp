@@ -12,7 +12,7 @@ import subprocess
 import shutil
 
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QProcess
-from PyQt6.QtGui import QPixmap, QFont, QColor, QPalette
+from PyQt6.QtGui import QPixmap, QFont, QColor, QPalette, QIcon  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 23:55
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLabel, QLineEdit, QPushButton, QCheckBox,
@@ -170,6 +170,11 @@ class FreeTraceGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("FreeTrace")
+        # Set window icon  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 23:55
+        _base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        _icon_path = os.path.join(_base, "icon", "freetrace_icon.png")
+        if os.path.exists(_icon_path):
+            self.setWindowIcon(QIcon(_icon_path))
         self.setMinimumSize(_BASE_W, _BASE_H)
         self._worker = None
         self._output_dir = None
