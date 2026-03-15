@@ -280,9 +280,9 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
 
         models.loaded = true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
         if (gpu_enabled) {
-            std::cout << "\n  NN inference: GPU (CUDA) — fast\n" << std::endl;
+            std::cout << "\n  NN inference: GPU (CUDA) - fast\n" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
         } else {
-            std::cout << "\n  NN inference: CPU — this may be slower than GPU\n" << std::endl;
+            std::cout << "\n  NN inference: CPU - this may be slower than GPU\n" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
         }
         return true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     } catch (const Ort::Exception& e) {
