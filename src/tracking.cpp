@@ -3380,9 +3380,8 @@ void make_hk_distribution_image(const std::string& path, // Modified by Claude (
         draw_text(img, IMG_W, IMG_H, text_x, text_y, title, scale);
     }
 
-    // Scatter points: yellow 'x' markers for each (H, K) data point // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    // Scatter points: single-pixel dots for each (H, K) data point // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
     {
-        const int marker_half = 3; // half-size of x marker in pixels
         const uint8_t mr = 255, mg = 220, mb = 50; // yellow
         for (int i = 0; i < n; i++) {
             double hi = H_vals[i];
@@ -3392,25 +3391,13 @@ void make_hk_distribution_image(const std::string& path, // Modified by Claude (
             if (frac_x < 0 || frac_x > 1 || frac_y < 0 || frac_y > 1) continue;
             int cx = margin_left + (int)(frac_x * pw);
             int cy = margin_top + (int)((1.0 - frac_y) * ph);
-            // Draw X shape
-            for (int d = -marker_half; d <= marker_half; d++) {
-                // diagonal 1
-                int px1 = cx + d, py1 = cy + d;
-                if (px1 >= margin_left && px1 < IMG_W - margin_right &&
-                    py1 >= margin_top && py1 < IMG_H - margin_bottom) {
-                    int idx = (py1 * IMG_W + px1) * 3;
-                    img[idx] = mr; img[idx+1] = mg; img[idx+2] = mb;
-                }
-                // diagonal 2
-                int px2 = cx + d, py2 = cy - d;
-                if (px2 >= margin_left && px2 < IMG_W - margin_right &&
-                    py2 >= margin_top && py2 < IMG_H - margin_bottom) {
-                    int idx = (py2 * IMG_W + px2) * 3;
-                    img[idx] = mr; img[idx+1] = mg; img[idx+2] = mb;
-                }
+            if (cx >= margin_left && cx < IMG_W - margin_right &&
+                cy >= margin_top && cy < IMG_H - margin_bottom) {
+                int idx = (cy * IMG_W + cx) * 3;
+                img[idx] = mr; img[idx+1] = mg; img[idx+2] = mb;
             }
         }
-    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 
     // Write PNG
     FILE* fp = fopen(path.c_str(), "wb");
