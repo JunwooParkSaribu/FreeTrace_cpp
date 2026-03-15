@@ -300,10 +300,8 @@ REM ============================================================
 echo.
 echo === Step 2: Building FreeTrace.exe (GUI) ===
 python -m pip install pyinstaller PyQt6 --quiet
-pushd "%ROOT%"
-python -m PyInstaller gui.spec --noconfirm --clean
-if errorlevel 1 (echo ERROR: PyInstaller failed && popd && exit /b 1)
-popd
+python -m PyInstaller "%ROOT%\gui.spec" --noconfirm --clean --distpath "%ROOT%\dist" --workpath "%ROOT%\build_pyinstaller" --specpath "%ROOT%"
+if errorlevel 1 (echo ERROR: PyInstaller failed && exit /b 1)
 
 REM ============================================================
 REM  Step 3: Stage all files
