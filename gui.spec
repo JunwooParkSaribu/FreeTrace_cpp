@@ -6,7 +6,7 @@
 import os
 
 block_cipher = None
-script_dir = os.path.dirname(os.path.abspath(SPECPATH))
+script_dir = SPECPATH
 
 a = Analysis(
     [os.path.join(script_dir, 'gui.py')],
