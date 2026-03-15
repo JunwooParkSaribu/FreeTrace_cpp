@@ -7,7 +7,7 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 **Data privacy:** FreeTrace runs entirely on your local machine. No data is transmitted to any external server.
 
 > **Windows standalone installer (GPU):** Download the self-contained installer with full GPU support (CUDA + cuDNN + ONNX Runtime) — no compilation or dependency installation required (only NVIDIA GPU driver needed):
-> **[Download FreeTrace for Windows (GPU)](https://psilo.sorbonne-universite.fr/public.php/dav/files/3MAw8yFD7mAt8kc/?accept=zip)**
+> **[Download FreeTrace for Windows (GPU)](https://psilo.sorbonne-universite.fr/public.php/dav/files/XmTL99cCx4iXDdH/?accept=zip)**
 >
 > **Note:** The standalone installer uses cuDNN 9.2, which does **not** support RTX 5000 series (Blackwell) or newer GPUs. On unsupported GPUs, H (Hurst exponent) estimation will silently produce incorrect values (zeros). Supported GPUs: RTX 2000/3000/4000 series and equivalent.
 
