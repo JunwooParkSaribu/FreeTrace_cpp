@@ -33,9 +33,11 @@ struct DetIndexWin : DetIndex {
     int win_size;
 };
 
-// --- Image I/O ---
+// --- Image I/O --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& height, int& width);
-void write_localization_csv(const std::string& output_path, const LocalizationResult& result);
+std::vector<float> read_nd2(const std::string& path, int& nb_frames, int& height, int& width);
+std::vector<float> read_image(const std::string& path, int& nb_frames, int& height, int& width);
+void write_localization_csv(const std::string& output_path, const LocalizationResult& result); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 
 // --- Background estimation ---
 struct BackgroundResult {
@@ -118,13 +120,14 @@ LocalizationResult localize_from_ext(
 );
 
 // --- Top-level run function ---
-bool run(const std::string& input_video_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+bool run(const std::string& input_video_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
          const std::string& output_path,
          int window_size = 7,
          float threshold = 1.0f,
          int shift = 1,
          bool verbose = false,
-         const std::string& ext_imgs_path = ""); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+         const std::string& ext_imgs_path = "",
+         int batch_size = 0); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 
 // --- 2D density image generation --- // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 void make_loc_depth_image(const std::string& output_path,

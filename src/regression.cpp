@@ -58,43 +58,45 @@ UnpackResult unpack_coefs(const std::vector<std::array<double, 6>>& coefs, int w
         res.x_var[i] = static_cast<float>(xv);
         res.y_var[i] = static_cast<float>(yv);
 
-        // Validate
+        // Validate // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
         if (xv < 0 || yv < 0 || xv > 3 * win_w || yv > 3 * win_h ||
             rho_i < -1 || rho_i > 1 || std::isnan(rho_i)) {
             res.err_indices.push_back(i);
             res.x_mu[i] = 0.0f;
             res.y_mu[i] = 0.0f;
-            res.amp[i] = 0.0f;
-            continue;
+        } else {
+            // Solve 2x2 system for mu using double (matches np.linalg.lstsq float64)
+            double sx = std::sqrt(xv);
+            double sy = std::sqrt(yv);
+            double a00 = -rho_i * sy / sx;
+            double a01 = 1.0;
+            double a10 = 1.0;
+            double a11 = -rho_i * sx / sy;
+            double b0 = coefs[i][3] * k * yv;
+            double b1 = coefs[i][1] * k * xv;
+
+            double det = a00 * a11 - a01 * a10;
+            if (std::abs(det) < 1e-12) {
+                res.err_indices.push_back(i);
+                res.x_mu[i] = 0.0f;
+                res.y_mu[i] = 0.0f;
+            } else {
+                double xm = (a11 * b0 - a01 * b1) / det;
+                double ym = (a00 * b1 - a10 * b0) / det;
+                res.x_mu[i] = static_cast<float>(xm);
+                res.y_mu[i] = static_cast<float>(ym);
+            }
         }
 
-        // Solve 2x2 system for mu using double (matches np.linalg.lstsq float64)
-        double sx = std::sqrt(xv);
-        double sy = std::sqrt(yv);
-        double a00 = -rho_i * sy / sx;
-        double a01 = 1.0;
-        double a10 = 1.0;
-        double a11 = -rho_i * sx / sy;
-        double b0 = coefs[i][3] * k * yv;
-        double b1 = coefs[i][1] * k * xv;
-
-        double det = a00 * a11 - a01 * a10;
-        if (std::abs(det) < 1e-12) {
-            res.err_indices.push_back(i);
-            res.x_mu[i] = 0.0f;
-            res.y_mu[i] = 0.0f;
-            res.amp[i] = 0.0f;
-            continue;
+        // Compute amp for ALL entries (matching Python) — uses x_mu=0,y_mu=0 for errors
+        {
+            double xm_d = res.x_mu[i], ym_d = res.y_mu[i];
+            double sx_d = std::sqrt(xv), sy_d = std::sqrt(yv);
+            res.amp[i] = static_cast<float>(std::exp(coefs[i][5]
+                + (xm_d * xm_d) / (2.0 * k * xv)
+                + (ym_d * ym_d) / (2.0 * k * yv)
+                - (rho_i * xm_d * ym_d) / (k * sx_d * sy_d)));
         }
-        double xm = (a11 * b0 - a01 * b1) / det;
-        double ym = (a00 * b1 - a10 * b0) / det;
-        res.x_mu[i] = static_cast<float>(xm);
-        res.y_mu[i] = static_cast<float>(ym);
-
-        res.amp[i] = static_cast<float>(std::exp(coefs[i][5]
-            + (xm * xm) / (2.0 * k * xv)
-            + (ym * ym) / (2.0 * k * yv)
-            - (rho_i * xm * ym) / (k * sx * sy)));
     }
     return res;
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 10:00

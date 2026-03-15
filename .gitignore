@@ -10,6 +10,7 @@ cmake-build-*/
 # Binaries
 freetrace
 freetrace_*
+!installer/freetrace_installer.iss
 
 # IDE
 .vscode/
@@ -21,6 +22,12 @@ freetrace_*
 .DS_Store
 Thumbs.db
 
+# Python
+__pycache__/
+*.pyc
+dist/
+*.spec.bak
+
 # ONNX models are shipped in git (platform-independent)
 
 # ONNX Runtime (downloaded separately)
@@ -29,6 +36,12 @@ onnxruntime-*/
 
 # External dependencies (downloaded separately)
 x86-simd-sort/
+
+# Installer build artifacts
+installer_staging/
+installer/deps/
+build_win/
+build_debug/
 
 # Test data, debug scripts, and outputs
 test_*
