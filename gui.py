@@ -688,8 +688,11 @@ class FreeTraceGUI(QMainWindow):
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-def main():
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+def main():  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+    if getattr(sys, 'frozen', False):
+        os.chdir(os.path.dirname(sys.executable))
+    else:
+        os.chdir(os.path.dirname(os.path.abspath(__file__)))
     app = QApplication(sys.argv)
     app.setApplicationName("FreeTrace")
     win = FreeTraceGUI()
