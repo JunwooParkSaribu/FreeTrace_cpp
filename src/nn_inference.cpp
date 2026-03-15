@@ -222,7 +222,7 @@ static int model_selection(const NNModels& models, int length) {
 
 bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     try {
-        auto* env = new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "freetrace"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
+        auto* env = new Ort::Env(ORT_LOGGING_LEVEL_FATAL, "freetrace"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
         models.env = env;
 
         Ort::SessionOptions opts;
@@ -230,29 +230,18 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
         bool gpu_enabled = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
+#ifndef _WIN32
+        // On Linux, cuDNN works reliably with ONNX Runtime CUDA provider.
+        // On Windows, cuDNN 9.x Frontend fails for Conv1D (HEURISTIC_QUERY_FAILED),
+        // causing extremely slow fallback. Use CPU instead — still fast for these small models.
         try {
-            // Use V2 API for extended cuDNN options
-            std::vector<const char*> keys = {
-                "device_id",
-                "cudnn_conv_algo_search",
-                "cudnn_conv_use_max_workspace",
-                "do_copy_in_default_stream"
-            };
-            std::vector<const char*> values = {
-                "0",
-                "DEFAULT",
-                "1",
-                "1"
-            };
-            OrtCUDAProviderOptionsV2* cuda_opts_v2 = nullptr;
-            Ort::GetApi().CreateCUDAProviderOptions(&cuda_opts_v2);
-            Ort::GetApi().UpdateCUDAProviderOptions(
-                cuda_opts_v2, keys.data(), values.data(), keys.size());
-            opts.AppendExecutionProvider_CUDA_V2(*cuda_opts_v2);
-            Ort::GetApi().ReleaseCUDAProviderOptions(cuda_opts_v2);
+            OrtCUDAProviderOptions cuda_opts;
+            cuda_opts.device_id = 0;
+            opts.AppendExecutionProvider_CUDA(cuda_opts);
             gpu_enabled = true;
         } catch (...) {
-        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
+        }
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
 
         models.reg_model_nums = {3, 5, 8};
         models.crits = {3, 5, 8, 8192};
