@@ -187,9 +187,7 @@ export DYLD_LIBRARY_PATH=$(pwd)/../onnxruntime-osx-arm64-1.24.3/lib:$DYLD_LIBRAR
 
 Install in this order (GPU support):
 1. [**Visual Studio 2022**](https://visualstudio.microsoft.com/vs/older-downloads/) — select "Desktop development with C++"
-2. [**CUDA Toolkit 12.x**](https://developer.nvidia.com/cuda-downloads) — **must be installed after VS 2022** so it registers the CUDA toolset
-3. [**cuDNN 9.x**](https://developer.nvidia.com/cudnn-downloads) (CUDA 12, Windows, Tarball) — extract and copy all DLLs from `bin/` into the `Release/` folder after build
-4. **CMake**
+2. **CMake**
 
 Run from **Developer Command Prompt**:
 
@@ -206,10 +204,11 @@ cd C:\path\to\FreeTrace_cpp
 mkdir build; cd build; cmake .. -G "Visual Studio 17 2022" "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake"; cmake --build . --config Release
 ```
 
-**With fBm (GPU):**
+**With fBm (GPU):** requires [**CUDA Toolkit 12.x**](https://developer.nvidia.com/cuda-downloads) (install after VS 2022) and [**cuDNN 9.x**](https://developer.nvidia.com/cudnn-downloads) (CUDA 12, Windows, Tarball)
 ```powershell
 Invoke-WebRequest -Uri https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-gpu-1.24.3.zip -OutFile ort.zip; tar -xf ort.zip; mkdir build; cd build; cmake .. -G "Visual Studio 17 2022" "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" "-DUSE_ONNXRUNTIME=ON" "-DONNXRUNTIME_DIR=..\onnxruntime-win-x64-gpu-1.24.3"; cmake --build . --config Release; copy ..\onnxruntime-win-x64-gpu-1.24.3\lib\*.dll Release\
 ```
+> Copy cuDNN DLLs from `bin/` into the `Release/` folder before running.
 
 > For CPU-only fBm, use `onnxruntime-win-x64-1.24.3.zip` instead.
 >
