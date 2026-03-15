@@ -118,16 +118,17 @@ REM --- 0a: Find or download cuDNN ---
 echo [0a] Looking for cuDNN !CUDNN_VERSION! (Blackwell-compatible) ...
 set "CUDNN_DIR="
 set "CUDNN_BIN="
-REM Check deps folder for exact version (bin\ or bin\x64\)
+REM Check deps folder for exact version (try bin\x64\ first, then bin\)
 for /d %%D in ("!DEPS!\cudnn-windows-x86_64-!CUDNN_VERSION!*") do (
     if exist "%%D\bin\x64\cudnn64_!CUDNN_MAJOR!.dll" (
         set "CUDNN_DIR=%%D"
         set "CUDNN_BIN=%%D\bin\x64"
-        echo     Found: %%D (bin\x64)
-    ) else if exist "%%D\bin\cudnn64_!CUDNN_MAJOR!.dll" (
+        echo     Found: %%D [bin\x64]
+    )
+    if not defined CUDNN_BIN if exist "%%D\bin\cudnn64_!CUDNN_MAJOR!.dll" (
         set "CUDNN_DIR=%%D"
         set "CUDNN_BIN=%%D\bin"
-        echo     Found: %%D (bin)
+        echo     Found: %%D [bin]
     )
 )
 if defined CUDNN_DIR goto :cudnn_done
@@ -136,21 +137,20 @@ if exist "!CUDA_DIR!\bin\cudnn64_!CUDNN_MAJOR!.dll" (
     set "CUDNN_DIR=!CUDA_DIR!"
     set "CUDNN_BIN=!CUDA_DIR!\bin"
     echo     Found in CUDA dir: !CUDA_DIR!
-    echo     WARNING: Cannot verify cuDNN version. Ensure it is 9.7+ for Blackwell.
+    echo     WARNING: Cannot verify cuDNN version. Ensure it is 9.20+ for Blackwell.
     goto :cudnn_done
 )
-REM Check deps folder for any cuDNN 9 (bin\ or bin\x64\)
+REM Check deps folder for any cuDNN 9 (try bin\x64\ first, then bin\)
 for /d %%D in ("!DEPS!\cudnn-*") do (
     if exist "%%D\bin\x64\cudnn64_!CUDNN_MAJOR!.dll" (
         set "CUDNN_DIR=%%D"
         set "CUDNN_BIN=%%D\bin\x64"
-        echo     Found: %%D (bin\x64)
-        echo     WARNING: Cannot verify cuDNN version. Ensure it is 9.7+ for Blackwell.
-    ) else if exist "%%D\bin\cudnn64_!CUDNN_MAJOR!.dll" (
+        echo     Found: %%D [bin\x64]
+    )
+    if not defined CUDNN_BIN if exist "%%D\bin\cudnn64_!CUDNN_MAJOR!.dll" (
         set "CUDNN_DIR=%%D"
         set "CUDNN_BIN=%%D\bin"
-        echo     Found: %%D (bin)
-        echo     WARNING: Cannot verify cuDNN version. Ensure it is 9.7+ for Blackwell.
+        echo     Found: %%D [bin]
     )
 )
 if defined CUDNN_DIR goto :cudnn_done
@@ -174,7 +174,8 @@ for /d %%D in ("!DEPS!\cudnn-*") do (
     if exist "%%D\bin\x64\cudnn64_!CUDNN_MAJOR!.dll" (
         set "CUDNN_DIR=%%D"
         set "CUDNN_BIN=%%D\bin\x64"
-    ) else if exist "%%D\bin\cudnn64_!CUDNN_MAJOR!.dll" (
+    )
+    if not defined CUDNN_BIN if exist "%%D\bin\cudnn64_!CUDNN_MAJOR!.dll" (
         set "CUDNN_DIR=%%D"
         set "CUDNN_BIN=%%D\bin"
     )
@@ -367,16 +368,16 @@ copy "!ORT_DIR!\lib\onnxruntime.dll" "!STAGING!\" >nul
 copy "!ORT_DIR!\lib\onnxruntime_providers_cuda.dll" "!STAGING!\" >nul 2>&1
 copy "!ORT_DIR!\lib\onnxruntime_providers_shared.dll" "!STAGING!\" >nul 2>&1
 
-REM --- CUDA runtime DLLs ---
+REM --- CUDA runtime DLLs (use wildcards for version-independent copy) ---
 copy "!CUDA_DIR!\bin\cudart64_12.dll" "!STAGING!\" >nul
 copy "!CUDA_DIR!\bin\cublas64_12.dll" "!STAGING!\" >nul
 copy "!CUDA_DIR!\bin\cublasLt64_12.dll" "!STAGING!\" >nul
-copy "!CUDA_DIR!\bin\cufft64_11.dll" "!STAGING!\" >nul 2>&1
-copy "!CUDA_DIR!\bin\curand64_10.dll" "!STAGING!\" >nul 2>&1
-copy "!CUDA_DIR!\bin\cusolver64_11.dll" "!STAGING!\" >nul 2>&1
-copy "!CUDA_DIR!\bin\cusparse64_12.dll" "!STAGING!\" >nul 2>&1
-copy "!CUDA_DIR!\bin\nvJitLink_120_0.dll" "!STAGING!\" >nul 2>&1
-copy "!CUDA_DIR!\bin\nvrtc64_120_0.dll" "!STAGING!\" >nul 2>&1
+for %%F in ("!CUDA_DIR!\bin\cufft64_*.dll") do copy "%%F" "!STAGING!\" >nul 2>&1
+for %%F in ("!CUDA_DIR!\bin\curand64_*.dll") do copy "%%F" "!STAGING!\" >nul 2>&1
+for %%F in ("!CUDA_DIR!\bin\cusolver64_*.dll") do copy "%%F" "!STAGING!\" >nul 2>&1
+for %%F in ("!CUDA_DIR!\bin\cusparse64_*.dll") do copy "%%F" "!STAGING!\" >nul 2>&1
+for %%F in ("!CUDA_DIR!\bin\nvJitLink_*.dll") do copy "%%F" "!STAGING!\" >nul 2>&1
+for %%F in ("!CUDA_DIR!\bin\nvrtc64_*.dll") do copy "%%F" "!STAGING!\" >nul 2>&1
 
 REM --- cuDNN 9.x DLLs (from CUDNN_BIN which may be bin\ or bin\x64\) ---
 copy "!CUDNN_BIN!\cudnn64_!CUDNN_MAJOR!.dll" "!STAGING!\" >nul
