@@ -207,7 +207,7 @@ Invoke-WebRequest -Uri https://github.com/microsoft/onnxruntime/releases/downloa
 
 > For CPU-only fBm, use `onnxruntime-win-x64-1.24.3.zip` instead.
 >
-> **CUDA + Visual Studio:** If CMake reports "No CUDA toolset found", your VS version may be too new for your CUDA toolkit. Install **Visual Studio 2022** Build Tools and add `-G "Visual Studio 17 2022"` to the cmake command.
+> **CUDA + Visual Studio:** If CMake reports "No CUDA toolset found", your VS version may be too new for your CUDA toolkit. Install [**Visual Studio 2022 Build Tools**](https://visualstudio.microsoft.com/vs/older-downloads/) and add `-G "Visual Studio 17 2022"` to the cmake command.
 
 ## Project Structure
 
