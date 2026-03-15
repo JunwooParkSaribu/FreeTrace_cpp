@@ -188,7 +188,7 @@ export DYLD_LIBRARY_PATH=$(pwd)/../onnxruntime-osx-arm64-1.24.3/lib:$DYLD_LIBRAR
 Install in this order (GPU support):
 1. [**Visual Studio 2022**](https://visualstudio.microsoft.com/vs/older-downloads/) — select "Desktop development with C++"
 2. [**CUDA Toolkit 12.x**](https://developer.nvidia.com/cuda-downloads) — **must be installed after VS 2022** so it registers the CUDA toolset
-3. [**cuDNN 9.x**](https://developer.nvidia.com/cudnn-downloads) (CUDA 12, Windows, Zip) — extract and copy all DLLs from `bin/` into the `Release/` folder after build
+3. [**cuDNN 9.x**](https://developer.nvidia.com/cudnn-downloads) (CUDA 12, Windows, Tarball) — extract and copy all DLLs from `bin/` into the `Release/` folder after build
 4. **CMake**
 
 Run from **Developer Command Prompt**:
