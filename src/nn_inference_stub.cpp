@@ -20,4 +20,14 @@ float predict_k_nn(const NNModels&, const std::vector<float>&, const std::vector
     return 0.5f;
 }
 
-} // namespace freetrace // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12
+std::vector<float> predict_alpha_nn_batch(const NNModels&, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+    const std::vector<std::vector<float>>&, const std::vector<std::vector<float>>& ys) {
+    return std::vector<float>(ys.size(), 1.0f);
+}
+
+std::vector<float> predict_k_nn_batch(const NNModels&,
+    const std::vector<std::vector<float>>&, const std::vector<std::vector<float>>& ys) {
+    return std::vector<float>(ys.size(), 0.5f);
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+
+} // namespace freetrace
