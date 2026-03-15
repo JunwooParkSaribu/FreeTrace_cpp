@@ -565,9 +565,10 @@ class FreeTraceGUI(QMainWindow):
             w.deleteLater()
         self._result_widgets.clear()
 
-        image_suffixes = {
+        image_suffixes = {  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 23:50
             "Trajectory Map": "_traces.png",
             "Localisation Density": "_loc_2d_density.png",
+            "H-K Distribution": "_diffusion_distribution.png",
         }
 
         found = False
