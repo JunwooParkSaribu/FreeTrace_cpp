@@ -35,7 +35,7 @@ OutputBaseFilename=FreeTrace_{#MyAppVersion}_win64_setup
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Compression
-Compression=lzma2/ultra64
+Compression=lzma2/fast
 SolidCompression=yes
 ; Appearance
 WizardStyle=modern
