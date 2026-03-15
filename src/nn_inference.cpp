@@ -285,11 +285,10 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
             std::cout << "\n  NN inference: CPU - this may be slower than GPU\n" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
         }
         return true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
-    } catch (const Ort::Exception& e) {
-        std::cerr << "ONNX load error: " << e.what() << std::endl;
+    } catch (const Ort::Exception&) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
         return false;
     }
-} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 
 void free_nn_models(NNModels& models) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     for (auto& [n, session] : models.alpha_sessions) {
