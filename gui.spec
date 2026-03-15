@@ -12,7 +12,7 @@ a = Analysis(
     [os.path.join(script_dir, 'gui.py')],
     pathex=[script_dir],
     binaries=[],
-    datas=[],
+    datas=[(os.path.join(script_dir, 'icon'), 'icon')],  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 23:55
     hiddenimports=['PyQt6.sip'],
     hookspath=[],
     hooksconfig={},

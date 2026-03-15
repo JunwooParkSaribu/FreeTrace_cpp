@@ -321,6 +321,10 @@ REM --- Model files ---
 copy "!ROOT!\models\*.onnx" "!STAGING!\models\" >nul
 copy "!ROOT!\models\*.bin" "!STAGING!\models\" >nul
 
+REM --- Icon ---
+mkdir "!STAGING!\icon"
+copy "!ROOT!\icon\freetrace_icon.png" "!STAGING!\icon\" >nul 2>&1
+
 REM --- ONNX Runtime DLLs ---
 copy "!ORT_DIR!\lib\onnxruntime.dll" "!STAGING!\" >nul
 copy "!ORT_DIR!\lib\onnxruntime_providers_cuda.dll" "!STAGING!\" >nul 2>&1
