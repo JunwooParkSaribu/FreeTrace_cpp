@@ -1685,18 +1685,21 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
     int ws2 = window_size * window_size;
     if (batch_size > 0) {
         div_q = batch_size;
-    } else if (USE_GPU) {
+    } else if (USE_GPU) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+        // Estimate GPU memory per frame: ext_imgs + crops (dominant) + background raw imgs
         int ext_est = window_size;
         int ext_h = height + ext_est, ext_w = width + ext_est;
         int nb_crops_est = ((height + 1) / shift) * ((width + 1) / shift);
-        size_t per_frame = (size_t)ext_h * ext_w * sizeof(float) + (size_t)nb_crops_est * ws2 * sizeof(float);
+        size_t per_frame_crop = (size_t)nb_crops_est * ws2 * sizeof(float);
+        size_t per_frame_ext = (size_t)ext_h * ext_w * sizeof(float);
+        size_t per_frame_bg = (size_t)height * width * sizeof(float);
+        size_t per_frame = per_frame_crop + per_frame_ext + per_frame_bg;
         size_t free_mem = gpu::get_gpu_free_mem_bytes();
         div_q = static_cast<int>(0.7 * free_mem / per_frame);
     } else {
         div_q = std::min(50, static_cast<int>(2.7 * 4194304.0 / height / width * (49.0 / ws2)));
     }
-    div_q = std::max(div_q, 1);
-    if (USE_GPU && batch_size <= 0) div_q = std::min(div_q, 100); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+    div_q = std::max(div_q, 1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 
     if (verbose)
         std::cout << "Batch size: " << div_q << std::endl;
