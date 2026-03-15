@@ -231,13 +231,25 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
 
         bool gpu_enabled = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
         try {
-            OrtCUDAProviderOptions cuda_opts;
-            cuda_opts.device_id = 0;
-            cuda_opts.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchDefault;
-            cuda_opts.do_copy_in_default_stream = 1;
-            // Use cuDNN conv_use_max_workspace to avoid heuristic failures
-            cuda_opts.cudnn_conv_use_max_workspace = 1;
-            opts.AppendExecutionProvider_CUDA(cuda_opts);
+            // Use V2 API for extended cuDNN options
+            std::vector<const char*> keys = {
+                "device_id",
+                "cudnn_conv_algo_search",
+                "cudnn_conv_use_max_workspace",
+                "do_copy_in_default_stream"
+            };
+            std::vector<const char*> values = {
+                "0",
+                "DEFAULT",
+                "1",
+                "1"
+            };
+            OrtCUDAProviderOptionsV2* cuda_opts_v2 = nullptr;
+            Ort::GetApi().CreateCUDAProviderOptions(&cuda_opts_v2);
+            Ort::GetApi().UpdateCUDAProviderOptions(
+                cuda_opts_v2, keys.data(), values.data(), keys.size());
+            opts.AppendExecutionProvider_CUDA_V2(*cuda_opts_v2);
+            Ort::GetApi().ReleaseCUDAProviderOptions(cuda_opts_v2);
             gpu_enabled = true;
         } catch (...) {
         } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
