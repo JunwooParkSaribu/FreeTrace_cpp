@@ -60,7 +60,7 @@ static void print_tracking_banner(const std::string& loc_csv, const std::string&
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 static void print_usage() { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
-    std::cout << "FreeTrace C++\n"
+    std::cout << "FreeTrace C++ v1.6.0.4\n"
               << "Usage:\n"
               << "  Full pipeline (localization + tracking):\n"
               << "    freetrace <input> <output_dir> [options]\n"
