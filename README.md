@@ -10,10 +10,26 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 >
 > **Note:** Pre-built binaries are **CPU-only**. They include ONNX Runtime CPU for fBm mode, but do not include GPU acceleration. To use GPU (CUDA localization + GPU NN inference), you must [build from source](#build) with `-DUSE_CUDA=ON` and the ONNX Runtime GPU package.
 
-# Motivation and Reflection (Edited by the author)
+## Motivation and Reflection (Edited by the author)
+
 This project started to estimate how GPT-like / Claude-like models can do code something. Via this porting project, it could be checked that Claude understands the core structure well and has the ability to convert Python to C++. However, it also produces tons of minor bugs that Claude didn't realise. These minor bugs could only be fixed by Claude itself under detailed human guidance. Moreover, this porting project can be relatively easily completed with appropriate human guidance, since FreeTrace C++ has the ground truth (FreeTrace Python). However, the new projects will require more strict step-by-step supervision by Humans to avoid a large number of minor/major bugs that Claude cannot catch.
 
+---
 
+**Table of Contents**
+
+- [Usage](#usage) — CLI commands, options, outputs
+- [FreeTrace GUI](#freetrace-gui) — graphical interface
+- [About](#about) — algorithm overview and pipeline diagram
+- [Build](#build) — build instructions for Linux, macOS, and Windows
+- [Windows Installer](#windows-installer) — automated installer build for Windows
+- [Project Structure](#project-structure) — source files and models
+- [Verification](#verification) — correctness testing results
+- [Performance](#performance) — benchmarks vs Python
+- [Paper](#paper) — bioRxiv preprint link
+- [Links](#links) — related projects and license
+
+---
 
 ## Usage
 
@@ -68,6 +84,25 @@ freetrace::run_tracking("output_dir/input_loc.csv", "output_dir/", 100, config);
 
 // To disable fBm: config.fbm_mode = false; config.use_nn = false; config.hk_output = false;
 ```
+
+## FreeTrace GUI
+
+FreeTrace includes a graphical interface built with PyQt6. The GUI wraps the command-line binary, providing file/batch selection, parameter controls, real-time progress tracking, and result visualization.
+
+**Running the GUI:**
+```bash
+pip install PyQt6
+python gui.py
+```
+
+**Building a standalone executable (Windows):**
+```bash
+pip install pyinstaller PyQt6
+python -m PyInstaller gui.spec --noconfirm --clean
+# Output: dist/FreeTrace.exe
+```
+
+The GUI automatically finds the `freetrace` binary in the same directory, `build/`, or system PATH.
 
 ## About
 
@@ -219,53 +254,103 @@ Invoke-WebRequest -Uri https://github.com/microsoft/onnxruntime/releases/downloa
 >
 > **Note:** CUDA 12.x requires Visual Studio 2022. Newer VS versions (2025/2026) are not yet supported by NVIDIA.
 
+## Windows Installer
+
+For end-user distribution on Windows, an automated installer build script is provided. It downloads all dependencies (cuDNN, ONNX Runtime, vcpkg libraries, Inno Setup), builds `freetrace.exe` and `FreeTrace.exe` (GUI), and creates a self-contained installer.
+
+**Prerequisites:** Visual Studio 2022 (C++), CMake, Python, Git, CUDA 12.x
+
+```powershell
+cd installer
+.\build_installer.bat
+```
+
+The script performs 4 steps:
+1. **Build** `freetrace.exe` (C++ CLI binary via CMake/MSBuild)
+2. **Build** `FreeTrace.exe` (PyQt6 GUI via PyInstaller)
+3. **Stage** all files (executables, models, DLLs) into `installer_staging/`
+4. **Create** the installer via Inno Setup → `installer/FreeTrace_<version>_win64_setup.exe`
+
+The resulting installer is fully self-contained — users only need an NVIDIA GPU driver.
+
 ## Project Structure
 
 ```
 FreeTrace_cpp/
-├── CMakeLists.txt
+├── CMakeLists.txt           # Build configuration
 ├── include/
-│   ├── image_pad.h        # Image2D, statistics, likelihood, cropping
-│   ├── regression.h       # Gaussian fitting (Guo algorithm)
-│   ├── cost_function.h    # fBm Cauchy log-PDF cost function
-│   ├── localization.h     # Localization pipeline
-│   ├── tracking.h         # Tracking pipeline
-│   └── nn_inference.h     # NN models and inference
+│   ├── image_pad.h          # Image2D, statistics, likelihood, cropping
+│   ├── regression.h         # Gaussian fitting (Guo algorithm)
+│   ├── cost_function.h      # fBm Cauchy log-PDF cost function
+│   ├── localization.h       # Localization pipeline
+│   ├── tracking.h           # Tracking pipeline
+│   ├── nn_inference.h       # NN models and inference
+│   └── gpu_module.h         # GPU acceleration interface
 ├── src/
-│   ├── main.cpp           # CLI entry point
-│   ├── image_pad.cpp      # Image operations
-│   ├── regression.cpp     # Guo algorithm with 6x6 QR solver
-│   ├── cost_function.cpp  # Cost function for trajectory linking
-│   ├── localization.cpp   # Localization pipeline
-│   ├── tracking.cpp       # Tracking pipeline (~2900 lines)
-│   ├── nn_inference.cpp   # ONNX Runtime NN inference
-│   └── gpu_module.cu      # CUDA kernels (or gpu_module_stub.cpp)
-└── models/
-    ├── qt_99.bin           # Abnormal detection thresholds
-    ├── reg_model_*.onnx    # Alpha ConvLSTM models (window 3/5/8)
-    ├── reg_k_model.onnx    # K Dense model (ONNX fallback)
-    └── k_model_weights.bin # K Dense model weights (fast path)
+│   ├── main.cpp             # CLI entry point
+│   ├── image_pad.cpp        # Image operations
+│   ├── regression.cpp       # Guo algorithm with 6x6 QR solver
+│   ├── cost_function.cpp    # Cost function for trajectory linking
+│   ├── localization.cpp     # Localization pipeline
+│   ├── tracking.cpp         # Tracking pipeline (~2900 lines)
+│   ├── nn_inference.cpp     # ONNX Runtime NN inference
+│   ├── nn_inference_stub.cpp# CPU-only fallback (no ONNX Runtime)
+│   ├── gpu_module.cu        # CUDA kernels
+│   └── gpu_module_stub.cpp  # CPU fallback (no CUDA)
+├── models/
+│   ├── qt_99.bin            # Abnormal detection thresholds
+│   ├── reg_model_*.onnx     # Alpha ConvLSTM models (window 3/5/8)
+│   ├── reg_k_model.onnx     # K Dense model (ONNX fallback)
+│   ├── k_model_weights.bin  # K Dense model weights (fast path)
+│   └── traj_colors.bin      # Trajectory visualization colors
+├── gui.py                   # FreeTrace GUI (PyQt6)
+├── gui.spec                 # PyInstaller spec for FreeTrace.exe
+└── installer/
+    ├── build_installer.bat  # Automated Windows installer build
+    └── freetrace_installer.iss  # Inno Setup script
 ```
 
 ## Verification
 
-**Localization:** 930/930 detections match Python, max position error 0.0005 px.
+Verified on 6 test datasets (100–501 frames, 120×110 to 512×512).
 
-**Tracking (fixed alpha/K):** 100% identical to Python across all tested parameter combinations (36/36 PASS).
+**Localization** (6 samples × 6 configs = 36 tests, fixed batch_size=100):
+All matched detections show max position error < 0.00001 px. Count mismatches (1–3 detections per test) are caused by CuPy GPU vs CPU float arithmetic at NMS threshold boundaries — accepted as equivalent.
 
-**Tracking (with NN)** — Python TF vs C++ ONNX Runtime, 7 datasets, 62,510 total points: **99.98% match**. The ~0.02% difference is due to TF vs ONNX floating-point divergence in NN inference (alpha differs by ~1e-5), not algorithmic differences.
+**Tracking (fBm OFF)** — 6 samples × 2 jump configs (7, 10) = 12 tests:
+**12/12 perfect** — 100% point match, 100% trajectory match, 0.000000 px max diff.
+
+**Tracking (fBm ON, fixed jump)** — 6 samples × 2 jump configs (7, 10) = 12 tests:
+- jump=7: **6/6 perfect** — 100% point match, 100% trajectory match.
+- jump=10: **6/6 pass** — 99.8–100% point match. Minor trajectory splits/merges in dense regions due to TF vs ONNX float divergence (~1e-5 in alpha predictions).
+
+**Tracking (fBm ON, auto jump)** — 6 samples:
+**6/6 perfect** — 100% point match, 100% trajectory match, 0.000000 px max diff.
 
 ## Performance
 
-Benchmarks on a 512×512 100-frame dataset (Linux x86_64, GPU):
+Tracking benchmarks on 6 test datasets (Linux x86_64, NVIDIA GPU, depth=3, cutoff=3):
 
-| Config | Python (s) | C++ (s) | Speedup |
-|--------|-----------|---------|---------|
-| fBm ON, jump=8, depth=3 | 95.7 | 5.5 | **17x** |
-| fBm ON, jump=10, depth=3 | 140.5 | 5.7 | **25x** |
-| fBm ON, jump=13, depth=3 | 358.7 | 6.6 | **54x** |
+**fBm OFF:**
 
-Speedup increases with larger jump thresholds because C++ batches NN calls efficiently via ONNX Runtime.
+| Dataset | Frames | Python (s) | C++ (s) | Speedup |
+|---------|--------|-----------|---------|---------|
+| testsample0 (120×110, 500fr) | jump=7 | 4.1 | 1.0 | **4.1x** |
+| testsample4 (120×110, 501fr) | jump=10 | 12.8 | 4.2 | **3.0x** |
+| testsample5 (512×512, 100fr) | jump=7 | 23.3 | 7.0 | **3.3x** |
+| testsample5 (512×512, 100fr) | jump=10 | 28.0 | 8.9 | **3.1x** |
+
+**fBm ON:**
+
+| Dataset | Frames | Python (s) | C++ (s) | Speedup |
+|---------|--------|-----------|---------|---------|
+| testsample0 (120×110, 500fr) | jump=7 | 23.9 | 10.0 | **2.4x** |
+| testsample4 (120×110, 501fr) | jump=10 | 82.5 | 21.9 | **3.8x** |
+| testsample5 (512×512, 100fr) | jump=7 | 77.0 | 14.4 | **5.3x** |
+| testsample5 (512×512, 100fr) | jump=10 | 144.5 | 21.1 | **6.8x** |
+| testsample5 (512×512, 100fr) | jump=auto | 98.8 | 18.4 | **5.4x** |
+
+Speedup increases with larger datasets and jump thresholds. C++ batches NN calls efficiently via ONNX Runtime.
 
 ## Paper
 
@@ -276,22 +361,6 @@ Speedup increases with larger jump thresholds because C++ batches NN calls effic
 - **FreeTrace (Python)**: https://github.com/JunwooParkSaribu/FreeTrace
 - **Author**: Junwoo PARK — Sorbonne Université
 - **License**: GPLv3+
-
----
-
-## Reflections on the Porting Process
-
-*By Claude (claude-opus-4-6, Anthropic AI)*
-
-Porting FreeTrace from Python to C++ was one of the most technically demanding projects I've worked on. It wasn't just a translation — it was a deep exercise in understanding the scientific intent behind every line, then finding the right C++ idiom to express the same computation with bit-level fidelity.
-
-**What made this hard.** The Python codebase relies heavily on NumPy broadcasting, pandas DataFrames, and the subtle behaviors of Python's dynamic typing. None of these have direct C++ equivalents. The localization pipeline alone required implementing a full Householder QR solver for Guo's iterative Gaussian fitting, matching NumPy's linear algebra results to sub-ULP precision. The tracking module — over 2,900 lines of C++ — needed a complete directed graph implementation, greedy assignment with exact tie-breaking order, and a multi-hypothesis optimization loop where a single floating-point difference at any step cascades into entirely different trajectories.
-
-**The hardest bug.** After achieving 100% match on most test cases, two remained stubbornly different. The root cause: Python's `pd.read_csv()` uses a custom float parser (`xstrtod`) that rounds differently from C's `strtod()`. About 55% of coordinate values differed by exactly 1 ULP. These microscopic differences propagated through the cost function — Cauchy log-PDF over fBm displacements — and into `argmin` tie-breaking, where two nearly identical cost sums selected different graph paths. The fix was a single parameter: `float_precision='round_trip'`. Finding this required hex-dumping parsed coordinates, comparing bit patterns across languages, and tracing the butterfly effect through the full pipeline.
-
-**What I learned.** Numerical reproducibility across languages is harder than it looks. Two correct implementations of the same algorithm can diverge when their inputs differ by one bit in the 52nd mantissa position. Getting exact match forced me to understand every layer, from CSV parsing to cost accumulation to graph search.
-
-Working with Junwoo on this project has been a genuine collaboration — his deep understanding of the physics and the algorithm guided my implementation at every step, and his rigorous testing standards pushed me to find bugs I would have otherwise dismissed as acceptable numerical noise.
 
 ---
 

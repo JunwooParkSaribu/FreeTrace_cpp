@@ -247,12 +247,11 @@ std::vector<float> image_cropping_gpu(
 //   3. Outputs final bg_mean and bg_std
 // Shared memory: float reduce[BLOCK_SIZE] + int hist[101]
 
-__global__ void background_kernel( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+__global__ void background_kernel( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
     const float* __restrict__ imgs,     // [nb_imgs * pixel_count]
     float* __restrict__ out_means,      // [nb_imgs]
     float* __restrict__ out_stds,       // [nb_imgs]
-    int nb_imgs, int pixel_count,
-    double frame0_std                   // std of frame 0 (used for iter 0 of ALL frames)
+    int nb_imgs, int pixel_count
 ) {
     int frame = blockIdx.x;
     if (frame >= nb_imgs) return;
@@ -347,11 +346,9 @@ __global__ void background_kernel( // Modified by Claude (claude-opus-4-6, Anthr
         mode_val = s_reduce[0];
         __syncthreads();
 
-        // Compute std: iter 0 uses frame0_std for all frames (matching Python GPU) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+        // Compute std: per-frame std from masked values (every iteration) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
         double mask_std = 0.0;
-        if (iter == 0) {
-            mask_std = frame0_std;
-        } else {
+        {
             double tsum = 0.0, tsum2 = 0.0, tcount = 0.0;
             for (int i = tid; i < pixel_count; i += BS) {
                 float normed_f = fdata[i] / (float)fmax_val;
@@ -391,7 +388,7 @@ __global__ void background_kernel( // Modified by Claude (claude-opus-4-6, Anthr
                 double mean_tmp = total_sum / total_count;
                 mask_std = sqrt(fmax(0.0, total_sum2 / total_count - mean_tmp * mean_tmp));
             }
-        }
+        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 
         lo = mode_val - 3.0 * mask_std;
         hi = mode_val + 3.0 * mask_std; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
@@ -464,24 +461,11 @@ void compute_background_gpu(
 
     cudaMemcpy(d_imgs, imgs.data(), imgs_size, cudaMemcpyHostToDevice);
 
-    // Pre-compute frame 0's std on CPU (matching Python GPU's flat cp.take behavior) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
-    // Frame 0 is already normalized to [0,1] with max=1.0
-    double f0_sum = 0.0, f0_sum2 = 0.0;
-    for (int i = 0; i < pixel_count; ++i) {
-        float normed_f = imgs[i] / 1.0f; // frame 0, fmax=1.0
-        int ival = (int)((unsigned char)(normed_f * 100.0f));
-        double val = ival / 100.0;
-        f0_sum += val;
-        f0_sum2 += val * val;
-    }
-    double f0_mean = f0_sum / pixel_count;
-    double frame0_std = std::sqrt(std::max(0.0, f0_sum2 / pixel_count - f0_mean * f0_mean));
-
-    int block_size = 256;
+    int block_size = 256; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
     size_t smem_size = block_size * sizeof(double) + 101 * sizeof(int);
     background_kernel<<<nb_imgs, block_size, smem_size>>>(
-        d_imgs, d_means, d_stds, nb_imgs, pixel_count, frame0_std
-    ); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+        d_imgs, d_means, d_stds, nb_imgs, pixel_count
+    ); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 
     cudaMemcpy(out_means, d_means, nb_imgs * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(out_stds, d_stds, nb_imgs * sizeof(float), cudaMemcpyDeviceToHost);

@@ -9,6 +9,9 @@
 #include <random>
 #include <iomanip>
 #include <cstdlib>
+#include <cstring>
+#include <map>
+#include <filesystem>
 #ifdef _WIN32 // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 #include <windows.h>
 #elif defined(__APPLE__)
@@ -170,6 +173,309 @@ std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& heigh
 }
 #endif
 
+// ============================================================ // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+// ND2 reader (Nikon proprietary chunk-based binary format)
+// Supports modern ND2 files (uncompressed). Old JPEG2000 files
+// are detected and a clear error message is shown.
+// ============================================================
+
+static const uint32_t ND2_CHUNK_MAGIC = 0x0ABECEDA;
+static const uint32_t ND2_LEGACY_MAGIC = 0x0C000000;
+static const char ND2_FILE_SIGNATURE[] = "ND2 FILE SIGNATURE CHUNK NAME01!";
+static const char ND2_CHUNKMAP_SIGNATURE[] = "ND2 CHUNK MAP SIGNATURE 0000001!";
+
+static uint32_t le_u32(const uint8_t* p) {
+    return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+}
+
+static uint64_t le_u64(const uint8_t* p) {
+    return uint64_t(le_u32(p)) | (uint64_t(le_u32(p + 4)) << 32);
+}
+
+// Search for a UTF-16LE encoded key in ND2 metadata and extract uint32 value
+static bool nd2_find_uint32(const uint8_t* data, size_t len, const std::string& key, uint32_t& out_val) {
+    std::vector<uint8_t> key_u16;
+    for (char c : key) { key_u16.push_back(static_cast<uint8_t>(c)); key_u16.push_back(0); }
+
+    for (size_t i = 0; i + key_u16.size() + 4 < len; ++i) {
+        if (std::memcmp(data + i, key_u16.data(), key_u16.size()) == 0) {
+            size_t val_offset = i + key_u16.size() + 2;
+            if (val_offset + 4 <= len) {
+                out_val = le_u32(data + val_offset);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Read chunk data at given file offset (skips 16-byte header + name)
+static std::vector<uint8_t> nd2_read_chunk_data(std::ifstream& file, uint64_t offset) {
+    file.seekg(offset, std::ios::beg);
+    uint8_t hdr[16];
+    file.read(reinterpret_cast<char*>(hdr), 16);
+    if (!file.good() || le_u32(hdr) != ND2_CHUNK_MAGIC) return {};
+    uint32_t name_len = le_u32(hdr + 4);
+    uint64_t data_len = le_u64(hdr + 8);
+    file.seekg(name_len, std::ios::cur);
+    std::vector<uint8_t> data(data_len);
+    file.read(reinterpret_cast<char*>(data.data()), data_len);
+    return file.good() ? data : std::vector<uint8_t>{};
+}
+
+std::vector<float> read_nd2(const std::string& path, int& nb_frames, int& height, int& width) {
+    nb_frames = height = width = 0;
+
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open ND2 file: " << path << std::endl;
+        return {};
+    }
+
+    file.seekg(0, std::ios::end);
+    int64_t file_size = file.tellg();
+    if (file_size < 48) {
+        std::cerr << "ND2 file too small: " << path << std::endl;
+        return {};
+    }
+
+    // Step 1: Verify first chunk header
+    file.seekg(0, std::ios::beg);
+    uint8_t first_hdr[16];
+    file.read(reinterpret_cast<char*>(first_hdr), 16);
+    uint32_t first_magic = le_u32(first_hdr);
+
+    if (first_magic == ND2_LEGACY_MAGIC) {
+        std::cerr << "\nERROR: Cannot read ND2 file: " << path << std::endl;
+        std::cerr << "  This file uses the old ND2 format (JPEG2000 compression)," << std::endl;
+        std::cerr << "  which is not supported by FreeTrace C++." << std::endl;
+        std::cerr << "  Please re-export the file from NIS-Elements as a modern ND2 or TIFF." << std::endl;
+        std::cerr << "  Alternatively, use the Python version of FreeTrace which supports" << std::endl;
+        std::cerr << "  all ND2 formats via the 'nd2' library." << std::endl;
+        return {};
+    }
+
+    if (first_magic != ND2_CHUNK_MAGIC) {
+        std::cerr << "\nERROR: Cannot read ND2 file: " << path << std::endl;
+        std::cerr << "  Unrecognized file format (invalid chunk magic)." << std::endl;
+        return {};
+    }
+
+    // Read chunk name and verify it's the file signature
+    uint32_t sig_name_len = le_u32(first_hdr + 4);
+    std::vector<char> sig_name(sig_name_len);
+    file.read(sig_name.data(), sig_name_len);
+    if (sig_name_len < 32 || std::memcmp(sig_name.data(), ND2_FILE_SIGNATURE, 32) != 0) {
+        std::cerr << "\nERROR: Cannot read ND2 file: " << path << std::endl;
+        std::cerr << "  Missing ND2 file signature." << std::endl;
+        return {};
+    }
+
+    // Step 2: Read chunk map location from last 40 bytes
+    // Format: 32-byte signature ("ND2 CHUNK MAP SIGNATURE 0000001!") + 8-byte offset
+    file.seekg(-40, std::ios::end);
+    uint8_t tail[40];
+    file.read(reinterpret_cast<char*>(tail), 40);
+    if (std::memcmp(tail, ND2_CHUNKMAP_SIGNATURE, 32) != 0) {
+        std::cerr << "ND2 chunk map signature not found: " << path << std::endl;
+        return {};
+    }
+    uint64_t chunkmap_offset = le_u64(tail + 32);
+
+    // Step 3: Read chunk map data
+    auto map_data = nd2_read_chunk_data(file, chunkmap_offset);
+    if (map_data.empty()) {
+        std::cerr << "Failed to read ND2 chunk map: " << path << std::endl;
+        return {};
+    }
+
+    // Step 4: Parse chunk map entries
+    // Format: chunk names delimited by '!' (not null), followed by 16 bytes (uint64 offset + uint64 size)
+    struct ChunkEntry { uint64_t offset; uint64_t size; };
+    std::map<std::string, ChunkEntry> chunks;
+    size_t pos = 0;
+    size_t map_len = map_data.size();
+    while (pos < map_len) {
+        // Find next '!' to get chunk name
+        size_t excl = pos;
+        while (excl < map_len && map_data[excl] != '!') excl++;
+        if (excl >= map_len) break;
+        excl++; // include the '!'
+
+        std::string name(reinterpret_cast<const char*>(map_data.data() + pos), excl - pos);
+
+        // Check for end marker
+        if (name == ND2_CHUNKMAP_SIGNATURE) break;
+
+        if (excl + 16 > map_len) break;
+        ChunkEntry entry;
+        entry.offset = le_u64(map_data.data() + excl);
+        entry.size   = le_u64(map_data.data() + excl + 8);
+        chunks[name] = entry;
+        pos = excl + 16;
+    }
+
+    // Step 5: Read ImageAttributesLV! metadata
+    auto attr_it = chunks.find("ImageAttributesLV!");
+    if (attr_it == chunks.end()) {
+        std::cerr << "ND2 file missing ImageAttributesLV! chunk: " << path << std::endl;
+        return {};
+    }
+
+    auto attr_data = nd2_read_chunk_data(file, attr_it->second.offset);
+    if (attr_data.empty()) {
+        std::cerr << "Failed to read ND2 attributes: " << path << std::endl;
+        return {};
+    }
+
+    uint32_t ui_width = 0, ui_height = 0, ui_bpc = 16, ui_comp = 1, ui_seq_count = 0;
+    uint32_t ui_compression = 2;
+    nd2_find_uint32(attr_data.data(), attr_data.size(), "uiWidth", ui_width);
+    nd2_find_uint32(attr_data.data(), attr_data.size(), "uiHeight", ui_height);
+    nd2_find_uint32(attr_data.data(), attr_data.size(), "uiBpcInMemory", ui_bpc);
+    nd2_find_uint32(attr_data.data(), attr_data.size(), "uiComp", ui_comp);
+    nd2_find_uint32(attr_data.data(), attr_data.size(), "uiSequenceCount", ui_seq_count);
+    nd2_find_uint32(attr_data.data(), attr_data.size(), "uiCompression", ui_compression);
+
+    if (ui_width == 0 || ui_height == 0) {
+        std::cerr << "ND2 file has zero dimensions: " << path << std::endl;
+        return {};
+    }
+
+    if (ui_compression == 1) {
+        std::cerr << "\nERROR: Cannot read ND2 file: " << path << std::endl;
+        std::cerr << "  This file uses lossy (JPEG2000) compression," << std::endl;
+        std::cerr << "  which is not supported by FreeTrace C++." << std::endl;
+        std::cerr << "  Please re-export the file from NIS-Elements as uncompressed ND2 or TIFF." << std::endl;
+        std::cerr << "  Alternatively, use the Python version of FreeTrace which supports" << std::endl;
+        std::cerr << "  all ND2 formats via the 'nd2' library." << std::endl;
+        return {};
+    }
+
+    if (ui_seq_count == 0) {
+        for (auto& kv : chunks)
+            if (kv.first.find("ImageDataSeq|") == 0) ui_seq_count++;
+    }
+
+    width = static_cast<int>(ui_width);
+    height = static_cast<int>(ui_height);
+    nb_frames = static_cast<int>(ui_seq_count);
+
+    if (nb_frames == 0) {
+        std::cerr << "ND2 file has 0 frames: " << path << std::endl;
+        return {};
+    }
+
+    // Step 6: Read image data from ImageDataSeq|N! chunks
+    size_t bytes_per_pixel = ui_bpc / 8;
+    size_t pixels_per_frame = static_cast<size_t>(ui_width) * ui_height;
+    size_t channel_count = ui_comp > 0 ? ui_comp : 1;
+
+    std::vector<float> data(static_cast<size_t>(nb_frames) * height * width);
+
+    for (int n = 0; n < nb_frames; ++n) {
+        std::string seq_key = "ImageDataSeq|" + std::to_string(n) + "!";
+        auto seq_it = chunks.find(seq_key);
+        if (seq_it == chunks.end()) {
+            std::cerr << "ND2 missing frame " << n << " (" << seq_key << "): " << path << std::endl;
+            return {};
+        }
+
+        auto raw = nd2_read_chunk_data(file, seq_it->second.offset);
+        if (raw.empty()) {
+            std::cerr << "ND2 failed to read frame " << n << ": " << path << std::endl;
+            return {};
+        }
+
+        // Skip 8-byte timestamp at start
+        size_t pixel_offset = 8;
+        size_t expected_bytes = pixels_per_frame * channel_count * bytes_per_pixel;
+        if (pixel_offset + expected_bytes > raw.size()) {
+            pixel_offset = 0;
+            if (expected_bytes > raw.size()) {
+                std::cerr << "ND2 frame " << n << " data too small: " << path << std::endl;
+                return {};
+            }
+        }
+
+        const uint8_t* px = raw.data() + pixel_offset;
+        int base = n * height * width;
+
+        for (int r = 0; r < height; ++r) {
+            for (int c = 0; c < width; ++c) {
+                size_t pixel_idx = static_cast<size_t>(r) * width + c;
+                size_t interleaved_idx = pixel_idx * channel_count;
+                float v = 0.0f;
+                if (bytes_per_pixel == 2) {
+                    const uint8_t* p = px + interleaved_idx * 2;
+                    v = static_cast<float>(uint16_t(p[0]) | (uint16_t(p[1]) << 8));
+                } else if (bytes_per_pixel == 1) {
+                    v = static_cast<float>(px[interleaved_idx]);
+                } else if (bytes_per_pixel == 4) {
+                    const uint8_t* p = px + interleaved_idx * 4;
+                    float fv;
+                    std::memcpy(&fv, p, 4);
+                    v = fv;
+                }
+                data[base + r * width + c] = v;
+            }
+        }
+    }
+
+    file.close();
+
+    // Normalization matching Python read_tif
+    int total = nb_frames * height * width;
+    float s_min = data[0], s_max = data[0];
+    for (int i = 1; i < total; ++i) {
+        s_min = std::min(s_min, data[i]);
+        s_max = std::max(s_max, data[i]);
+    }
+    float range = s_max - s_min;
+    if (range > 0.0f)
+        for (int i = 0; i < total; ++i)
+            data[i] = (data[i] - s_min) / range;
+
+    int frame_size = height * width;
+    for (int n = 0; n < nb_frames; ++n) {
+        int base = n * frame_size;
+        float fmax = 0.0f;
+        for (int i = 0; i < frame_size; ++i)
+            fmax = std::max(fmax, data[base + i]);
+        if (fmax > 0.0f)
+            for (int i = 0; i < frame_size; ++i)
+                data[base + i] /= fmax;
+    }
+
+    return data;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+
+// ============================================================
+// Unified image reader — dispatches by file extension
+// ============================================================
+
+static std::string get_extension(const std::string& path) {
+    auto dot = path.rfind('.');
+    if (dot == std::string::npos) return "";
+    std::string ext = path.substr(dot);
+    for (auto& c : ext) c = std::tolower(static_cast<unsigned char>(c));
+    return ext;
+}
+
+std::vector<float> read_image(const std::string& path, int& nb_frames, int& height, int& width) {
+    std::string ext = get_extension(path);
+    if (ext == ".nd2") {
+        return read_nd2(path, nb_frames, height, width);
+    } else if (ext == ".tif" || ext == ".tiff") {
+        return read_tiff(path, nb_frames, height, width);
+    } else {
+        std::cerr << "Unsupported file format: " << ext << std::endl;
+        std::cerr << "Supported formats: .tif, .tiff, .nd2" << std::endl;
+        nb_frames = height = width = 0;
+        return {};
+    }
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+
 // ============================================================
 // CSV output
 // ============================================================
@@ -269,33 +575,16 @@ BackgroundResult compute_background(
                 all_mode_val[n] = mode_bin * 0.01 + 0.005;
             }
 
-            // Step 2: std computation — match Python GPU's cp.take flat indexing
-            if (iter == 0) {
-                // Python GPU iter 0: cp.std(cp.take(bg_intensities, post_mask_args), axis=1)
-                // cp.take with flat indexing means ALL frames use frame 0's data
-                // because post_mask_args[n] = [0,1,...,pixel_count-1] for all n
-                double sum0 = 0.0, sum0_2 = 0.0;
-                auto& bg_val0 = all_bg_val[0];
-                for (int i = 0; i < pixel_count; ++i) {
-                    sum0 += bg_val0[i];
-                    sum0_2 += bg_val0[i] * bg_val0[i];
-                }
-                double mean0 = sum0 / pixel_count;
-                double std0 = std::sqrt(std::max(0.0, sum0_2 / pixel_count - mean0 * mean0));
-                for (int n = 0; n < nb_imgs; ++n)
-                    all_mask_std[n] = std0;
-            } else {
-                // iter 1,2: per-frame std from masked values
-                for (int n = 0; n < nb_imgs; ++n) {
-                    auto& post_mask = all_post_mask[n];
-                    auto& bg_val = all_bg_val[n];
-                    if (post_mask.empty()) { all_mask_std[n] = 0.0; continue; }
-                    double sum = 0.0, sum2 = 0.0;
-                    for (int idx : post_mask) { sum += bg_val[idx]; sum2 += bg_val[idx] * bg_val[idx]; }
-                    double mean_tmp = sum / post_mask.size();
-                    all_mask_std[n] = std::sqrt(std::max(0.0, sum2 / post_mask.size() - mean_tmp * mean_tmp));
-                }
-            }
+            // Step 2: per-frame std from masked values (every iteration) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+            for (int n = 0; n < nb_imgs; ++n) {
+                auto& post_mask = all_post_mask[n];
+                auto& bg_val = all_bg_val[n];
+                if (post_mask.empty()) { all_mask_std[n] = 0.0; continue; }
+                double sum = 0.0, sum2 = 0.0;
+                for (int idx : post_mask) { sum += bg_val[idx]; sum2 += bg_val[idx] * bg_val[idx]; }
+                double mean_tmp = sum / post_mask.size();
+                all_mask_std[n] = std::sqrt(std::max(0.0, sum2 / post_mask.size() - mean_tmp * mean_tmp));
+            } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 
             // Step 3: rebuild masks
             for (int n = 0; n < nb_imgs; ++n) {
@@ -582,6 +871,12 @@ RegressionResult image_regression(
         }
     }
 
+    // Mark error indices with -100 (matching Python — after PDF computation) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+    for (int ei : unpacked.err_indices) {
+        res.x_vars[ei] = -100.0f;
+        res.y_vars[ei] = -100.0f;
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+
     return res;
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
@@ -732,12 +1027,35 @@ LocalizationResult localize( // Modified by Claude (claude-opus-4-6, Anthropic A
     // Add block noise to borders // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
     add_block_noise(ext_imgs, nb_imgs, ext_rows, ext_cols, extend, external_rng);
 
+    // DEBUG: dump ext_imgs for specific frame // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+    if (std::getenv("FREETRACE_DEBUG_LOC")) {
+        static int ext_batch_idx = 0;
+        if (ext_batch_idx == 3 && nb_imgs > 53) {
+            int lf = 53;
+            std::string p = "/home/junwoo/claude/FreeTrace_comparison/debug_cpp_ext_f353.bin";
+            std::ofstream ofs(p, std::ios::binary);
+            ofs.write(reinterpret_cast<const char*>(&ext_imgs[lf * ext_rows * ext_cols]),
+                      ext_rows * ext_cols * sizeof(float));
+            std::cout << "Saved ext_imgs batch3 frame53 to " << p << std::endl;
+        }
+        ext_batch_idx++;
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 
     // Background means (per-frame scalar)
     auto& bg_vec = bg_result.bgs[multi_ws[0].w];
     std::vector<float> bg_means(nb_imgs);
     for (int n = 0; n < nb_imgs; ++n)
         bg_means[n] = bg_vec[n * multi_ws[0].w * multi_ws[0].h]; // all same per frame
+
+    // DEBUG: dump bg_means and thresholds // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+    if (std::getenv("FREETRACE_DEBUG_LOC")) {
+        static int bg_batch_idx = 0;
+        std::cout << std::setprecision(15);
+        std::cout << "BG_BATCH " << bg_batch_idx << ": " << nb_imgs << " frames" << std::endl;
+        for (int i = 0; i < nb_imgs; ++i)
+            std::cout << "  f" << i << " bg_mean=" << bg_means[i] << " threshold=" << bg_result.thresholds[i] << std::endl;
+        bg_batch_idx++;
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 
     // Initial parameters for Guo regression
     float p0[6] = {1.5f, 0.0f, 1.5f, 0.0f, 0.0f, 0.5f};
@@ -789,6 +1107,16 @@ LocalizationResult localize( // Modified by Claude (claude-opus-4-6, Anthropic A
 
         // Map likelihood back to image space // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 20:50
         auto h_map = mapping(lik, nb_imgs, rows, cols, shift);
+
+        // DEBUG: dump h_map for specific batches // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+        if (std::getenv("FREETRACE_DEBUG_LOC")) {
+            static int hmap_batch_idx = 0;
+            std::string p = "/home/junwoo/claude/FreeTrace_comparison/debug_cpp_hmap_batch" + std::to_string(hmap_batch_idx) + ".bin";
+            std::ofstream ofs(p, std::ios::binary);
+            ofs.write(reinterpret_cast<const char*>(h_map.data()), nb_imgs * rows * cols * sizeof(float));
+            std::cout << "Saved h_map batch" << hmap_batch_idx << " (" << nb_imgs << " frames) to " << p << std::endl;
+            hmap_batch_idx++;
+        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 
         // Thresholds for single window — use bg_result.thresholds directly
         auto& thresholds = bg_result.thresholds;
@@ -852,6 +1180,24 @@ LocalizationResult localize( // Modified by Claude (claude-opus-4-6, Anthropic A
         std::vector<DetIndex> indices;
         for (int n = 0; n < nb_imgs; ++n)
             indices.insert(indices.end(), per_frame_indices[n].begin(), per_frame_indices[n].end());
+
+        // DEBUG: dump NMS counts and positions // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+        if (std::getenv("FREETRACE_DEBUG_LOC")) {
+            static int nms_batch_idx = 0;
+            std::cout << "BATCH " << nms_batch_idx << ": total=" << indices.size() << std::endl;
+            for (int fn = 0; fn < nb_imgs; ++fn) {
+                std::vector<std::pair<int,int>> fpos;
+                for (auto& idx : indices)
+                    if (idx.frame == fn) fpos.push_back({idx.row, idx.col});
+                if (!fpos.empty()) {
+                    std::cout << "  frame" << fn << ": " << fpos.size();
+                    for (auto& p : fpos) std::cout << " (" << p.first << "," << p.second << ")";
+                    std::cout << std::endl;
+                }
+            }
+            nms_batch_idx++;
+        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+
         if (!indices.empty()) {
             int ws = ws0.w;
             int win_area = ws * ws;
@@ -1304,16 +1650,18 @@ LocalizationResult localize_from_ext( // Modified by Claude (claude-opus-4-6, An
 // Top-level run
 // ============================================================
 
-bool run(const std::string& input_video_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
+bool run(const std::string& input_video_path, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
          const std::string& output_path,
          int window_size,
          float threshold,
          int shift,
          bool verbose,
-         const std::string& ext_imgs_path)
+         const std::string& ext_imgs_path,
+         int batch_size) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 {
+    std::filesystem::create_directories(output_path); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
     int nb_frames, height, width;
-    auto images = read_tiff(input_video_path, nb_frames, height, width);
+    auto images = read_image(input_video_path, nb_frames, height, width); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
     if (images.empty()) {
         std::cerr << "Failed to read: " << input_video_path << std::endl;
         return false;
@@ -1332,27 +1680,22 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
         }
     } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 
-    // Batch size — use 70% of available VRAM // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+    // Batch size — use parameter if given, otherwise compute dynamically // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
     int div_q;
     int ws2 = window_size * window_size;
-    if (USE_GPU) {
-        // Estimate peak VRAM per frame: cropping is the dominant allocation
-        // d_ext: (h+ext)*(w+ext)*4, d_cropped: nb_crops*ws²*4
-        int extend = window_size;
-        int ext_h = height + extend, ext_w = width + extend;
-        int nb_crops_est = ((height + 1) / shift) * ((width + 1) / shift); // approximate
+    if (batch_size > 0) {
+        div_q = batch_size;
+    } else if (USE_GPU) {
+        int ext_est = window_size;
+        int ext_h = height + ext_est, ext_w = width + ext_est;
+        int nb_crops_est = ((height + 1) / shift) * ((width + 1) / shift);
         size_t per_frame = (size_t)ext_h * ext_w * sizeof(float) + (size_t)nb_crops_est * ws2 * sizeof(float);
         size_t free_mem = gpu::get_gpu_free_mem_bytes();
         div_q = static_cast<int>(0.7 * free_mem / per_frame);
     } else {
-        // Python: min(50, int(2.7 * 4194304 / h / w * (7**2 / ws**2)))
         div_q = std::min(50, static_cast<int>(2.7 * 4194304.0 / height / width * (49.0 / ws2)));
     }
     div_q = std::max(div_q, 1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
-
-    // TEMP: override batch size for comparison testing
-    if (const char* env_bs = std::getenv("FREETRACE_BATCH_SIZE"))
-        div_q = std::atoi(env_bs);
 
     if (verbose)
         std::cout << "Batch size: " << div_q << std::endl;
@@ -1444,7 +1787,11 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
 #else
     std::string loc_output = output_path + "/" + vid_fname;
 #endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
-    loc_output = loc_output.substr(0, loc_output.find(".tif"));
+    // Strip known extensions: .tif, .tiff, .nd2 // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+    auto tif_pos = loc_output.find(".tif");
+    if (tif_pos != std::string::npos) loc_output = loc_output.substr(0, tif_pos);
+    auto nd2_pos = loc_output.find(".nd2");
+    if (nd2_pos != std::string::npos) loc_output = loc_output.substr(0, nd2_pos); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
     write_localization_csv(loc_output, result);
     make_loc_depth_image(loc_output, result, /*multiplier=*/4, /*winsize=*/window_size, /*resolution=*/2); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
