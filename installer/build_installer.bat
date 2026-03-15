@@ -359,7 +359,7 @@ copy "!VCPKG_INSTALLED!\bin\png16.dll" "!STAGING!\" >nul 2>&1
 copy "!VCPKG_INSTALLED!\bin\zlib1.dll" "!STAGING!\" >nul 2>&1
 copy "!VCPKG_INSTALLED!\bin\jpeg62.dll" "!STAGING!\" >nul 2>&1
 copy "!VCPKG_INSTALLED!\bin\turbojpeg.dll" "!STAGING!\" >nul 2>&1
-copy "!VCPKG_INSTALLED!\bin\lzma.dll" "!STAGING!\" >nul 2>&1
+copy "!VCPKG_INSTALLED!\bin\liblzma.dll" "!STAGING!\" >nul 2>&1
 copy "!VCPKG_INSTALLED!\bin\libwebp.dll" "!STAGING!\" >nul 2>&1
 copy "!VCPKG_INSTALLED!\bin\libsharpyuv.dll" "!STAGING!\" >nul 2>&1
 copy "!VCPKG_INSTALLED!\bin\Lerc.dll" "!STAGING!\" >nul 2>&1
