@@ -244,7 +244,7 @@ cd C:\path\to\FreeTrace_cpp
 mkdir build; cd build; cmake .. -G "Visual Studio 17 2022" "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake"; cmake --build . --config Release
 ```
 
-**With fBm (GPU):** requires [**CUDA Toolkit 12.x**](https://developer.nvidia.com/cuda-downloads) (install after VS 2022) and [**cuDNN 9.x**](https://developer.nvidia.com/cudnn-downloads) (CUDA 12, Windows, Tarball)
+**With fBm (GPU):** requires [**CUDA Toolkit 12.x**](https://developer.nvidia.com/cuda-downloads) (install after VS 2022) and [**cuDNN 9.2**](https://developer.nvidia.com/cudnn-downloads) (CUDA 12, Windows, Tarball). **Note:** cuDNN 9.5+ has a Frontend API incompatibility with ONNX Runtime Conv1D operations — use 9.2.x.
 ```powershell
 Invoke-WebRequest -Uri https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-gpu-1.24.3.zip -OutFile ort.zip; tar -xf ort.zip; mkdir build; cd build; cmake .. -G "Visual Studio 17 2022" "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" "-DUSE_ONNXRUNTIME=ON" "-DONNXRUNTIME_DIR=..\onnxruntime-win-x64-gpu-1.24.3"; cmake --build . --config Release; copy ..\onnxruntime-win-x64-gpu-1.24.3\lib\*.dll Release\
 ```
