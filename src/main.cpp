@@ -41,7 +41,7 @@ static TrackingOpts parse_tracking_opts(int argc, char* argv[], int start_idx) {
 
 static void print_tracking_banner(const std::string& loc_csv, const std::string& output, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
                                   int nb_frames, const freetrace::TrackingConfig& config) {
-    std::cout << "FreeTrace C++ — Tracking" << std::endl;
+    std::cout << "FreeTrace C++ - Tracking" << std::endl;
     std::cout << "  Loc CSV:   " << loc_csv << std::endl;
     std::cout << "  Output:    " << output << std::endl;
     std::cout << "  Nb frames: " << nb_frames << std::endl;
@@ -144,7 +144,7 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
         int window = 7; float threshold = 1.0f; int shift = 1; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
         parse_loc_opts(argc, argv, 4, window, threshold, shift);
 
-        std::cout << "FreeTrace C++ — Localization" << std::endl;
+        std::cout << "FreeTrace C++ - Localization" << std::endl;
         std::cout << "  Input:  " << input << std::endl;
         std::cout << "  Output: " << output << std::endl;
         std::cout << "  Window: " << window << ", Threshold: " << threshold
@@ -169,7 +169,7 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
         bool verbose = config.verbose;
 
         // --- Step 1: Localization ---
-        std::cout << "FreeTrace C++ — Full Pipeline" << std::endl;
+        std::cout << "FreeTrace C++ - Full Pipeline" << std::endl;
         std::cout << "  Input:  " << input << std::endl;
         std::cout << "  Output: " << output << std::endl;
         std::cout << "\n=== Step 1: Localization ===" << std::endl;
