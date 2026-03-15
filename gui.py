@@ -334,12 +334,7 @@ class FreeTraceGUI(QMainWindow):
         self._fbm_mode.setToolTip("Use fractional Brownian motion model for tracking. Requires ONNX model files.")
         adv_grid.addWidget(self._fbm_mode, 2, 0, 1, 2)
 
-        self._postprocess = QCheckBox("Post-processing")
-        self._postprocess.setChecked(False)
-        self._postprocess.setToolTip("Enable trajectory post-processing.")
-        adv_grid.addWidget(self._postprocess, 3, 0, 1, 2)
-
-        self._adv_sec.add_layout(adv_grid)
+        self._adv_sec.add_layout(adv_grid)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
         layout.addWidget(self._adv_sec)
 
         # Progress
@@ -505,8 +500,6 @@ class FreeTraceGUI(QMainWindow):
         if not self._fbm_mode.isChecked():
             args.append("--no-fbm")
 
-        if self._postprocess.isChecked():
-            args.append("--postprocess")
 
         # Setup UI
         self._log.clear()
