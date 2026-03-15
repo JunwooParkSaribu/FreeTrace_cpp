@@ -222,7 +222,7 @@ static int model_selection(const NNModels& models, int length) {
 
 bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     try {
-        auto* env = new Ort::Env(ORT_LOGGING_LEVEL_FATAL, "freetrace"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
+        auto* env = new Ort::Env(ORT_LOGGING_LEVEL_ERROR, "freetrace"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
         models.env = env;
 
         Ort::SessionOptions opts;
