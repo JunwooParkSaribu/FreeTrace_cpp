@@ -2253,7 +2253,7 @@ std::vector<TrajectoryObj> forecast(const Localizations& locs, // Modified by Cl
         std::vector<std::vector<Node>> node_pairs;
         int start_time = selected_time_steps.empty() ? last_time : selected_time_steps.back();
 
-        if (config.verbose && !selected_time_steps.empty() && selected_time_steps[0] % 10 == 0) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+        if (config.verbose && !selected_time_steps.empty() && selected_time_steps[0] % 50 == 0) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
             std::cerr << "\rTracking frame " << selected_time_steps[0] << "-" << selected_time_steps.back()
                       << " / " << last_time << std::flush;
         }
