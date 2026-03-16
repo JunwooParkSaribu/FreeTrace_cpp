@@ -25,19 +25,40 @@ from PyQt6.QtWidgets import (
 _BASE_W, _BASE_H = 1920, 1080
 
 
-def _find_freetrace_binary():
-    """Find the freetrace binary. Checks: same dir as exe, build/, PATH."""
+def _find_freetrace_binary(): # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+    """Find the freetrace binary. Checks: same dir, build/, FreeTrace/, parent dirs, PATH."""
     # When frozen by PyInstaller, __file__ points to a temp dir (_MEIPASS).
-    # Use sys.executable dir so gui.exe finds freetrace.exe next to itself. # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+    # Use sys.executable dir so gui.exe finds freetrace.exe next to itself.
     if getattr(sys, 'frozen', False):
         script_dir = os.path.dirname(sys.executable)
+        # macOS .app: sys.executable is inside .app/Contents/MacOS/
+        # The FreeTrace/ folder is a sibling of the .app bundle
+        app_dir = script_dir
+        for _ in range(4):  # walk up to find the .app's parent
+            parent = os.path.dirname(app_dir)
+            if app_dir.endswith('.app') or os.path.basename(parent) == 'Contents':
+                app_dir = parent
+            else:
+                break
+        # The DMG root: parent of the .app bundle
+        dmg_root = os.path.dirname(app_dir) if app_dir != script_dir else script_dir
     else:
         script_dir = os.path.dirname(os.path.abspath(__file__))
+        dmg_root = script_dir
+
     candidates = [
+        # Same directory as binary/script
         os.path.join(script_dir, "freetrace"),
         os.path.join(script_dir, "freetrace.exe"),
+        # build/ subdirectory
         os.path.join(script_dir, "build", "freetrace"),
         os.path.join(script_dir, "build", "freetrace.exe"),
+        # FreeTrace/ subdirectory (macOS DMG layout)
+        os.path.join(script_dir, "FreeTrace", "freetrace"),
+        os.path.join(dmg_root, "FreeTrace", "freetrace"),
+        # Parent directory
+        os.path.join(os.path.dirname(script_dir), "freetrace"),
+        os.path.join(os.path.dirname(script_dir), "FreeTrace", "freetrace"),
     ]
     for c in candidates:
         if os.path.isfile(c) and os.access(c, os.X_OK):
@@ -46,7 +67,7 @@ def _find_freetrace_binary():
     found = shutil.which("freetrace")
     if found:
         return found
-    return None
+    return None # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 
 # ---------------------------------------------------------------------------
