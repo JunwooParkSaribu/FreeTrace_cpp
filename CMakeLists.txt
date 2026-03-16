@@ -26,6 +26,24 @@ endif()
 option(USE_ONNXRUNTIME "Enable ONNX Runtime for NN inference (fBm mode)" OFF)
 set(ONNXRUNTIME_DIR "" CACHE PATH "Path to ONNX Runtime installation")
 
+# --- Apple Silicon optimizations --- # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+if(APPLE)
+    # Detect ARM64 (Apple Silicon)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+        set(APPLE_SILICON ON)
+        message(STATUS "Apple Silicon detected — enabling ARM64 optimizations")
+    else()
+        set(APPLE_SILICON OFF)
+    endif()
+
+    # Apple Accelerate framework (vDSP + LAPACK, highly optimized for Apple Silicon)
+    find_library(ACCELERATE_LIB Accelerate)
+    if(ACCELERATE_LIB)
+        add_definitions(-DUSE_ACCELERATE -DUSE_LAPACK)
+        message(STATUS "Apple Accelerate framework found — vDSP + LAPACK enabled")
+    endif()
+endif() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+
 # --- Dependencies ---
 
 # OpenMP (optional, parallel localization loops)
@@ -102,6 +120,12 @@ else()
     message(STATUS "AVX2 disabled (x86-simd-sort not found or AVX2 not supported)")
 endif()
 
+# Apple Silicon: ARM tuning flags // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+if(APPLE_SILICON)
+    target_compile_options(freetrace PRIVATE -mcpu=apple-m1 -O3)
+    message(STATUS "Apple Silicon: -mcpu=apple-m1 -O3 enabled")
+endif() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+
 # Disable FP contraction (FMA fusion) for deterministic floating-point results // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 # Without this, -O3 can produce different results across compilations
 if(MSVC)
@@ -138,6 +162,11 @@ endif() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 if(OpenMP_CXX_FOUND)
     target_link_libraries(freetrace PRIVATE OpenMP::OpenMP_CXX)
 endif()
+
+# Apple Accelerate framework (vDSP + LAPACK) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+if(APPLE AND ACCELERATE_LIB)
+    target_link_libraries(freetrace PRIVATE ${ACCELERATE_LIB})
+endif() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 if(USE_ONNXRUNTIME AND EXISTS "${ONNXRUNTIME_DIR}/include/onnxruntime_cxx_api.h")
     target_include_directories(freetrace PRIVATE ${ONNXRUNTIME_DIR}/include)
