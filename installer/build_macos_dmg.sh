@@ -150,12 +150,18 @@ echo "Creating .dmg..."
 DMG_PATH="$PROJECT_DIR/$DMG_NAME.dmg"
 rm -f "$DMG_PATH"
 
-hdiutil create \
-    -volname "FreeTrace" \
-    -srcfolder "$STAGING" \
-    -ov \
-    -format UDZO \
-    "$DMG_PATH"
+# Calculate required size (content + 50MB headroom) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+CONTENT_SIZE_KB=$(du -sk "$STAGING" | cut -f1)
+DMG_SIZE_MB=$(( (CONTENT_SIZE_KB / 1024) + 50 ))
+echo "Content: ${CONTENT_SIZE_KB}KB, DMG volume: ${DMG_SIZE_MB}MB"
+
+# Create a read-write DMG first, copy files, then convert to compressed
+hdiutil create -volname "FreeTrace" -size "${DMG_SIZE_MB}m" -fs HFS+ -ov "$DMG_PATH.rw.dmg"
+hdiutil attach "$DMG_PATH.rw.dmg" -mountpoint /tmp/freetrace_dmg_mount
+cp -R "$STAGING"/* /tmp/freetrace_dmg_mount/
+hdiutil detach /tmp/freetrace_dmg_mount
+hdiutil convert "$DMG_PATH.rw.dmg" -format UDZO -o "$DMG_PATH"
+rm -f "$DMG_PATH.rw.dmg"
 
 # Cleanup
 rm -rf "$STAGING" "$BUILD_DIR"

@@ -164,8 +164,15 @@ jobs:
             codesign --force --sign - "$dylib"
           done
 
-          # Create .dmg
-          hdiutil create -volname "FreeTrace" -srcfolder "$DIST" -ov -format UDZO "$DMG_NAME.dmg"
+          # Create .dmg (two-step: rw image → compressed) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+          CONTENT_KB=$(du -sk "$DIST" | cut -f1)
+          DMG_MB=$(( (CONTENT_KB / 1024) + 50 ))
+          hdiutil create -volname "FreeTrace" -size "${DMG_MB}m" -fs HFS+ -ov "$DMG_NAME.rw.dmg"
+          hdiutil attach "$DMG_NAME.rw.dmg" -mountpoint /tmp/freetrace_dmg_mount
+          cp -R "$DIST"/* /tmp/freetrace_dmg_mount/
+          hdiutil detach /tmp/freetrace_dmg_mount
+          hdiutil convert "$DMG_NAME.rw.dmg" -format UDZO -o "$DMG_NAME.dmg"
+          rm -f "$DMG_NAME.rw.dmg"
 
           # Also create tar.gz for backward compatibility
           tar czf "$DIST.tar.gz" -C "$DIST" FreeTrace
