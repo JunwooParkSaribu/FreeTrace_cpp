@@ -10,9 +10,7 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 > - **RTX 2000 / 3000 / 4000 series:** **[Download FreeTrace (cuDNN 9.2)](https://psilo.sorbonne-universite.fr/public.php/dav/files/XmTL99cCx4iXDdH/?accept=zip)**
 > - **RTX 5000 series (Blackwell):** **[Download FreeTrace (cuDNN 9.20)](https://psilo.sorbonne-universite.fr/public.php/dav/files/jXMnok9WDWAX8c2/?accept=zip)** <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 -->
 
-> **Just want to run it?** Download a pre-built binary from the [Releases page](https://github.com/JunwooParkSaribu/FreeTrace_cpp/releases) — no compilers needed. Available for Linux, macOS (Apple Silicon), and Windows.
->
-> **Note:** Pre-built binaries are **CPU-only**. They include ONNX Runtime CPU for fBm mode, but do not include GPU acceleration. To use GPU (CUDA localization + GPU NN inference), you must [build from source](#build) with `-DUSE_CUDA=ON` and the ONNX Runtime GPU package.
+> **Don't have a GPU? Run it on CPU:** Download a pre-built binary from the [Releases page](https://github.com/JunwooParkSaribu/FreeTrace_cpp/releases) — no compilers needed. Available for Linux, macOS (Apple Silicon), and Windows. <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 -->
 
 ## Motivation and Reflection (Edited by the author)
 
