@@ -5,8 +5,10 @@
 FreeTrace GUI — run localization and tracking by clicking.
 Requires PyQt6: pip install PyQt6
 """
+import atexit # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 import math
 import os
+import signal
 import sys
 import subprocess
 import shutil
@@ -99,10 +101,21 @@ class FreeTraceWorker(QThread):
         self._process = None
         self._cancel = False
 
-    def cancel(self):
+    def cancel(self): # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
         self._cancel = True
         if self._process and self._process.poll() is None:
-            self._process.terminate()
+            try:
+                if sys.platform == "win32":
+                    self._process.terminate()
+                else:
+                    os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
+                self._process.wait(timeout=3)
+            except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
+                try:
+                    self._process.kill()
+                    self._process.wait()
+                except (ProcessLookupError, OSError):
+                    pass # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
     def run(self):
         try:
@@ -119,14 +132,32 @@ class FreeTraceWorker(QThread):
                 env["DYLD_LIBRARY_PATH"] = lib_dir + ":" + env.get("DYLD_LIBRARY_PATH", "")
             elif sys.platform == "linux":
                 env["LD_LIBRARY_PATH"] = lib_dir + ":" + env.get("LD_LIBRARY_PATH", "")
-            self._process = subprocess.Popen(
-                cmd,
+            # Start in new process group so we can kill the whole tree # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+            popen_kwargs = dict(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
                 env=env,
-            ) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+            )
+            if sys.platform == "win32":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                popen_kwargs["start_new_session"] = True
+
+            self._process = subprocess.Popen(cmd, **popen_kwargs)
+
+            # Register atexit handler so subprocess is killed even on unexpected exit
+            def _cleanup_process(proc=self._process):
+                if proc.poll() is None:
+                    try:
+                        if sys.platform == "win32":
+                            proc.kill()
+                        else:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    except (ProcessLookupError, OSError):
+                        pass
+            atexit.register(_cleanup_process) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
             for line in self._process.stdout:
                 line = line.rstrip("\n")
