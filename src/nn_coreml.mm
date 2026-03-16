@@ -45,9 +45,9 @@ int coreml_load_alpha_models(const char* models_dir, const int* model_nums, int 
                     }
                 }
 
-                MLModel* model = [MLModel modelOfContentsOfURL:compiledURL
-                                                 configuration:config
-                                                         error:&error];
+                MLModel* model = [MLModel modelWithContentsOfURL:compiledURL // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+                                                  configuration:config
+                                                          error:&error];
                 if (model) {
                     g_alpha_models[n] = model;
                     NSLog(@"CoreML: loaded reg_model_%d from %@", n, path);
