@@ -279,19 +279,45 @@ class FreeTraceGUI(QMainWindow):
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
-    def _setup_ui(self):
+    def _setup_ui(self): # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
         central = QWidget()
         self.setCentralWidget(central)
-        root = QHBoxLayout(central)
-        root.setContentsMargins(10, 10, 10, 10)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        # Top-level tabs: FreeTrace | Analysis
+        self._main_tabs = QTabWidget()
+        root.addWidget(self._main_tabs)
+
+        self._main_tabs.setObjectName("mainTabs") # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+        self._main_tabs.addTab(self._build_freetrace_tab(), "FreeTrace")
+        self._main_tabs.addTab(self._build_analysis_tab(), "Analysis") # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+
+    def _build_freetrace_tab(self):
+        tab = QWidget()
+        tab_layout = QHBoxLayout(tab)
+        tab_layout.setContentsMargins(10, 10, 10, 10)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(6)
-        root.addWidget(splitter)
+        tab_layout.addWidget(splitter)
 
         splitter.addWidget(self._build_left_panel())
         splitter.addWidget(self._build_right_panel())
         splitter.setSizes([380, 670])
+        return tab
+
+    def _build_analysis_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        self._analysis_placeholder = QLabel("Trajectory analysis tools will appear here.")
+        self._analysis_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._analysis_placeholder.setStyleSheet("color:#666; font-size:16px; margin:40px;")
+        layout.addWidget(self._analysis_placeholder)
+        layout.addStretch()
+        return tab
 
     # ---- left panel (controls) ----------------------------------------
     def _build_left_panel(self):
@@ -502,12 +528,18 @@ class FreeTraceGUI(QMainWindow):
             f"color:#888; font-size:{f(14)}px; margin-bottom:4px;"
         )
         self._stage_label.setStyleSheet(f"color:#888; font-size:{f(13)}px;")
-        try:
+        try: # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
             self._no_results_label.setStyleSheet(
                 f"color:#666; font-size:{f(15)}px; margin:40px;"
             )
         except RuntimeError:
             pass
+        try:
+            self._analysis_placeholder.setStyleSheet(
+                f"color:#666; font-size:{f(16)}px; margin:40px;"
+            )
+        except RuntimeError:
+            pass # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
         for sec in (self._io_sec, self._basic_sec, self._adv_sec):
             sec.set_font_size(f(14))
@@ -777,6 +809,23 @@ class FreeTraceGUI(QMainWindow):
             QRadioButton::indicator {{ border-radius: {f(17) // 2}px; }}
             QRadioButton::indicator:checked {{ border-radius: {f(17) // 2}px; }}
             QTabWidget::pane {{ border: 1px solid #444; background: #1e1e1e; }}
+            QTabWidget#mainTabs::pane {{ /* Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 */
+                border: none; border-top: 2px solid #444; background: #1e1e1e;
+            }}
+            QTabWidget#mainTabs > QTabBar::tab {{
+                background: #2a2a2a; color: #999;
+                padding: 10px 28px; font-size: {f(16)}px; font-weight: bold;
+                border: 1px solid #444; border-bottom: none;
+                border-radius: 6px 6px 0 0;
+                margin-right: 4px; min-width: 120px;
+            }}
+            QTabWidget#mainTabs > QTabBar::tab:selected {{
+                background: #1e1e1e; color: #7ec8e3;
+                border-bottom: 2px solid #1e1e1e;
+            }}
+            QTabWidget#mainTabs > QTabBar::tab:hover:!selected {{
+                background: #333; color: #ccc;
+            }} /* Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 */
             QTabBar::tab {{
                 background: #2a2a2a; color: #aaa;
                 padding: 8px 18px; font-size: {f(14)}px;
