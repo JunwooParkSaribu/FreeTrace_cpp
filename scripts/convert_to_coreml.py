@@ -10,6 +10,12 @@
 import os
 import sys
 import glob
+import numpy as np  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+
+# Monkey-patch for coremltools + NumPy 2.x compatibility
+# np.issubclass_ was removed in NumPy 2.0 but coremltools 7.x still uses it
+if not hasattr(np, 'issubclass_'):
+    np.issubclass_ = issubclass  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 
 def find_keras_models():
@@ -95,7 +101,7 @@ def convert_keras_to_coreml(keras_path, output_path, model_num): # Modified by C
             saved_model_dir,
             source='tensorflow',
             compute_units=ct.ComputeUnit.ALL,
-            minimum_deployment_target=ct.target.macOS15,
+            minimum_deployment_target=ct.target.macOS13,
         )
         mlmodel.save(output_path)
         shutil.rmtree(saved_model_dir, ignore_errors=True)
