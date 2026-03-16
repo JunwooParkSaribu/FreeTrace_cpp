@@ -89,6 +89,18 @@ else()
     endif()
 endif()
 
+# CoreML native inference (macOS only — GPU/ANE acceleration for alpha models) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+if(APPLE)
+    find_library(COREML_LIB CoreML)
+    find_library(FOUNDATION_LIB Foundation)
+    if(COREML_LIB AND FOUNDATION_LIB)
+        enable_language(OBJCXX)
+        list(APPEND CORE_SOURCES src/nn_coreml.mm)
+        add_definitions(-DUSE_COREML)
+        message(STATUS "CoreML framework found — native GPU/ANE inference enabled")
+    endif()
+endif() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+
 # GPU module: CUDA or stub // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
 if(USE_CUDA)
     list(APPEND CORE_SOURCES src/gpu_module.cu)
@@ -166,6 +178,11 @@ endif()
 # Apple Accelerate framework (vDSP + LAPACK) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 if(APPLE AND ACCELERATE_LIB)
     target_link_libraries(freetrace PRIVATE ${ACCELERATE_LIB})
+endif()
+
+# Apple CoreML + Foundation frameworks (native GPU/ANE inference) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+if(APPLE AND COREML_LIB)
+    target_link_libraries(freetrace PRIVATE ${COREML_LIB} ${FOUNDATION_LIB})
 endif() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 if(USE_ONNXRUNTIME AND EXISTS "${ONNXRUNTIME_DIR}/include/onnxruntime_cxx_api.h")

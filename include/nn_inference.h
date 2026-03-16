@@ -19,8 +19,9 @@ struct KModelDirect {
     float b3 = 0.0f;
 };
 
-struct NNModels { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+struct NNModels { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
     bool loaded = false;
+    bool use_coreml = false;        // CoreML native inference (macOS GPU/ANE)
     void* env = nullptr;            // Ort::Env*
     void* run_options = nullptr;    // Ort::RunOptions* (cached, reused)
     void* mem_info = nullptr;       // Ort::MemoryInfo* (cached, reused)
