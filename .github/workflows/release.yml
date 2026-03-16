@@ -52,9 +52,11 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libtiff-dev libpng-dev
 
-      - name: Install dependencies (macOS)
+      - name: Install dependencies (macOS) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
         if: runner.os == 'macOS'
-        run: brew install libtiff libpng
+        run: |
+          brew install libtiff libpng
+          pip3 install pyinstaller PyQt6 --break-system-packages 2>/dev/null || pip3 install pyinstaller PyQt6
 
       - name: Install dependencies (Windows) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
         if: runner.os == 'Windows'
@@ -127,7 +129,33 @@ jobs:
           cp models/*.onnx "$DIST/FreeTrace/models/" 2>/dev/null || true
           cp models/*.bin "$DIST/FreeTrace/models/" 2>/dev/null || true
           cp ${{ matrix.ort_dir }}/${{ matrix.lib_glob }} "$DIST/FreeTrace/lib/"
-          cp gui.py "$DIST/FreeTrace/" 2>/dev/null || true
+          # Build standalone GUI app with PyInstaller # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+          # Convert icon to icns
+          if [ -f icon/freetrace_icon.png ]; then
+            mkdir -p icon/freetrace_icon.iconset
+            for sz in 16 32 64 128 256 512 1024; do
+              sips -z $sz $sz icon/freetrace_icon.png --out icon/freetrace_icon.iconset/icon_${sz}x${sz}.png 2>/dev/null || true
+            done
+            cp icon/freetrace_icon.iconset/icon_32x32.png icon/freetrace_icon.iconset/icon_16x16@2x.png 2>/dev/null || true
+            cp icon/freetrace_icon.iconset/icon_64x64.png icon/freetrace_icon.iconset/icon_32x32@2x.png 2>/dev/null || true
+            cp icon/freetrace_icon.iconset/icon_256x256.png icon/freetrace_icon.iconset/icon_128x128@2x.png 2>/dev/null || true
+            cp icon/freetrace_icon.iconset/icon_512x512.png icon/freetrace_icon.iconset/icon_256x256@2x.png 2>/dev/null || true
+            cp icon/freetrace_icon.iconset/icon_1024x1024.png icon/freetrace_icon.iconset/icon_512x512@2x.png 2>/dev/null || true
+            rm -f icon/freetrace_icon.iconset/icon_64x64.png icon/freetrace_icon.iconset/icon_1024x1024.png
+            iconutil -c icns icon/freetrace_icon.iconset -o icon/freetrace_icon.icns 2>/dev/null || true
+            rm -rf icon/freetrace_icon.iconset
+          fi
+
+          python3 -m PyInstaller gui_macos.spec --noconfirm --clean \
+            --distpath dist_gui --workpath build_pyinstaller 2>&1 || true
+          if [ -d "dist_gui/FreeTrace GUI.app" ]; then
+            cp -R "dist_gui/FreeTrace GUI.app" "$DIST/FreeTrace GUI.app"
+            echo "GUI app built successfully"
+          else
+            echo "WARNING: GUI app build failed, including gui.py as fallback"
+            cp gui.py "$DIST/FreeTrace/" 2>/dev/null || true
+          fi
+          rm -rf dist_gui build_pyinstaller
 
           # Fix dylib paths to use @executable_path
           for dylib in "$DIST/FreeTrace/lib"/libonnxruntime*.dylib; do
@@ -146,34 +174,12 @@ jobs:
           SCRIPT
           chmod +x "$DIST/FreeTrace/run_freetrace.sh"
 
-          # Double-clickable GUI launcher # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-          cat > "$DIST/FreeTrace/FreeTrace GUI.command" << 'GUILAUNCHER'
-          #!/bin/bash
-          DIR="$(cd "$(dirname "$0")" && pwd)"
-          cd "$DIR"
-          PYTHON=""
-          if command -v python3 &>/dev/null; then PYTHON="python3"
-          elif [ -f "/opt/homebrew/bin/python3" ]; then PYTHON="/opt/homebrew/bin/python3"
-          elif [ -f "/usr/local/bin/python3" ]; then PYTHON="/usr/local/bin/python3"; fi
-          if [ -z "$PYTHON" ]; then
-            osascript -e 'display dialog "Python 3 not found.\nInstall with: brew install python3" with title "FreeTrace" buttons {"OK"} default button "OK" with icon stop'
-            exit 1
-          fi
-          if ! "$PYTHON" -c "import PyQt6" 2>/dev/null; then
-            osascript -e 'display dialog "PyQt6 not found.\nInstall with: pip3 install PyQt6" with title "FreeTrace" buttons {"OK"} default button "OK" with icon stop'
-            exit 1
-          fi
-          exec "$PYTHON" "$DIR/gui.py"
-          GUILAUNCHER
-          chmod +x "$DIST/FreeTrace/FreeTrace GUI.command"
-
-          # README
+          # README # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
           cat > "$DIST/FreeTrace/README.txt" << 'README'
           FreeTrace — macOS (Apple Silicon)
-          Single-molecule tracking software with fBm inference.
 
-          Usage: ./freetrace <input.tiff> <output_dir> [options]
-          GUI:   pip install PyQt6 && python gui.py
+          GUI: Double-click "FreeTrace GUI.app"
+          CLI: ./FreeTrace/freetrace <input.tiff> <output_dir> [options]
 
           If macOS blocks the app: xattr -cr /path/to/FreeTrace/
           https://github.com/JunwooParkSaribu/FreeTrace_cpp
@@ -184,6 +190,9 @@ jobs:
           for dylib in "$DIST/FreeTrace/lib"/*.dylib; do
             codesign --force --sign - "$dylib"
           done
+          if [ -d "$DIST/FreeTrace GUI.app" ]; then
+            codesign --force --deep --sign - "$DIST/FreeTrace GUI.app"
+          fi
 
           # Create .dmg (two-step: rw image → compressed) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
           CONTENT_KB=$(du -sk "$DIST" | cut -f1)

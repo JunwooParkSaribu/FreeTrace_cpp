@@ -79,8 +79,48 @@ cp "$PROJECT_DIR"/models/*.bin "$STAGING/FreeTrace/models/" 2>/dev/null || true
 # Copy ONNX Runtime dylibs
 cp "$ORT_DIR"/lib/libonnxruntime*.dylib "$STAGING/FreeTrace/lib/"
 
-# Copy GUI
-cp "$PROJECT_DIR/gui.py" "$STAGING/FreeTrace/" 2>/dev/null || true
+# --- Step 3b: Build standalone GUI app --- # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+echo "Building standalone GUI app..."
+
+# Convert PNG icon to icns if iconutil is available
+if command -v iconutil &>/dev/null && [ -f "$PROJECT_DIR/icon/freetrace_icon.png" ]; then
+    ICONSET="$PROJECT_DIR/icon/freetrace_icon.iconset"
+    mkdir -p "$ICONSET"
+    sips -z 16 16     "$PROJECT_DIR/icon/freetrace_icon.png" --out "$ICONSET/icon_16x16.png" 2>/dev/null
+    sips -z 32 32     "$PROJECT_DIR/icon/freetrace_icon.png" --out "$ICONSET/icon_16x16@2x.png" 2>/dev/null
+    sips -z 32 32     "$PROJECT_DIR/icon/freetrace_icon.png" --out "$ICONSET/icon_32x32.png" 2>/dev/null
+    sips -z 64 64     "$PROJECT_DIR/icon/freetrace_icon.png" --out "$ICONSET/icon_32x32@2x.png" 2>/dev/null
+    sips -z 128 128   "$PROJECT_DIR/icon/freetrace_icon.png" --out "$ICONSET/icon_128x128.png" 2>/dev/null
+    sips -z 256 256   "$PROJECT_DIR/icon/freetrace_icon.png" --out "$ICONSET/icon_128x128@2x.png" 2>/dev/null
+    sips -z 256 256   "$PROJECT_DIR/icon/freetrace_icon.png" --out "$ICONSET/icon_256x256.png" 2>/dev/null
+    sips -z 512 512   "$PROJECT_DIR/icon/freetrace_icon.png" --out "$ICONSET/icon_256x256@2x.png" 2>/dev/null
+    sips -z 512 512   "$PROJECT_DIR/icon/freetrace_icon.png" --out "$ICONSET/icon_512x512.png" 2>/dev/null
+    sips -z 1024 1024 "$PROJECT_DIR/icon/freetrace_icon.png" --out "$ICONSET/icon_512x512@2x.png" 2>/dev/null
+    iconutil -c icns "$ICONSET" -o "$PROJECT_DIR/icon/freetrace_icon.icns" 2>/dev/null
+    rm -rf "$ICONSET"
+fi
+
+# Build GUI with PyInstaller
+GUI_BUILT=false
+if command -v python3 &>/dev/null; then
+    python3 -m pip install pyinstaller PyQt6 --quiet 2>/dev/null
+    if python3 -m PyInstaller "$PROJECT_DIR/gui_macos.spec" \
+        --noconfirm --clean \
+        --distpath "$PROJECT_DIR/dist_gui" \
+        --workpath "$PROJECT_DIR/build_pyinstaller" 2>&1; then
+        if [ -d "$PROJECT_DIR/dist_gui/FreeTrace GUI.app" ]; then
+            cp -R "$PROJECT_DIR/dist_gui/FreeTrace GUI.app" "$STAGING/FreeTrace GUI.app"
+            GUI_BUILT=true
+            echo "GUI app built successfully."
+        fi
+    fi
+    rm -rf "$PROJECT_DIR/dist_gui" "$PROJECT_DIR/build_pyinstaller"
+fi
+
+if [ "$GUI_BUILT" = false ]; then
+    echo "WARNING: Could not build GUI app. Including gui.py as fallback."
+    cp "$PROJECT_DIR/gui.py" "$STAGING/FreeTrace/" 2>/dev/null || true
+fi # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 # --- Step 4: Fix dylib paths ---
 echo "Fixing dylib paths..."
@@ -117,51 +157,18 @@ exec "$DIR/freetrace" "$@"
 WRAPPER
 chmod +x "$STAGING/FreeTrace/run_freetrace.sh"
 
-# --- Step 5b: Create double-clickable GUI launcher --- # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-cat > "$STAGING/FreeTrace/FreeTrace GUI.command" << 'GUILAUNCHER'
-#!/bin/bash
-# Double-click this file to launch FreeTrace GUI
-DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$DIR"
-
-# Find python3
-PYTHON=""
-if command -v python3 &>/dev/null; then
-    PYTHON="python3"
-elif [ -f "/usr/local/bin/python3" ]; then
-    PYTHON="/usr/local/bin/python3"
-elif [ -f "/opt/homebrew/bin/python3" ]; then
-    PYTHON="/opt/homebrew/bin/python3"
-fi
-
-if [ -z "$PYTHON" ]; then
-    osascript -e 'display dialog "Python 3 not found.\n\nInstall with: brew install python3" with title "FreeTrace" buttons {"OK"} default button "OK" with icon stop'
-    exit 1
-fi
-
-# Check PyQt6
-if ! "$PYTHON" -c "import PyQt6" 2>/dev/null; then
-    osascript -e 'display dialog "PyQt6 not found.\n\nInstall with: pip3 install PyQt6" with title "FreeTrace" buttons {"OK"} default button "OK" with icon stop'
-    exit 1
-fi
-
-exec "$PYTHON" "$DIR/gui.py"
-GUILAUNCHER
-chmod +x "$STAGING/FreeTrace/FreeTrace GUI.command" # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-
-# --- Step 6: Create README ---
+# --- Step 6: Create README --- # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 cat > "$STAGING/FreeTrace/README.txt" << README
 FreeTrace v${VERSION} — macOS (Apple Silicon)
 
 Single-molecule tracking software with fBm inference.
 
-USAGE:
-  ./freetrace <input.tiff> <output_dir> [options]
-  ./freetrace batch <input_folder> <output_dir> [options]
+GUI:
+  Double-click "FreeTrace GUI.app" to launch the graphical interface.
 
-GUI (requires Python 3.10+ and PyQt6):
-  pip install PyQt6
-  python gui.py
+CLI:
+  ./FreeTrace/freetrace <input.tiff> <output_dir> [options]
+  ./FreeTrace/freetrace batch <input_folder> <output_dir> [options]
 
 For full documentation: https://github.com/JunwooParkSaribu/FreeTrace_cpp
 
@@ -176,6 +183,10 @@ codesign --force --sign - "$STAGING/FreeTrace/freetrace"
 for dylib in "$STAGING/FreeTrace/lib"/*.dylib; do
     codesign --force --sign - "$dylib"
 done
+# Sign the GUI app if it exists # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+if [ -d "$STAGING/FreeTrace GUI.app" ]; then
+    codesign --force --deep --sign - "$STAGING/FreeTrace GUI.app"
+fi
 
 # --- Step 8: Create .dmg ---
 echo "Creating .dmg..."
