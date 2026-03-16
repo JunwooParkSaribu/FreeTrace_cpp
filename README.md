@@ -7,8 +7,10 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 **Data privacy:** FreeTrace runs entirely on your local machine. No data is transmitted to any external server.
 
 > **Windows standalone installer (GPU):** Download the self-contained installer with full GPU support (CUDA + cuDNN + ONNX Runtime) — no compilation or dependency installation required (only NVIDIA GPU driver needed): <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 -->
-> - **RTX 2000 / 3000 series:** **[Download FreeTrace (cuDNN 9.2)](https://psilo.sorbonne-universite.fr/public.php/dav/files/NyWrgJCRdRH79oM/?accept=zip)**
-> - **RTX 4000 / 5000 series:** **[Download FreeTrace (cuDNN 9.20)](https://psilo.sorbonne-universite.fr/public.php/dav/files/ky38QxJKqdwY83K/?accept=zip)** <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 -->
+> - **RTX 2000 / 3000 series:** **[Download FreeTrace (cuDNN 9.2)](https://psilo.sorbonne-universite.fr/public.php/dav/files/EZtLySoQJjCLfLR/?accept=zip)** <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 17:30 -->
+> - **RTX 4000 / 5000 series:** **[Download FreeTrace (cuDNN 9.20)](https://psilo.sorbonne-universite.fr/public.php/dav/files/5B2qWskQTbMrNqY/?accept=zip)** <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 17:30 -->
+>
+> **Mac (Apple Silicon):** **[Download FreeTrace for macOS](https://psilo.sorbonne-universite.fr/public.php/dav/files/cqnMY6yswZDBqEA/?accept=zip)** — native CoreML inference on Apple Neural Engine. <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 17:30 -->
 
 > **Don't have a GPU? Run it on CPU:** Download a pre-built binary from the [Releases page](https://github.com/JunwooParkSaribu/FreeTrace_cpp/releases) — no compilers needed. Available for Linux, macOS (Apple Silicon), and Windows. <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 -->
 
