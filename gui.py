@@ -26,39 +26,35 @@ _BASE_W, _BASE_H = 1920, 1080
 
 
 def _find_freetrace_binary(): # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-    """Find the freetrace binary. Checks: same dir, build/, FreeTrace/, parent dirs, PATH."""
-    # When frozen by PyInstaller, __file__ points to a temp dir (_MEIPASS).
-    # Use sys.executable dir so gui.exe finds freetrace.exe next to itself.
+    """Find the freetrace binary. Checks: same dir, build/, FreeTrace/, .app parent, PATH."""
     if getattr(sys, 'frozen', False):
+        # Frozen by PyInstaller
         script_dir = os.path.dirname(sys.executable)
-        # macOS .app: sys.executable is inside .app/Contents/MacOS/
-        # The FreeTrace/ folder is a sibling of the .app bundle
-        app_dir = script_dir
-        for _ in range(4):  # walk up to find the .app's parent
-            parent = os.path.dirname(app_dir)
-            if app_dir.endswith('.app') or os.path.basename(parent) == 'Contents':
-                app_dir = parent
-            else:
+        # macOS .app: sys.executable = /path/to/FreeTrace GUI.app/Contents/MacOS/FreeTrace GUI
+        # Walk up to find the .app bundle, then its parent directory
+        app_parent = script_dir
+        path = os.path.realpath(sys.executable)
+        while path != '/':
+            if path.endswith('.app'):
+                app_parent = os.path.dirname(path)
                 break
-        # The DMG root: parent of the .app bundle
-        dmg_root = os.path.dirname(app_dir) if app_dir != script_dir else script_dir
+            path = os.path.dirname(path)
     else:
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        dmg_root = script_dir
+        app_parent = script_dir
 
     candidates = [
-        # Same directory as binary/script
+        # Same directory as binary/script (Windows: gui.exe next to freetrace.exe)
         os.path.join(script_dir, "freetrace"),
         os.path.join(script_dir, "freetrace.exe"),
         # build/ subdirectory
         os.path.join(script_dir, "build", "freetrace"),
         os.path.join(script_dir, "build", "freetrace.exe"),
-        # FreeTrace/ subdirectory (macOS DMG layout)
-        os.path.join(script_dir, "FreeTrace", "freetrace"),
-        os.path.join(dmg_root, "FreeTrace", "freetrace"),
-        # Parent directory
-        os.path.join(os.path.dirname(script_dir), "freetrace"),
-        os.path.join(os.path.dirname(script_dir), "FreeTrace", "freetrace"),
+        # macOS DMG layout: .app and FreeTrace/ are siblings
+        # e.g. /Applications/FreeTrace/freetrace
+        os.path.join(app_parent, "FreeTrace", "freetrace"),
+        # Also check directly in app_parent
+        os.path.join(app_parent, "freetrace"),
     ]
     for c in candidates:
         if os.path.isfile(c) and os.access(c, os.X_OK):
