@@ -40,16 +40,35 @@ def convert_keras_to_coreml(keras_path, output_path, model_num): # Modified by C
     """Convert Keras model to CoreML via TF SavedModel intermediary."""
     import tensorflow as tf
     import coremltools as ct
-    import tempfile, shutil
+    import shutil
 
     print(f"  Loading Keras model: {keras_path}")
     model = tf.keras.models.load_model(keras_path)
     model.summary()
 
-    # Save as TF SavedModel first (avoids TF 2.18 / coremltools incompatibility)
+    # Wrap model in a single concrete function to avoid
+    # "Only a single concrete function is supported" error from coremltools.
+    # model.export() creates multiple concrete functions; tf.saved_model.save()
+    # with an explicit signature creates exactly one.
     saved_model_dir = keras_path.replace('.keras', '_saved_model')
-    print(f"  Exporting to TF SavedModel: {saved_model_dir}")
-    model.export(saved_model_dir)
+    print(f"  Saving as TF SavedModel with single concrete function: {saved_model_dir}")
+
+    # Get input shape from model — ConvLSTM models expect (batch, seq_len, 1, 3)
+    input_shape = model.input_shape  # e.g. (None, None, 1, 3) or (None, 8, 1, 3)
+    # Use dynamic batch + fixed spatial dims
+    if input_shape[1] is None:
+        # Fully dynamic sequence length
+        spec = tf.TensorSpec(shape=[None, None, 1, 3], dtype=tf.float32, name='input')
+    else:
+        seq_len = input_shape[1]
+        spec = tf.TensorSpec(shape=[None, seq_len, 1, 3], dtype=tf.float32, name='input')
+
+    @tf.function(input_signature=[spec])
+    def serve(x):
+        return model(x, training=False)
+
+    # Save with explicit single signature — coremltools requires exactly one
+    tf.saved_model.save(model, saved_model_dir, signatures={'serving_default': serve})
 
     print(f"  Converting SavedModel to CoreML (compute_units=ALL for GPU/ANE)...")
     mlmodel = ct.convert(
