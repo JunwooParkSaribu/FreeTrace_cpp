@@ -4,60 +4,56 @@
 # Run on macOS: python3 scripts/convert_to_coreml.py
 #
 # Prerequisites:
-#   pip install coremltools==7.2 onnx
-#   (coremltools 7.x supports direct ONNX conversion; 8+ dropped it)
+#   pip install coremltools onnx onnx-tf tensorflow
 
 import os
 import sys
+import shutil
 
-def convert_with_ct7(onnx_path, output_path, model_num):
-    """Convert using coremltools 7.x direct ONNX support."""
+
+def convert_via_tensorflow(onnx_path, output_path, model_num):
+    """Convert ONNX -> TensorFlow SavedModel -> CoreML.
+    Most reliable for ConvLSTM models (Loop ops convert back to tf.while_loop)."""
+    import onnx
+    print(f"  Converting ONNX -> TF SavedModel -> CoreML...")
+
+    # Step 1: ONNX -> TF SavedModel
+    from onnx_tf.backend import prepare
+    onnx_model = onnx.load(onnx_path)
+    tf_rep = prepare(onnx_model)
+
+    tf_dir = onnx_path.replace('.onnx', '_tf_saved')
+    tf_rep.export_graph(tf_dir)
+    print(f"  -> TF SavedModel: {tf_dir}")
+
+    # Step 2: TF SavedModel -> CoreML
     import coremltools as ct
-    print(f"  Using coremltools {ct.__version__} ONNX converter...")
-
-    model = ct.converters.onnx.convert(
-        model=onnx_path,
-        minimum_ios_deployment_target='15',
-    )
-    model.save(output_path)
-    return True
-
-
-def convert_with_ct_unified(onnx_path, output_path, model_num):
-    """Convert using coremltools unified converter (needs source='auto' or torch)."""
-    import coremltools as ct
-    print(f"  Using coremltools {ct.__version__} unified converter...")
-
-    model = ct.convert(
-        onnx_path,
+    mlmodel = ct.convert(
+        tf_dir,
+        source='tensorflow',
         compute_units=ct.ComputeUnit.ALL,
     )
-    model.save(output_path)
+    mlmodel.save(output_path)
+
+    # Cleanup temp SavedModel
+    shutil.rmtree(tf_dir, ignore_errors=True)
     return True
 
 
 def convert_via_torch(onnx_path, output_path, model_num):
-    """Convert ONNX -> PyTorch -> CoreML."""
+    """Convert ONNX -> PyTorch -> CoreML (fallback)."""
     import coremltools as ct
     import torch
+    import onnx2torch
 
-    try:
-        import onnx2torch
-    except ImportError:
-        print("  pip install onnx2torch")
-        return False
+    print(f"  Converting ONNX -> PyTorch -> CoreML...")
 
-    print(f"  Converting via PyTorch intermediary...")
-
-    # Load ONNX as PyTorch model
     torch_model = onnx2torch.convert(onnx_path)
     torch_model.eval()
 
-    # Trace with example input: [batch=1, seq_len=model_num, 1, 3]
     example = torch.randn(1, model_num, 1, 3)
     traced = torch.jit.trace(torch_model, example)
 
-    # Convert to CoreML
     model = ct.convert(
         traced,
         source='pytorch',
@@ -85,10 +81,8 @@ def main():
 
         print(f"\nConverting reg_model_{n}...")
 
-        # Try methods in order of preference
         for method_name, method in [
-            ("coremltools ONNX", convert_with_ct7),
-            ("coremltools unified", convert_with_ct_unified),
+            ("TensorFlow intermediary", convert_via_tensorflow),
             ("PyTorch intermediary", convert_via_torch),
         ]:
             try:
@@ -109,8 +103,7 @@ def main():
         print(f"Rebuild FreeTrace to use them automatically.")
     else:
         print(f"\nTroubleshooting:")
-        print(f"  pip install coremltools==7.2 onnx    # try older coremltools")
-        print(f"  pip install onnx2torch               # for PyTorch intermediary")
+        print(f"  pip install coremltools onnx onnx-tf tensorflow")
 
     return 0 if success == len(model_nums) else 1
 
