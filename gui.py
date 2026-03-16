@@ -643,6 +643,42 @@ class FreeTraceGUI(QMainWindow):
             QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
                 border: 1px solid #7ec8e3;
             }}
+            QSpinBox::up-button, QDoubleSpinBox::up-button {{ /* Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 */
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: {f(18)}px;
+                border-left: 1px solid #555;
+                border-bottom: 1px solid #555;
+                border-top-right-radius: 4px;
+                background: #3a3a3a;
+            }}
+            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover {{
+                background: #4a4a4a;
+            }}
+            QSpinBox::down-button, QDoubleSpinBox::down-button {{
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: {f(18)}px;
+                border-left: 1px solid #555;
+                border-top: 1px solid #555;
+                border-bottom-right-radius: 4px;
+                background: #3a3a3a;
+            }}
+            QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+                background: #4a4a4a;
+            }}
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+                width: 0; height: 0;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-bottom: 6px solid #ccc;
+            }}
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+                width: 0; height: 0;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 6px solid #ccc;
+            }} /* Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 */
             QPushButton {{
                 background: #3a3a3a;
                 border: 1px solid #555;
