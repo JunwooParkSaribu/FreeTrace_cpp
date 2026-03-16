@@ -150,8 +150,8 @@ jobs:
           MACOS_DIR="$APP/Contents/MacOS"
           RESOURCES_DIR="$APP/Contents/Resources"
 
-          cp build/freetrace "$MACOS_DIR/"
-          chmod +x "$MACOS_DIR/freetrace"
+          cp build/freetrace "$MACOS_DIR/freetrace-bin"
+          chmod +x "$MACOS_DIR/freetrace-bin"
 
           mkdir -p "$RESOURCES_DIR/models"
           cp models/*.onnx "$RESOURCES_DIR/models/" 2>/dev/null || true
@@ -163,13 +163,13 @@ jobs:
           # Fix dylib paths
           for dylib in "$MACOS_DIR/lib"/libonnxruntime*.dylib; do
             dylib_name=$(basename "$dylib")
-            install_name_tool -change "@rpath/$dylib_name" "@executable_path/lib/$dylib_name" "$MACOS_DIR/freetrace" 2>/dev/null || true
-            install_name_tool -change "${{ matrix.ort_dir }}/lib/$dylib_name" "@executable_path/lib/$dylib_name" "$MACOS_DIR/freetrace" 2>/dev/null || true
+            install_name_tool -change "@rpath/$dylib_name" "@executable_path/lib/$dylib_name" "$MACOS_DIR/freetrace-bin" 2>/dev/null || true
+            install_name_tool -change "${{ matrix.ort_dir }}/lib/$dylib_name" "@executable_path/lib/$dylib_name" "$MACOS_DIR/freetrace-bin" 2>/dev/null || true
             install_name_tool -id "@executable_path/lib/$dylib_name" "$dylib" 2>/dev/null || true
           done
 
           # Code sign
-          codesign --force --sign - "$MACOS_DIR/freetrace"
+          codesign --force --sign - "$MACOS_DIR/freetrace-bin"
           for dylib in "$MACOS_DIR/lib"/*.dylib; do
             codesign --force --sign - "$dylib"
           done
