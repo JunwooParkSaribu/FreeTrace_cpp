@@ -121,15 +121,7 @@ jobs:
         run: |
           DIST="freetrace-${{ matrix.name }}"
           DMG_NAME="FreeTrace_v1.6.0.4_macos_arm64"
-          mkdir -p "$DIST/FreeTrace/lib" "$DIST/FreeTrace/models"
 
-          # Copy binary, models, GUI
-          cp build/freetrace "$DIST/FreeTrace/"
-          chmod +x "$DIST/FreeTrace/freetrace"
-          cp models/*.onnx "$DIST/FreeTrace/models/" 2>/dev/null || true
-          cp models/*.bin "$DIST/FreeTrace/models/" 2>/dev/null || true
-          cp ${{ matrix.ort_dir }}/${{ matrix.lib_glob }} "$DIST/FreeTrace/lib/"
-          # Build standalone GUI app with PyInstaller # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
           # Convert icon to icns
           if [ -f icon/freetrace_icon.png ]; then
             mkdir -p icon/freetrace_icon.iconset
@@ -146,54 +138,51 @@ jobs:
             rm -rf icon/freetrace_icon.iconset
           fi
 
+          # Build GUI .app with PyInstaller
           python3 -m PyInstaller gui_macos.spec --noconfirm --clean 2>&1 || true
-          if [ -d "dist/FreeTrace GUI.app" ]; then
-            ditto "dist/FreeTrace GUI.app" "$DIST/FreeTrace GUI.app"
-            echo "GUI app built successfully"
-          else
-            echo "WARNING: GUI app build failed, including gui.py as fallback"
-            cp gui.py "$DIST/FreeTrace/" 2>/dev/null || true
+          if [ ! -d "dist/FreeTrace.app" ]; then
+            echo "ERROR: GUI app build failed"
+            exit 1
           fi
-          rm -rf dist build
 
-          # Fix dylib paths to use @executable_path
-          for dylib in "$DIST/FreeTrace/lib"/libonnxruntime*.dylib; do
+          # Bundle binary, models, libs inside .app
+          APP="dist/FreeTrace.app"
+          MACOS_DIR="$APP/Contents/MacOS"
+          RESOURCES_DIR="$APP/Contents/Resources"
+
+          cp build/freetrace "$MACOS_DIR/"
+          chmod +x "$MACOS_DIR/freetrace"
+
+          mkdir -p "$RESOURCES_DIR/models"
+          cp models/*.onnx "$RESOURCES_DIR/models/" 2>/dev/null || true
+          cp models/*.bin "$RESOURCES_DIR/models/" 2>/dev/null || true
+
+          mkdir -p "$MACOS_DIR/lib"
+          cp ${{ matrix.ort_dir }}/${{ matrix.lib_glob }} "$MACOS_DIR/lib/"
+
+          # Fix dylib paths
+          for dylib in "$MACOS_DIR/lib"/libonnxruntime*.dylib; do
             dylib_name=$(basename "$dylib")
-            install_name_tool -change "@rpath/$dylib_name" "@executable_path/lib/$dylib_name" "$DIST/FreeTrace/freetrace" 2>/dev/null || true
-            install_name_tool -change "${{ matrix.ort_dir }}/lib/$dylib_name" "@executable_path/lib/$dylib_name" "$DIST/FreeTrace/freetrace" 2>/dev/null || true
+            install_name_tool -change "@rpath/$dylib_name" "@executable_path/lib/$dylib_name" "$MACOS_DIR/freetrace" 2>/dev/null || true
+            install_name_tool -change "${{ matrix.ort_dir }}/lib/$dylib_name" "@executable_path/lib/$dylib_name" "$MACOS_DIR/freetrace" 2>/dev/null || true
             install_name_tool -id "@executable_path/lib/$dylib_name" "$dylib" 2>/dev/null || true
           done
 
-          # Wrapper script
-          cat > "$DIST/FreeTrace/run_freetrace.sh" << 'SCRIPT'
-          #!/bin/bash
-          DIR="$(cd "$(dirname "$0")" && pwd)"
-          export DYLD_LIBRARY_PATH="$DIR/lib:$DYLD_LIBRARY_PATH"
-          exec "$DIR/freetrace" "$@"
-          SCRIPT
-          chmod +x "$DIST/FreeTrace/run_freetrace.sh"
-
-          # README # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-          cat > "$DIST/FreeTrace/README.txt" << 'README'
-          FreeTrace — macOS (Apple Silicon)
-
-          GUI: Double-click "FreeTrace GUI.app"
-          CLI: ./FreeTrace/freetrace <input.tiff> <output_dir> [options]
-
-          If macOS blocks the app: xattr -cr /path/to/FreeTrace/
-          https://github.com/JunwooParkSaribu/FreeTrace_cpp
-          README
-
-          # Ad-hoc code sign
-          codesign --force --sign - "$DIST/FreeTrace/freetrace"
-          for dylib in "$DIST/FreeTrace/lib"/*.dylib; do
+          # Code sign
+          codesign --force --sign - "$MACOS_DIR/freetrace"
+          for dylib in "$MACOS_DIR/lib"/*.dylib; do
             codesign --force --sign - "$dylib"
           done
-          if [ -d "$DIST/FreeTrace GUI.app" ]; then
-            codesign --force --deep --sign - "$DIST/FreeTrace GUI.app"
-          fi
+          codesign --force --deep --sign - "$APP"
 
-          # Create .dmg (two-step: rw image → ditto → compressed) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+          # Stage DMG: .app + Applications symlink
+          mkdir -p "$DIST"
+          ditto "$APP" "$DIST/FreeTrace.app"
+          ln -s /Applications "$DIST/Applications"
+
+          rm -rf dist build
+
+          # Create .dmg
           CONTENT_KB=$(du -sk "$DIST" | cut -f1)
           DMG_MB=$(( (CONTENT_KB / 1024) + 100 ))
           hdiutil create -volname "FreeTrace" -size "${DMG_MB}m" -fs HFS+ -ov "$DMG_NAME.rw.dmg"
@@ -208,7 +197,7 @@ jobs:
           rmdir "$MOUNT_POINT" 2>/dev/null || true
 
           # Also create tar.gz for backward compatibility
-          tar czf "$DIST.tar.gz" -C "$DIST" FreeTrace
+          tar czf "$DIST.tar.gz" "$DIST/FreeTrace.app"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'

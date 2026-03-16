@@ -1,6 +1,7 @@
 #!/bin/bash
 # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 # Build FreeTrace macOS .dmg installer (Apple Silicon)
+# Everything is bundled inside a single FreeTrace.app — double-click to launch.
 #
 # Usage:
 #   ./installer/build_macos_dmg.sh [--ort-dir <path>]
@@ -47,7 +48,7 @@ if [[ -z "$ORT_DIR" ]]; then
 fi
 echo "ONNX Runtime: $ORT_DIR"
 
-# --- Step 2: Build FreeTrace ---
+# --- Step 2: Build FreeTrace binary ---
 echo "Building FreeTrace..."
 BUILD_DIR="$PROJECT_DIR/build_dmg"
 rm -rf "$BUILD_DIR"
@@ -61,26 +62,9 @@ cmake "$PROJECT_DIR" \
 
 make -j$(sysctl -n hw.ncpu)
 
-# --- Step 3: Create staging directory ---
-echo "Staging files..."
-rm -rf "$STAGING"
-mkdir -p "$STAGING/FreeTrace"
-mkdir -p "$STAGING/FreeTrace/lib"
-mkdir -p "$STAGING/FreeTrace/models"
-
-# Copy binary
-cp "$BUILD_DIR/freetrace" "$STAGING/FreeTrace/"
-chmod +x "$STAGING/FreeTrace/freetrace"
-
-# Copy models
-cp "$PROJECT_DIR"/models/*.onnx "$STAGING/FreeTrace/models/" 2>/dev/null || true
-cp "$PROJECT_DIR"/models/*.bin "$STAGING/FreeTrace/models/" 2>/dev/null || true
-
-# Copy ONNX Runtime dylibs
-cp "$ORT_DIR"/lib/libonnxruntime*.dylib "$STAGING/FreeTrace/lib/"
-
-# --- Step 3b: Build standalone GUI app --- # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+# --- Step 3: Build GUI .app with PyInstaller ---
 echo "Building standalone GUI app..."
+rm -rf "$STAGING"
 
 # Convert PNG icon to icns if iconutil is available
 if command -v iconutil &>/dev/null && [ -f "$PROJECT_DIR/icon/freetrace_icon.png" ]; then
@@ -100,127 +84,126 @@ if command -v iconutil &>/dev/null && [ -f "$PROJECT_DIR/icon/freetrace_icon.png
     rm -rf "$ICONSET"
 fi
 
-# Build GUI with PyInstaller # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-GUI_BUILT=false
+# Build GUI with PyInstaller
+APP_BUILT=false
 if command -v python3 &>/dev/null; then
     python3 -m pip install pyinstaller PyQt6 --quiet 2>/dev/null || true
     cd "$PROJECT_DIR"
     if python3 -m PyInstaller gui_macos.spec --noconfirm --clean 2>&1; then
-        if [ -d "$PROJECT_DIR/dist/FreeTrace GUI.app" ]; then
-            ditto "$PROJECT_DIR/dist/FreeTrace GUI.app" "$STAGING/FreeTrace GUI.app"
-            GUI_BUILT=true
+        if [ -d "$PROJECT_DIR/dist/FreeTrace.app" ]; then
+            APP_BUILT=true
             echo "GUI app built successfully."
-        else
-            echo "WARNING: .app not found in dist/"
-            ls -la "$PROJECT_DIR/dist/" 2>/dev/null
         fi
-    else
-        echo "WARNING: PyInstaller build failed."
     fi
-    rm -rf "$PROJECT_DIR/dist" "$PROJECT_DIR/build"
 fi
 
-if [ "$GUI_BUILT" = false ]; then
-    echo "WARNING: Could not build GUI app. Including gui.py as fallback."
-    cp "$PROJECT_DIR/gui.py" "$STAGING/FreeTrace/" 2>/dev/null || true
-fi # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+if [ "$APP_BUILT" = false ]; then
+    echo "ERROR: PyInstaller build failed. Cannot create .app bundle."
+    rm -rf "$PROJECT_DIR/dist" "$PROJECT_DIR/build"
+    exit 1
+fi
 
-# --- Step 4: Fix dylib paths ---
+# --- Step 4: Bundle everything inside the .app ---
+echo "Bundling binary, models, and libraries inside .app..."
+APP_DIR="$PROJECT_DIR/dist/FreeTrace.app"
+MACOS_DIR="$APP_DIR/Contents/MacOS"
+RESOURCES_DIR="$APP_DIR/Contents/Resources"
+
+# Copy freetrace binary into Contents/MacOS/ (same dir as PyInstaller exe)
+cp "$BUILD_DIR/freetrace" "$MACOS_DIR/"
+chmod +x "$MACOS_DIR/freetrace"
+
+# Copy models into Contents/Resources/models/
+mkdir -p "$RESOURCES_DIR/models"
+cp "$PROJECT_DIR"/models/*.onnx "$RESOURCES_DIR/models/" 2>/dev/null || true
+cp "$PROJECT_DIR"/models/*.bin "$RESOURCES_DIR/models/" 2>/dev/null || true
+
+# Copy ONNX Runtime dylibs into Contents/MacOS/lib/
+mkdir -p "$MACOS_DIR/lib"
+cp "$ORT_DIR"/lib/libonnxruntime*.dylib "$MACOS_DIR/lib/"
+
+# --- Step 5: Fix dylib paths ---
 echo "Fixing dylib paths..."
-
-# Fix the binary's reference to libonnxruntime
-for dylib in "$STAGING/FreeTrace/lib"/libonnxruntime*.dylib; do
+for dylib in "$MACOS_DIR/lib"/libonnxruntime*.dylib; do
     dylib_name=$(basename "$dylib")
-    # Change the binary's reference to use @executable_path/lib/
     install_name_tool -change \
         "@rpath/$dylib_name" \
         "@executable_path/lib/$dylib_name" \
-        "$STAGING/FreeTrace/freetrace" 2>/dev/null || true
-    # Also try the absolute path variant
+        "$MACOS_DIR/freetrace" 2>/dev/null || true
     install_name_tool -change \
         "$ORT_DIR/lib/$dylib_name" \
         "@executable_path/lib/$dylib_name" \
-        "$STAGING/FreeTrace/freetrace" 2>/dev/null || true
-    # Update the dylib's own install name
+        "$MACOS_DIR/freetrace" 2>/dev/null || true
     install_name_tool -id \
         "@executable_path/lib/$dylib_name" \
         "$dylib" 2>/dev/null || true
 done
 
-# Verify
 echo "Verifying dylib references:"
-otool -L "$STAGING/FreeTrace/freetrace" | grep -i onnx || echo "(no ONNX Runtime references — statically linked or not found)"
+otool -L "$MACOS_DIR/freetrace" | grep -i onnx || echo "(no ONNX Runtime references found)"
 
-# --- Step 5: Create wrapper script ---
-cat > "$STAGING/FreeTrace/run_freetrace.sh" << 'WRAPPER'
-#!/bin/bash
-DIR="$(cd "$(dirname "$0")" && pwd)"
-export DYLD_LIBRARY_PATH="$DIR/lib:$DYLD_LIBRARY_PATH"
-exec "$DIR/freetrace" "$@"
-WRAPPER
-chmod +x "$STAGING/FreeTrace/run_freetrace.sh"
+# --- Step 6: Ad-hoc code sign ---
+echo "Code signing (ad-hoc)..."
+codesign --force --sign - "$MACOS_DIR/freetrace"
+for dylib in "$MACOS_DIR/lib"/*.dylib; do
+    codesign --force --sign - "$dylib"
+done
+codesign --force --deep --sign - "$APP_DIR"
 
-# --- Step 6: Create README --- # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-cat > "$STAGING/FreeTrace/README.txt" << README
+# --- Step 7: Stage for DMG ---
+echo "Staging DMG contents..."
+mkdir -p "$STAGING"
+ditto "$APP_DIR" "$STAGING/FreeTrace.app"
+
+# Create Applications symlink for drag-and-drop install
+ln -s /Applications "$STAGING/Applications"
+
+# Add README
+cat > "$STAGING/README.txt" << README
 FreeTrace v${VERSION} — macOS (Apple Silicon)
 
 Single-molecule tracking software with fBm inference.
 
-GUI:
-  Double-click "FreeTrace GUI.app" to launch the graphical interface.
+Installation:
+  Drag "FreeTrace.app" to Applications.
+  Double-click to launch.
 
-CLI:
-  ./FreeTrace/freetrace <input.tiff> <output_dir> [options]
-  ./FreeTrace/freetrace batch <input_folder> <output_dir> [options]
-
-For full documentation: https://github.com/JunwooParkSaribu/FreeTrace_cpp
+CLI (optional):
+  "/Applications/FreeTrace.app/Contents/MacOS/freetrace" <input.tiff> <output_dir>
 
 If macOS blocks the app (Gatekeeper):
   Right-click → Open, or run:
-  xattr -cr /path/to/FreeTrace/
+  xattr -cr "/Applications/FreeTrace.app"
+
+https://github.com/JunwooParkSaribu/FreeTrace_cpp
 README
 
-# --- Step 7: Ad-hoc code sign ---
-echo "Code signing (ad-hoc)..."
-codesign --force --sign - "$STAGING/FreeTrace/freetrace"
-for dylib in "$STAGING/FreeTrace/lib"/*.dylib; do
-    codesign --force --sign - "$dylib"
-done
-# Sign the GUI app if it exists # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-if [ -d "$STAGING/FreeTrace GUI.app" ]; then
-    codesign --force --deep --sign - "$STAGING/FreeTrace GUI.app"
-fi
+rm -rf "$PROJECT_DIR/dist" "$PROJECT_DIR/build"
 
 # --- Step 8: Create .dmg ---
 echo "Creating .dmg..."
 DMG_PATH="$PROJECT_DIR/$DMG_NAME.dmg"
 rm -f "$DMG_PATH"
 
-# Verify staging contents # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 echo "Staging contents:"
 ls -la "$STAGING/"
-echo "---"
-ls -la "$STAGING/FreeTrace/" 2>/dev/null || true
 
-# Calculate required size (content + 100MB headroom)
 CONTENT_SIZE_KB=$(du -sk "$STAGING" | cut -f1)
 DMG_SIZE_MB=$(( (CONTENT_SIZE_KB / 1024) + 100 ))
 echo "Content: ${CONTENT_SIZE_KB}KB, DMG volume: ${DMG_SIZE_MB}MB"
 
-# Two-step DMG creation: rw image → copy → convert to compressed
 MOUNT_POINT="$PROJECT_DIR/_dmg_mount_$$"
 mkdir -p "$MOUNT_POINT"
 
 hdiutil create -volname "FreeTrace" -size "${DMG_SIZE_MB}m" -fs HFS+ -ov "$DMG_PATH.rw.dmg"
 hdiutil attach "$DMG_PATH.rw.dmg" -mountpoint "$MOUNT_POINT" -nobrowse
-# Use ditto instead of cp -R (handles .app bundles and resource forks correctly on macOS)
 ditto "$STAGING/" "$MOUNT_POINT/"
 echo "Mounted DMG contents:"
 ls -la "$MOUNT_POINT/"
 hdiutil detach "$MOUNT_POINT"
 hdiutil convert "$DMG_PATH.rw.dmg" -format UDZO -o "$DMG_PATH"
 rm -f "$DMG_PATH.rw.dmg"
-rmdir "$MOUNT_POINT" 2>/dev/null || true # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+rmdir "$MOUNT_POINT" 2>/dev/null || true
 
 # Cleanup
 rm -rf "$STAGING" "$BUILD_DIR"
@@ -229,4 +212,6 @@ echo ""
 echo "=== Done ==="
 echo "DMG: $DMG_PATH"
 echo "Size: $(du -h "$DMG_PATH" | cut -f1)"
+echo ""
+echo "DMG contents: FreeTrace.app (drag to Applications to install)"
 # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
