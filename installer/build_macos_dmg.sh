@@ -117,6 +117,38 @@ exec "$DIR/freetrace" "$@"
 WRAPPER
 chmod +x "$STAGING/FreeTrace/run_freetrace.sh"
 
+# --- Step 5b: Create double-clickable GUI launcher --- # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+cat > "$STAGING/FreeTrace/FreeTrace GUI.command" << 'GUILAUNCHER'
+#!/bin/bash
+# Double-click this file to launch FreeTrace GUI
+DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$DIR"
+
+# Find python3
+PYTHON=""
+if command -v python3 &>/dev/null; then
+    PYTHON="python3"
+elif [ -f "/usr/local/bin/python3" ]; then
+    PYTHON="/usr/local/bin/python3"
+elif [ -f "/opt/homebrew/bin/python3" ]; then
+    PYTHON="/opt/homebrew/bin/python3"
+fi
+
+if [ -z "$PYTHON" ]; then
+    osascript -e 'display dialog "Python 3 not found.\n\nInstall with: brew install python3" with title "FreeTrace" buttons {"OK"} default button "OK" with icon stop'
+    exit 1
+fi
+
+# Check PyQt6
+if ! "$PYTHON" -c "import PyQt6" 2>/dev/null; then
+    osascript -e 'display dialog "PyQt6 not found.\n\nInstall with: pip3 install PyQt6" with title "FreeTrace" buttons {"OK"} default button "OK" with icon stop'
+    exit 1
+fi
+
+exec "$PYTHON" "$DIR/gui.py"
+GUILAUNCHER
+chmod +x "$STAGING/FreeTrace/FreeTrace GUI.command" # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+
 # --- Step 6: Create README ---
 cat > "$STAGING/FreeTrace/README.txt" << README
 FreeTrace v${VERSION} — macOS (Apple Silicon)
