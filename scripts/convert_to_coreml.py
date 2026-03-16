@@ -213,11 +213,13 @@ def build_pytorch_model(weights, seq_len): # Modified by Claude (claude-opus-4-6
                     h_last = self.bns[layer_idx](h_last)
                     x = h_last
 
-            # Dense layers: x is (batch, hidden)
-            x = self.fc1(x)
-            x = self.fc2(x)
-            x = self.fc3(x)
-            return x
+            # Dense layers: x is (batch, hidden) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+            # Keras architecture: Dense(256, leaky_relu) → Dense(64, leaky_relu) → Dropout(0.1) → Dense(1, relu)
+            x = F.leaky_relu(self.fc1(x), negative_slope=0.2)
+            x = F.leaky_relu(self.fc2(x), negative_slope=0.2)
+            # Dropout is no-op in eval mode
+            x = F.relu(self.fc3(x))
+            return x # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
     pt_model = ConvLSTMModel(layer_configs, seq_len)
 
@@ -300,15 +302,16 @@ def convert_via_pytorch(keras_path, output_path, model_num): # Modified by Claud
     example_input = torch.randn(1, model_num, 1, 3)
     traced = torch.jit.trace(pt_model, example_input)
 
-    print(f"  Converting to CoreML (compute_units=ALL for GPU/ANE)...")
+    print(f"  Converting to CoreML (compute_units=ALL for GPU/ANE)...") # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
     mlmodel = ct.convert(
         traced,
         inputs=[ct.TensorType(
             name='input',
             shape=ct.Shape(shape=(1, model_num, 1, 3)),
         )],
+        outputs=[ct.TensorType(name='output')],
         compute_units=ct.ComputeUnit.ALL,
-    )
+    ) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
     mlmodel.save(output_path)
     print(f"  -> OK: {output_path}")
     return True # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
