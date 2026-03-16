@@ -127,11 +127,11 @@ def build_pytorch_model(weights):
                 self.lstms.append(nn.LSTM(inp, hid, batch_first=True))
                 self.bns.append(nn.BatchNorm1d(hid))
 
-            # Dense layers
+            # Dense layers — kernel shape is (in, out), don't squeeze
             d0_in = configs[-1][1]  # last LSTM hidden size
-            d0_out = dense_w[0]['kernel'].squeeze().shape[1]
-            d1_out = dense_w[1]['kernel'].squeeze().shape[1]
-            d2_out = dense_w[2]['kernel'].squeeze().shape[1]
+            d0_out = dense_w[0]['kernel'].shape[-1]
+            d1_out = dense_w[1]['kernel'].shape[-1]
+            d2_out = dense_w[2]['kernel'].shape[-1]
             self.fc1 = nn.Linear(d0_in, d0_out)
             self.fc2 = nn.Linear(d0_out, d1_out)
             self.fc3 = nn.Linear(d1_out, d2_out)
@@ -184,8 +184,8 @@ def build_pytorch_model(weights):
             pt_model.bns[i].running_var.copy_(torch.from_numpy(bw['moving_variance']))
 
         for i, dw in enumerate(dense_w):
-            kernel = torch.from_numpy(dw['kernel'].squeeze())  # (in, out)
-            bias = torch.from_numpy(dw['bias'])
+            kernel = torch.from_numpy(dw['kernel'])  # (in, out)
+            bias = torch.from_numpy(dw['bias'].flatten())
             fc = [pt_model.fc1, pt_model.fc2, pt_model.fc3][i]
             fc.weight.copy_(kernel.T)  # PyTorch: (out, in)
             fc.bias.copy_(bias)
