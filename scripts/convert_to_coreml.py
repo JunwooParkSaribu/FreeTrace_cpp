@@ -1,109 +1,101 @@
 #!/usr/bin/env python3
 # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-# Convert FreeTrace ONNX alpha models to CoreML .mlpackage format
+# Convert FreeTrace Keras alpha models to CoreML .mlpackage format
 # Run on macOS: python3 scripts/convert_to_coreml.py
 #
 # Prerequisites:
-#   pip install coremltools onnx onnx-tf tensorflow
+#   pip install coremltools tensorflow
+#   FreeTrace Python package installed (pip install FreeTrace)
 
 import os
 import sys
-import shutil
+import glob
 
 
-def convert_via_tensorflow(onnx_path, output_path, model_num):
-    """Convert ONNX -> TensorFlow SavedModel -> CoreML.
-    Most reliable for ConvLSTM models (Loop ops convert back to tf.while_loop)."""
-    import onnx
-    print(f"  Converting ONNX -> TF SavedModel -> CoreML...")
+def find_keras_models():
+    """Find .keras model files from installed FreeTrace package or local."""
+    # Check installed FreeTrace package
+    try:
+        import FreeTrace
+        pkg_dir = os.path.dirname(FreeTrace.__file__)
+        models_dir = os.path.join(pkg_dir, 'models')
+        if os.path.isdir(models_dir):
+            return models_dir
+    except ImportError:
+        pass
 
-    # Step 1: ONNX -> TF SavedModel
-    from onnx_tf.backend import prepare
-    onnx_model = onnx.load(onnx_path)
-    tf_rep = prepare(onnx_model)
+    # Check common locations
+    for pattern in [
+        os.path.expanduser('~/claude/claude_venv/lib/python*/site-packages/FreeTrace/models'),
+        os.path.expanduser('~/*/FreeTrace/models'),
+    ]:
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
 
-    tf_dir = onnx_path.replace('.onnx', '_tf_saved')
-    tf_rep.export_graph(tf_dir)
-    print(f"  -> TF SavedModel: {tf_dir}")
+    return None
 
-    # Step 2: TF SavedModel -> CoreML
+
+def convert_keras_to_coreml(keras_path, output_path, model_num):
+    """Convert Keras model directly to CoreML."""
+    import tensorflow as tf
     import coremltools as ct
+
+    print(f"  Loading Keras model: {keras_path}")
+    model = tf.keras.models.load_model(keras_path)
+    model.summary()
+
+    print(f"  Converting to CoreML (compute_units=ALL for GPU/ANE)...")
     mlmodel = ct.convert(
-        tf_dir,
+        model,
         source='tensorflow',
         compute_units=ct.ComputeUnit.ALL,
     )
     mlmodel.save(output_path)
-
-    # Cleanup temp SavedModel
-    shutil.rmtree(tf_dir, ignore_errors=True)
-    return True
-
-
-def convert_via_torch(onnx_path, output_path, model_num):
-    """Convert ONNX -> PyTorch -> CoreML (fallback)."""
-    import coremltools as ct
-    import torch
-    import onnx2torch
-
-    print(f"  Converting ONNX -> PyTorch -> CoreML...")
-
-    torch_model = onnx2torch.convert(onnx_path)
-    torch_model.eval()
-
-    example = torch.randn(1, model_num, 1, 3)
-    traced = torch.jit.trace(torch_model, example)
-
-    model = ct.convert(
-        traced,
-        source='pytorch',
-        inputs=[ct.TensorType(name='input', shape=(ct.RangeDim(1, 1024), model_num, 1, 3))],
-        compute_units=ct.ComputeUnit.ALL,
-    )
-    model.save(output_path)
+    print(f"  -> OK: {output_path}")
     return True
 
 
 def main():
-    models_dir = os.path.join(os.path.dirname(__file__), '..', 'models')
-    models_dir = os.path.abspath(models_dir)
+    output_dir = os.path.join(os.path.dirname(__file__), '..', 'models')
+    output_dir = os.path.abspath(output_dir)
+
+    # Find Keras source models
+    keras_dir = find_keras_models()
+    if not keras_dir:
+        print("ERROR: Cannot find FreeTrace Keras models.")
+        print("Install FreeTrace: pip install FreeTrace")
+        print("Or specify path: KERAS_MODELS_DIR=/path/to/models python3 scripts/convert_to_coreml.py")
+        return 1
+
+    # Allow override via env var
+    keras_dir = os.environ.get('KERAS_MODELS_DIR', keras_dir)
+    print(f"Keras models directory: {keras_dir}")
+    print(f"Output directory: {output_dir}")
 
     model_nums = [3, 5, 8]
     success = 0
 
     for n in model_nums:
-        onnx_path = os.path.join(models_dir, f'reg_model_{n}.onnx')
-        output_path = os.path.join(models_dir, f'reg_model_{n}.mlpackage')
+        keras_path = os.path.join(keras_dir, f'reg_model_{n}.keras')
+        output_path = os.path.join(output_dir, f'reg_model_{n}.mlpackage')
 
-        if not os.path.exists(onnx_path):
-            print(f"Skipping reg_model_{n}: {onnx_path} not found")
+        if not os.path.exists(keras_path):
+            print(f"\nSkipping reg_model_{n}: {keras_path} not found")
             continue
 
         print(f"\nConverting reg_model_{n}...")
-
-        for method_name, method in [
-            ("TensorFlow intermediary", convert_via_tensorflow),
-            ("PyTorch intermediary", convert_via_torch),
-        ]:
-            try:
-                if method(onnx_path, output_path, n):
-                    print(f"  -> OK: {output_path}")
-                    success += 1
-                    break
-            except Exception as e:
-                print(f"  -> {method_name} failed: {e}")
-                continue
-        else:
-            print(f"  -> ALL METHODS FAILED for reg_model_{n}")
+        try:
+            if convert_keras_to_coreml(keras_path, output_path, n):
+                success += 1
+        except Exception as e:
+            print(f"  -> FAILED: {e}")
 
     print(f"\n{'='*40}")
     print(f"Converted {success}/{len(model_nums)} models")
     if success > 0:
-        print(f"CoreML models saved to: {models_dir}/")
-        print(f"Rebuild FreeTrace to use them automatically.")
-    else:
-        print(f"\nTroubleshooting:")
-        print(f"  pip install coremltools onnx onnx-tf tensorflow")
+        print(f"CoreML models saved to: {output_dir}/")
+        print(f"Rebuild FreeTrace C++ to use GPU/ANE acceleration.")
 
     return 0 if success == len(model_nums) else 1
 
