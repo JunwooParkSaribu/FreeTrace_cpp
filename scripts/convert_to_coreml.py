@@ -104,16 +104,18 @@ def build_pytorch_model(weights):
     bn_w = weights['bn']
     dense_w = weights['dense']
 
-    # Determine layer sizes from weights
+    # Determine layer sizes from weights  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+    # Kernel shape: (kernel_size, input_ch, 4*filters)
+    # With spatial_dim=1 and padding='same', only the center element of the
+    # kernel contributes (rest multiply zero-padded positions).
     lstm_configs = []
     for cw in conv_lstm_w:
-        kernel = cw['kernel']  # (1, 1, in_ch, 4*h) or (1, in_ch, 4*h) or similar
-        kernel = kernel.squeeze()  # → (in_ch, 4*h)
-        in_size = kernel.shape[0]
-        hidden_4 = kernel.shape[1]
+        kernel = cw['kernel']  # (kernel_size, in_ch, 4*h)
+        in_size = kernel.shape[1]      # input channels
+        hidden_4 = kernel.shape[2]     # 4 * filters
         hidden_size = hidden_4 // 4
         lstm_configs.append((in_size, hidden_size))
-        print(f"    LSTM layer: input={in_size}, hidden={hidden_size}")
+        print(f"    LSTM layer: input={in_size}, hidden={hidden_size} (kernel_size={kernel.shape[0]})")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
     # Build model
     class AlphaModel(nn.Module):
@@ -160,10 +162,15 @@ def build_pytorch_model(weights):
 
     # Transfer weights
     with torch.no_grad():
-        for i, cw in enumerate(conv_lstm_w):
-            kernel = torch.from_numpy(cw['kernel'].squeeze())           # (in, 4*h)
-            rec_kernel = torch.from_numpy(cw['recurrent_kernel'].squeeze())  # (h, 4*h)
-            bias = torch.from_numpy(cw['bias'])                         # (4*h,)
+        for i, cw in enumerate(conv_lstm_w):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+            # kernel: (kernel_size, in_ch, 4*h) — take center slice
+            k = cw['kernel']
+            center = k.shape[0] // 2
+            kernel = torch.from_numpy(k[center])                         # (in, 4*h)
+            rk = cw['recurrent_kernel']
+            rc = rk.shape[0] // 2
+            rec_kernel = torch.from_numpy(rk[rc])                        # (h, 4*h)
+            bias = torch.from_numpy(cw['bias'])                          # (4*h,)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
             pt_model.lstms[i].weight_ih_l0.copy_(kernel.T)      # (4*h, in)
             pt_model.lstms[i].weight_hh_l0.copy_(rec_kernel.T)  # (4*h, h)
