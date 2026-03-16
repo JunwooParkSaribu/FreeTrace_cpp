@@ -3,6 +3,10 @@
 
 #ifdef USE_ONNXRUNTIME
 #include <onnxruntime_cxx_api.h>
+#if defined(__APPLE__) && __has_include(<coreml_provider_factory.h>) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+#include <coreml_provider_factory.h>
+#define HAS_COREML_PROVIDER 1
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 #endif
 
 #include <cmath>
@@ -229,14 +233,26 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
         opts.SetIntraOpNumThreads(1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-        bool gpu_enabled = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
+        bool gpu_enabled = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+#if defined(HAS_COREML_PROVIDER)
+        // Try CoreML execution provider (Apple Neural Engine + Metal GPU)
+        try {
+            uint32_t coreml_flags = 0;
+            OrtStatus* status = OrtSessionOptionsAppendExecutionProvider_CoreML(opts, coreml_flags);
+            if (status == nullptr) {
+                gpu_enabled = true;
+            }
+        } catch (...) {
+        }
+#elif !defined(__APPLE__)
         try {
             OrtCUDAProviderOptions cuda_opts;
             cuda_opts.device_id = 0;
             opts.AppendExecutionProvider_CUDA(cuda_opts);
             gpu_enabled = true;
         } catch (...) {
-        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
+        }
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
         models.reg_model_nums = {3, 5, 8};
         models.crits = {3, 5, 8, 8192};
@@ -278,12 +294,16 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
             std::cout << "Loaded direct k model weights (fast path)" << std::endl;
         }
 
-        models.loaded = true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
-        if (gpu_enabled) {
-            std::cout << "\n  NN inference: GPU (CUDA) - fast\n" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+        models.loaded = true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+        if (gpu_enabled) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+#if defined(HAS_COREML_PROVIDER)
+            std::cout << "\n  NN inference: CoreML (Apple Neural Engine / Metal)\n" << std::endl;
+#else
+            std::cout << "\n  NN inference: GPU (CUDA)\n" << std::endl;
+#endif
         } else {
-            std::cout << "\n  NN inference: CPU - this may be slower than GPU\n" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
-        }
+            std::cout << "\n  NN inference: CPU - this may be slower\n" << std::endl;
+        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
         return true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     } catch (const Ort::Exception&) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
         return false;

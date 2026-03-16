@@ -3481,11 +3481,15 @@ static std::vector<std::string> model_search_dirs(const std::string& loc_csv_pat
     if (slash != std::string::npos)
         dirs.push_back(loc_csv_path.substr(0, slash) + sep + ".." + sep + "models");
     std::string ed = get_exe_dir();
-    if (!ed.empty()) {
+    if (!ed.empty()) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
         dirs.push_back(ed + sep + "models");
         dirs.push_back(ed + sep + ".." + sep + "models");
-        dirs.push_back(ed + sep + ".." + sep + ".." + sep + "models"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
-    }
+        dirs.push_back(ed + sep + ".." + sep + ".." + sep + "models");
+#ifdef __APPLE__
+        // macOS .app bundle: exe is at Contents/MacOS/, resources at Contents/Resources/
+        dirs.push_back(ed + sep + ".." + sep + "Resources" + sep + "models");
+#endif
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
     return dirs;
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 

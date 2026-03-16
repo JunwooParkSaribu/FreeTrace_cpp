@@ -26,35 +26,20 @@ _BASE_W, _BASE_H = 1920, 1080
 
 
 def _find_freetrace_binary(): # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-    """Find the freetrace binary. Checks: same dir, build/, FreeTrace/, .app parent, PATH."""
+    """Find the freetrace binary bundled inside .app or next to gui.py."""
     if getattr(sys, 'frozen', False):
-        # Frozen by PyInstaller
+        # Frozen by PyInstaller — binary is inside .app/Contents/MacOS/
         script_dir = os.path.dirname(sys.executable)
-        # macOS .app: sys.executable = /path/to/FreeTrace GUI.app/Contents/MacOS/FreeTrace GUI
-        # Walk up to find the .app bundle, then its parent directory
-        app_parent = script_dir
-        path = os.path.realpath(sys.executable)
-        while path != '/':
-            if path.endswith('.app'):
-                app_parent = os.path.dirname(path)
-                break
-            path = os.path.dirname(path)
     else:
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        app_parent = script_dir
 
     candidates = [
-        # Same directory as binary/script (Windows: gui.exe next to freetrace.exe)
+        # Inside .app/Contents/MacOS/ (macOS bundle) or same dir as gui.py
         os.path.join(script_dir, "freetrace"),
         os.path.join(script_dir, "freetrace.exe"),
-        # build/ subdirectory
+        # build/ subdirectory (development)
         os.path.join(script_dir, "build", "freetrace"),
         os.path.join(script_dir, "build", "freetrace.exe"),
-        # macOS DMG layout: .app and FreeTrace/ are siblings
-        # e.g. /Applications/FreeTrace/freetrace
-        os.path.join(app_parent, "FreeTrace", "freetrace"),
-        # Also check directly in app_parent
-        os.path.join(app_parent, "freetrace"),
     ]
     for c in candidates:
         if os.path.isfile(c) and os.access(c, os.X_OK):
@@ -95,13 +80,22 @@ class FreeTraceWorker(QThread):
             self.log.emit("")
             self.progress.emit(5, "Running...")
 
+            env = os.environ.copy() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+            # Set library path so freetrace finds bundled dylibs/shared libs
+            bin_dir = os.path.dirname(self.binary)
+            lib_dir = os.path.join(bin_dir, "lib")
+            if sys.platform == "darwin":
+                env["DYLD_LIBRARY_PATH"] = lib_dir + ":" + env.get("DYLD_LIBRARY_PATH", "")
+            elif sys.platform == "linux":
+                env["LD_LIBRARY_PATH"] = lib_dir + ":" + env.get("LD_LIBRARY_PATH", "")
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-            )
+                env=env,
+            ) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
             for line in self._process.stdout:
                 line = line.rstrip("\n")

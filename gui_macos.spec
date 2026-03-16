@@ -1,5 +1,5 @@
 # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-# PyInstaller spec file for building FreeTrace GUI.app on macOS
+# PyInstaller spec file for building FreeTrace.app on macOS
 # Usage: pyinstaller gui_macos.spec
 # Requires: pip install pyinstaller PyQt6
 
@@ -38,7 +38,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='FreeTrace GUI',
+    name='FreeTrace',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -55,16 +55,16 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name='FreeTrace GUI',
+    name='FreeTrace',
 )
 
 app = BUNDLE(
     coll,
-    name='FreeTrace GUI.app',
+    name='FreeTrace.app',
     icon=icon_file,
     bundle_identifier='fr.sorbonne-universite.freetrace',
     info_plist={
-        'CFBundleDisplayName': 'FreeTrace GUI',
+        'CFBundleDisplayName': 'FreeTrace',
         'CFBundleShortVersionString': '1.6.0.4',
         'NSHighResolutionCapable': True,
     },
