@@ -108,7 +108,7 @@ def build_pytorch_model(weights, seq_len): # Modified by Claude (claude-opus-4-6
 
     Keras ConvLSTM kernel: (kernel_size, in_ch, 4*filters)
     PyTorch Conv1d weight: (out_ch, in_ch, kernel_size)
-    Mapping: pytorch_weight = keras_kernel.transpose(2, 0, 1)
+    Mapping: pytorch_weight = keras_kernel.transpose(2, 1, 0)
     """
     import torch
     import torch.nn as nn
@@ -214,13 +214,13 @@ def build_pytorch_model(weights, seq_len): # Modified by Claude (claude-opus-4-6
             # Keras kernel: (ks, in_ch, 4*h) → PyTorch Conv1d: (4*h, in_ch, ks)
             kernel = cw['kernel']  # (ks, in_ch, 4*h)
             pt_model.conv_ih[i].weight.copy_(
-                torch.from_numpy(kernel.transpose(2, 0, 1)))  # (4*h, in_ch, ks)
+                torch.from_numpy(kernel.transpose(2, 1, 0)))  # (4*h, in_ch, ks)
             pt_model.conv_ih[i].bias.copy_(
                 torch.from_numpy(cw['bias']))
 
             rec_kernel = cw['recurrent_kernel']  # (ks, h, 4*h)
             pt_model.conv_hh[i].weight.copy_(
-                torch.from_numpy(rec_kernel.transpose(2, 0, 1)))  # (4*h, h, ks)
+                torch.from_numpy(rec_kernel.transpose(2, 1, 0)))  # (4*h, h, ks)
 
         for i, bw in enumerate(bn_w):
             pt_model.bns[i].weight.copy_(torch.from_numpy(bw['gamma']))
