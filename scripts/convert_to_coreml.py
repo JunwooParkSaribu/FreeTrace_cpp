@@ -139,9 +139,9 @@ def build_pytorch_model(weights, seq_len): # Modified by Claude (claude-opus-4-6
             self.hidden_sizes = []
 
             for in_ch, hidden, ks in configs:
-                pad = ks // 2  # same padding
-                self.conv_ih.append(nn.Conv1d(in_ch, 4 * hidden, ks, padding=pad, bias=True))
-                self.conv_hh.append(nn.Conv1d(hidden, 4 * hidden, ks, padding=pad, bias=False))
+                # padding='same' matches Keras (asymmetric pad for even kernel sizes)
+                self.conv_ih.append(nn.Conv1d(in_ch, 4 * hidden, ks, padding='same', bias=True))
+                self.conv_hh.append(nn.Conv1d(hidden, 4 * hidden, ks, padding='same', bias=False))
                 self.hidden_sizes.append(hidden)
 
             # BatchNorm layers (eps=0.001 to match Keras default)
