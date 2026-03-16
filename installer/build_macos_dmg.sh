@@ -109,9 +109,9 @@ APP_DIR="$PROJECT_DIR/dist/FreeTrace.app"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
 RESOURCES_DIR="$APP_DIR/Contents/Resources"
 
-# Copy freetrace binary into Contents/MacOS/ (same dir as PyInstaller exe)
-cp "$BUILD_DIR/freetrace" "$MACOS_DIR/"
-chmod +x "$MACOS_DIR/freetrace"
+# Copy freetrace binary into Contents/MacOS/ (renamed to avoid case collision with PyInstaller exe)
+cp "$BUILD_DIR/freetrace" "$MACOS_DIR/freetrace-bin"
+chmod +x "$MACOS_DIR/freetrace-bin"
 
 # Copy models into Contents/Resources/models/
 mkdir -p "$RESOURCES_DIR/models"
@@ -129,22 +129,22 @@ for dylib in "$MACOS_DIR/lib"/libonnxruntime*.dylib; do
     install_name_tool -change \
         "@rpath/$dylib_name" \
         "@executable_path/lib/$dylib_name" \
-        "$MACOS_DIR/freetrace" 2>/dev/null || true
+        "$MACOS_DIR/freetrace-bin" 2>/dev/null || true
     install_name_tool -change \
         "$ORT_DIR/lib/$dylib_name" \
         "@executable_path/lib/$dylib_name" \
-        "$MACOS_DIR/freetrace" 2>/dev/null || true
+        "$MACOS_DIR/freetrace-bin" 2>/dev/null || true
     install_name_tool -id \
         "@executable_path/lib/$dylib_name" \
         "$dylib" 2>/dev/null || true
 done
 
 echo "Verifying dylib references:"
-otool -L "$MACOS_DIR/freetrace" | grep -i onnx || echo "(no ONNX Runtime references found)"
+otool -L "$MACOS_DIR/freetrace-bin" | grep -i onnx || echo "(no ONNX Runtime references found)"
 
 # --- Step 6: Ad-hoc code sign ---
 echo "Code signing (ad-hoc)..."
-codesign --force --sign - "$MACOS_DIR/freetrace"
+codesign --force --sign - "$MACOS_DIR/freetrace-bin"
 for dylib in "$MACOS_DIR/lib"/*.dylib; do
     codesign --force --sign - "$dylib"
 done
@@ -169,7 +169,7 @@ Installation:
   Double-click to launch.
 
 CLI (optional):
-  "/Applications/FreeTrace.app/Contents/MacOS/freetrace" <input.tiff> <output_dir>
+  "/Applications/FreeTrace.app/Contents/MacOS/freetrace-bin" <input.tiff> <output_dir>
 
 If macOS blocks the app (Gatekeeper):
   Right-click → Open, or run:
