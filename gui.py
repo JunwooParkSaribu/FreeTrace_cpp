@@ -163,13 +163,19 @@ class FreeTraceWorker(QThread):
                 line = line.rstrip("\n")
                 self.log.emit(line)
 
-                # Parse progress from output
+                # Parse progress from output # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
                 if "Localization" in line and "===" in line:
                     self.progress.emit(10, "Localization")
                 elif "Tracking" in line and "===" in line:
-                    self.progress.emit(55, "Tracking")
+                    self.progress.emit(50, "Tracking")
+                elif "Starting trajectory inference" in line:
+                    self.progress.emit(55, "Trajectory reconstruction")
+                elif "Estimating H for" in line:
+                    self.progress.emit(80, "Estimating H for trajectories")
+                elif "Estimating K" in line:
+                    self.progress.emit(85, "Estimating K for trajectories")
                 elif "Batch complete" in line:
-                    self.progress.emit(95, "Finishing")
+                    self.progress.emit(95, "Finishing") # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
                 if self._cancel:
                     break
