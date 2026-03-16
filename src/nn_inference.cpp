@@ -1,8 +1,12 @@
-// Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+// Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 #include "nn_inference.h"
 
 #ifdef USE_ONNXRUNTIME
 #include <onnxruntime_cxx_api.h>
+#endif
+
+#ifdef USE_COREML
+#include "nn_coreml.h"
 #endif
 
 #include <cmath>
@@ -285,6 +289,16 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
         }
 
         models.loaded = true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+
+#ifdef USE_COREML
+        // Try CoreML native inference for alpha models (GPU/ANE acceleration)
+        if (coreml_load_alpha_models(models_dir.c_str(),
+                                     models.reg_model_nums.data(),
+                                     (int)models.reg_model_nums.size())) {
+            models.use_coreml = true;
+            std::cout << "\n  NN inference: CoreML (GPU / Apple Neural Engine)\n" << std::endl;
+        } else
+#endif
         if (gpu_enabled) {
             std::cout << "\n  NN inference: GPU (CUDA)\n" << std::endl;
         } else {
@@ -318,6 +332,9 @@ void free_nn_models(NNModels& models) { // Modified by Claude (claude-opus-4-6, 
         models.env = nullptr;
     }
     models.loaded = false;
+#ifdef USE_COREML // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+    if (models.use_coreml) coreml_free_models();
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 
@@ -357,7 +374,19 @@ float predict_alpha_nn(const NNModels& models,
         for (int i = 0; i < model_num * 3; i++) input_data[offset_y + i] = y_sig[i];
     }
 
-    try { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+#ifdef USE_COREML // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+    if (models.use_coreml) {
+        std::vector<float> pred_data(batch_size);
+        if (coreml_predict_alpha(model_num, input_data.data(), batch_size, model_num, pred_data.data())) {
+            std::vector<double> preds(batch_size);
+            for (int i = 0; i < batch_size; i++) preds[i] = (double)pred_data[i];
+            if (preds.size() <= 4) return (float)vec_mean_d(preds);
+            return (float)iqr_mean_d(preds);
+        }
+    }
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+
+    try {
         auto& mem_info = *static_cast<Ort::MemoryInfo*>(models.mem_info);
         std::vector<int64_t> shape = {batch_size, model_num, 1, 3};
         Ort::Value input_tensor = Ort::Value::CreateTensor<float>(mem_info, input_data.data(),
@@ -378,7 +407,7 @@ float predict_alpha_nn(const NNModels& models,
     } catch (const Ort::Exception& e) {
         std::cerr << "Alpha predict error: " << e.what() << std::endl;
         return 1.0f;
-    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    }
 }
 
 std::vector<float> predict_alpha_nn_batch(const NNModels& models, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
@@ -438,25 +467,41 @@ std::vector<float> predict_alpha_nn_batch(const NNModels& models, // Modified by
         for (auto& info : infos) total_batch += info.num_windows;
         if (total_batch == 0) continue;
 
-        try {
-            auto& mem_info = *static_cast<Ort::MemoryInfo*>(models.mem_info);
-            std::vector<int64_t> shape = {total_batch, model_num, 1, 3};
-            Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-                mem_info, data.data(), data.size(), shape.data(), shape.size());
-            const char* input_names[] = {models.alpha_input_names.at(model_num).c_str()};
-            const char* output_names[] = {models.alpha_output_names.at(model_num).c_str()};
+        std::vector<float> pred_buf(total_batch); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+        bool predicted = false;
 
-            auto outputs = session->Run(*static_cast<Ort::RunOptions*>(models.run_options),
-                                        input_names, &input_tensor, 1, output_names, 1);
+#ifdef USE_COREML
+        if (models.use_coreml) {
+            predicted = coreml_predict_alpha(model_num, data.data(),
+                                            total_batch, model_num, pred_buf.data());
+        }
+#endif
+        if (!predicted) {
+            try {
+                auto& mem_info = *static_cast<Ort::MemoryInfo*>(models.mem_info);
+                std::vector<int64_t> shape = {total_batch, model_num, 1, 3};
+                Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+                    mem_info, data.data(), data.size(), shape.data(), shape.size());
+                const char* input_names[] = {models.alpha_input_names.at(model_num).c_str()};
+                const char* output_names[] = {models.alpha_output_names.at(model_num).c_str()};
 
-            float* pred_data = outputs[0].GetTensorMutableData<float>();
+                auto outputs = session->Run(*static_cast<Ort::RunOptions*>(models.run_options),
+                                            input_names, &input_tensor, 1, output_names, 1);
 
-            // Unpack: each trajectory gets its num_windows predictions
+                float* p = outputs[0].GetTensorMutableData<float>();
+                for (int i = 0; i < total_batch; i++) pred_buf[i] = p[i];
+                predicted = true;
+            } catch (const Ort::Exception& e) {
+                std::cerr << "Alpha batch predict error: " << e.what() << std::endl;
+            }
+        }
+
+        if (predicted) {
             int offset = 0;
             for (auto& info : infos) {
                 std::vector<double> preds(info.num_windows);
                 for (int i = 0; i < info.num_windows; i++)
-                    preds[i] = (double)pred_data[offset + i];
+                    preds[i] = (double)pred_buf[offset + i];
                 offset += info.num_windows;
 
                 if (preds.size() <= 4)
@@ -464,9 +509,7 @@ std::vector<float> predict_alpha_nn_batch(const NNModels& models, // Modified by
                 else
                     results[info.orig_idx] = (float)iqr_mean_d(preds);
             }
-        } catch (const Ort::Exception& e) {
-            std::cerr << "Alpha batch predict error: " << e.what() << std::endl;
-        }
+        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
     }
     return results;
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
