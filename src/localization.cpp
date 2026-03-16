@@ -131,7 +131,12 @@ std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& heigh
                         v = reinterpret_cast<float*>(buf.data())[c];
                     else
                         v = static_cast<float>(reinterpret_cast<uint32_t*>(buf.data())[c]);
-                }
+                } else if (bits_per_sample == 64) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 18:15
+                    if (sample_format == SAMPLEFORMAT_IEEEFP)
+                        v = static_cast<float>(reinterpret_cast<double*>(buf.data())[c]);
+                    else
+                        v = static_cast<float>(reinterpret_cast<uint64_t*>(buf.data())[c]);
+                } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 18:15
                 data[n * height * width + r * width + c] = v;
             }
         }
