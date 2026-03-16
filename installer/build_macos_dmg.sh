@@ -114,9 +114,11 @@ cp "$BUILD_DIR/freetrace" "$MACOS_DIR/freetrace-bin"
 chmod +x "$MACOS_DIR/freetrace-bin"
 
 # Copy models into Contents/Resources/models/
-mkdir -p "$RESOURCES_DIR/models"
+mkdir -p "$RESOURCES_DIR/models" # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 cp "$PROJECT_DIR"/models/*.onnx "$RESOURCES_DIR/models/" 2>/dev/null || true
 cp "$PROJECT_DIR"/models/*.bin "$RESOURCES_DIR/models/" 2>/dev/null || true
+# CoreML models for GPU/ANE inference on Apple Silicon
+cp -R "$PROJECT_DIR"/models/*.mlpackage "$RESOURCES_DIR/models/" 2>/dev/null || true
 
 # Copy ONNX Runtime dylibs into Contents/MacOS/lib/
 mkdir -p "$MACOS_DIR/lib"
