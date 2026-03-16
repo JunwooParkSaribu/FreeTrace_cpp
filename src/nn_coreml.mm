@@ -107,7 +107,7 @@ int coreml_predict_alpha(int model_num, const float* input_data,
                 return 0;
             }
 
-            MLMultiArray* result = [output featureValueForName:@"dense_2"].multiArrayValue;
+            MLMultiArray* result = [output featureValueForName:@"output"].multiArrayValue; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
             if (!result) return 0;
 
             output_data[b] = ((float*)result.dataPointer)[0];
