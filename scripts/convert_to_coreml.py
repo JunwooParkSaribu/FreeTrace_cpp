@@ -36,24 +36,33 @@ def find_keras_models():
     return None
 
 
-def convert_keras_to_coreml(keras_path, output_path, model_num):
-    """Convert Keras model directly to CoreML."""
+def convert_keras_to_coreml(keras_path, output_path, model_num): # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+    """Convert Keras model to CoreML via TF SavedModel intermediary."""
     import tensorflow as tf
     import coremltools as ct
+    import tempfile, shutil
 
     print(f"  Loading Keras model: {keras_path}")
     model = tf.keras.models.load_model(keras_path)
     model.summary()
 
-    print(f"  Converting to CoreML (compute_units=ALL for GPU/ANE)...")
+    # Save as TF SavedModel first (avoids TF 2.18 / coremltools incompatibility)
+    saved_model_dir = keras_path.replace('.keras', '_saved_model')
+    print(f"  Exporting to TF SavedModel: {saved_model_dir}")
+    model.export(saved_model_dir)
+
+    print(f"  Converting SavedModel to CoreML (compute_units=ALL for GPU/ANE)...")
     mlmodel = ct.convert(
-        model,
+        saved_model_dir,
         source='tensorflow',
         compute_units=ct.ComputeUnit.ALL,
     )
     mlmodel.save(output_path)
+
+    # Cleanup temp SavedModel
+    shutil.rmtree(saved_model_dir, ignore_errors=True)
     print(f"  -> OK: {output_path}")
-    return True
+    return True # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 
 def main():
