@@ -8,9 +8,9 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 
 > **Standalone installer (GPU):** Download the self-contained installer — no compilation or dependency installation required: <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 18:00 -->
 > - **Windows (NVIDIA GPU required):**
->   - **RTX 2000 / 3000 series:** **[Download FreeTrace (cuDNN 9.2)](https://psilo.sorbonne-universite.fr/public.php/dav/files/EZtLySoQJjCLfLR/?accept=zip)**
->   - **RTX 4000 / 5000 series:** **[Download FreeTrace (cuDNN 9.20)](https://psilo.sorbonne-universite.fr/public.php/dav/files/5B2qWskQTbMrNqY/?accept=zip)**
-> - **Mac (Apple Silicon — Apple Neural Engine):** **[Download FreeTrace for macOS](https://psilo.sorbonne-universite.fr/public.php/dav/files/cqnMY6yswZDBqEA/?accept=zip)** <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 18:00 -->
+>   - **RTX 2000 / 3000 series:** **[Download FreeTrace (cuDNN 9.2)](https://psilo.sorbonne-universite.fr/public.php/dav/files/xz6qFa2zTxDQPYJ/?accept=zip)** <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 19:00 -->
+>   - **RTX 4000 / 5000 series:** **[Download FreeTrace (cuDNN 9.20)](https://psilo.sorbonne-universite.fr/public.php/dav/files/ToCEbcMSkqyMZHD/?accept=zip)**
+> - **Mac (Apple Silicon — Apple Neural Engine):** **[Download FreeTrace for macOS](https://psilo.sorbonne-universite.fr/public.php/dav/files/z5SWaBXqns4tB53/?accept=zip)** <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 19:00 --> <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 18:00 -->
 
 > **Don't have a GPU? Run it on CPU:** Download a pre-built binary from the [Releases page](https://github.com/JunwooParkSaribu/FreeTrace_cpp/releases) — no compilers needed. Available for Linux, macOS (Apple Silicon), and Windows. <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 -->
 
