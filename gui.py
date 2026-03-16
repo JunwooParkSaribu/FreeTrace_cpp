@@ -12,7 +12,8 @@ import subprocess
 import shutil
 
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QProcess
-from PyQt6.QtGui import QPixmap, QFont, QColor, QPalette, QIcon  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 23:55
+from PyQt6.QtGui import QPixmap, QFont, QColor, QPalette, QIcon, QPainter, QPolygon  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+from PyQt6.QtCore import QPoint
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLabel, QLineEdit, QPushButton, QCheckBox,
@@ -23,6 +24,34 @@ from PyQt6.QtWidgets import (
 
 # Base window size — font sizes are defined relative to this
 _BASE_W, _BASE_H = 1920, 1080
+
+# Generate arrow icon PNGs for spin box buttons (CSS border-triangles don't work in Qt) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+import tempfile as _tempfile
+_arrow_dir = _tempfile.mkdtemp(prefix="freetrace_arrows_")
+_arrow_up_path = os.path.join(_arrow_dir, "arrow_up.png")
+_arrow_down_path = os.path.join(_arrow_dir, "arrow_down.png")
+_arrows_generated = False
+
+
+def _generate_arrow_icons():
+    global _arrows_generated
+    if _arrows_generated:
+        return
+    size = 12
+    for path, points in [
+        (_arrow_up_path, [QPoint(1, size - 2), QPoint(size - 1, size - 2), QPoint(size // 2, 2)]),
+        (_arrow_down_path, [QPoint(1, 2), QPoint(size - 1, 2), QPoint(size // 2, size - 2)]),
+    ]:
+        pix = QPixmap(size, size)
+        pix.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QColor("#cccccc"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawPolygon(QPolygon(points))
+        painter.end()
+        pix.save(path)
+    _arrows_generated = True # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 
 def _find_freetrace_binary(): # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
@@ -202,6 +231,7 @@ class FreeTraceGUI(QMainWindow):
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._apply_fonts)
+        _generate_arrow_icons() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
         self._setup_ui()
         self._apply_fonts()
 
@@ -685,17 +715,13 @@ class FreeTraceGUI(QMainWindow):
             QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
                 background: #4a4a4a;
             }}
-            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
-                width: 0; height: 0;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-bottom: 6px solid #ccc;
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{ /* Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 */
+                image: url({_arrow_up_path});
+                width: {f(10)}px; height: {f(10)}px;
             }}
             QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
-                width: 0; height: 0;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 6px solid #ccc;
+                image: url({_arrow_down_path});
+                width: {f(10)}px; height: {f(10)}px;
             }} /* Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 */
             QPushButton {{
                 background: #3a3a3a;
@@ -742,7 +768,7 @@ class FreeTraceGUI(QMainWindow):
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-def main():  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+def main():  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
     if getattr(sys, 'frozen', False):
         os.chdir(os.path.dirname(sys.executable))
     else:
@@ -751,7 +777,11 @@ def main():  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
     app.setApplicationName("FreeTrace")
     win = FreeTraceGUI()
     win.show()
-    sys.exit(app.exec())
+    ret = app.exec()
+    # Cleanup temp arrow icons
+    import shutil as _shutil
+    _shutil.rmtree(_arrow_dir, ignore_errors=True)
+    sys.exit(ret) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 
 if __name__ == "__main__":
