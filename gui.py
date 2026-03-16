@@ -188,7 +188,12 @@ class FreeTraceGUI(QMainWindow):
         _icon_path = os.path.join(_base, "icon", "freetrace_icon.png")
         if os.path.exists(_icon_path):
             self.setWindowIcon(QIcon(_icon_path))
-        self.setMinimumSize(_BASE_W, _BASE_H)
+        # Scale initial size to ~70% of screen, with a reasonable minimum # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+        screen = QApplication.primaryScreen().availableGeometry()
+        init_w = min(int(screen.width() * 0.7), _BASE_W)
+        init_h = min(int(screen.height() * 0.7), _BASE_H)
+        self.setMinimumSize(640, 480)
+        self.resize(init_w, init_h) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
         self._worker = None
         self._output_dir = None
         self._result_widgets = []
@@ -205,7 +210,7 @@ class FreeTraceGUI(QMainWindow):
     # ------------------------------------------------------------------
     def _scale(self) -> float:
         s = math.sqrt(self.width() * self.height()) / math.sqrt(_BASE_W * _BASE_H)
-        return max(0.8, min(2.5, s))
+        return max(0.6, min(2.5, s)) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
     def _f(self, base_px: int) -> int:
         return max(8, round(base_px * self._scale()))
@@ -230,7 +235,7 @@ class FreeTraceGUI(QMainWindow):
     # ---- left panel (controls) ----------------------------------------
     def _build_left_panel(self):
         panel = QWidget()
-        panel.setMaximumWidth(420)
+        panel.setMaximumWidth(int(self.width() * 0.4)) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
         layout = QVBoxLayout(panel)
         layout.setSpacing(8)
 
