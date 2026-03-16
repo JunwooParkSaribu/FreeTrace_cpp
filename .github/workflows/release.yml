@@ -95,29 +95,80 @@ jobs:
                    -DONNXRUNTIME_DIR="$ortDir"
           cmake --build . --config Release
 
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           DIST="freetrace-${{ matrix.name }}"
           mkdir -p "$DIST/lib"
           cp build/freetrace "$DIST/"
           cp -r models "$DIST/"
-          # Copy ONNX Runtime shared libs
           cp ${{ matrix.ort_dir }}/${{ matrix.lib_glob }} "$DIST/lib/"
-          # Create wrapper script that sets library path
           cat > "$DIST/run_freetrace.sh" << 'SCRIPT'
           #!/bin/bash
           DIR="$(cd "$(dirname "$0")" && pwd)"
-          if [[ "$(uname)" == "Darwin" ]]; then
-            export DYLD_LIBRARY_PATH="$DIR/lib:$DYLD_LIBRARY_PATH"
-          else
-            export LD_LIBRARY_PATH="$DIR/lib:$LD_LIBRARY_PATH"
-          fi
+          export LD_LIBRARY_PATH="$DIR/lib:$LD_LIBRARY_PATH"
           exec "$DIR/freetrace" "$@"
           SCRIPT
           chmod +x "$DIST/run_freetrace.sh" "$DIST/freetrace"
           tar czf "$DIST.tar.gz" "$DIST"
+
+      - name: Package DMG (macOS) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          DIST="freetrace-${{ matrix.name }}"
+          DMG_NAME="FreeTrace_v1.6.0.4_macos_arm64"
+          mkdir -p "$DIST/FreeTrace/lib" "$DIST/FreeTrace/models"
+
+          # Copy binary, models, GUI
+          cp build/freetrace "$DIST/FreeTrace/"
+          chmod +x "$DIST/FreeTrace/freetrace"
+          cp models/*.onnx "$DIST/FreeTrace/models/" 2>/dev/null || true
+          cp models/*.bin "$DIST/FreeTrace/models/" 2>/dev/null || true
+          cp ${{ matrix.ort_dir }}/${{ matrix.lib_glob }} "$DIST/FreeTrace/lib/"
+          cp gui.py "$DIST/FreeTrace/" 2>/dev/null || true
+
+          # Fix dylib paths to use @executable_path
+          for dylib in "$DIST/FreeTrace/lib"/libonnxruntime*.dylib; do
+            dylib_name=$(basename "$dylib")
+            install_name_tool -change "@rpath/$dylib_name" "@executable_path/lib/$dylib_name" "$DIST/FreeTrace/freetrace" 2>/dev/null || true
+            install_name_tool -change "${{ matrix.ort_dir }}/lib/$dylib_name" "@executable_path/lib/$dylib_name" "$DIST/FreeTrace/freetrace" 2>/dev/null || true
+            install_name_tool -id "@executable_path/lib/$dylib_name" "$dylib" 2>/dev/null || true
+          done
+
+          # Wrapper script
+          cat > "$DIST/FreeTrace/run_freetrace.sh" << 'SCRIPT'
+          #!/bin/bash
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          export DYLD_LIBRARY_PATH="$DIR/lib:$DYLD_LIBRARY_PATH"
+          exec "$DIR/freetrace" "$@"
+          SCRIPT
+          chmod +x "$DIST/FreeTrace/run_freetrace.sh"
+
+          # README
+          cat > "$DIST/FreeTrace/README.txt" << 'README'
+          FreeTrace — macOS (Apple Silicon)
+          Single-molecule tracking software with fBm inference.
+
+          Usage: ./freetrace <input.tiff> <output_dir> [options]
+          GUI:   pip install PyQt6 && python gui.py
+
+          If macOS blocks the app: xattr -cr /path/to/FreeTrace/
+          https://github.com/JunwooParkSaribu/FreeTrace_cpp
+          README
+
+          # Ad-hoc code sign
+          codesign --force --sign - "$DIST/FreeTrace/freetrace"
+          for dylib in "$DIST/FreeTrace/lib"/*.dylib; do
+            codesign --force --sign - "$dylib"
+          done
+
+          # Create .dmg
+          hdiutil create -volname "FreeTrace" -srcfolder "$DIST" -ov -format UDZO "$DMG_NAME.dmg"
+
+          # Also create tar.gz for backward compatibility
+          tar czf "$DIST.tar.gz" -C "$DIST" FreeTrace
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -139,6 +190,13 @@ jobs:
         with:
           name: freetrace-${{ matrix.name }}
           path: freetrace-${{ matrix.name }}.${{ matrix.archive_ext }}
+
+      - name: Upload DMG artifact (macOS) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: freetrace-macos-dmg
+          path: FreeTrace_v*.dmg
 
   release:
     needs: build

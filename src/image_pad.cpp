@@ -5,36 +5,61 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#ifdef USE_ACCELERATE // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+#include <Accelerate/Accelerate.h>
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 namespace freetrace {
 
 float image_mean(const Image2D& img) {
     if (img.size() == 0) return 0.0f;
+#ifdef USE_ACCELERATE // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+    float result;
+    vDSP_meanv(img.data.data(), 1, &result, img.size());
+    return result;
+#else
     float sum = 0.0f;
     for (int i = 0; i < img.size(); ++i) {
         sum += img.data[i];
     }
     return sum / img.size();
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 }
 
 float image_mean(const float* data, int count) {
     if (count == 0) return 0.0f;
+#ifdef USE_ACCELERATE // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+    float result;
+    vDSP_meanv(data, 1, &result, count);
+    return result;
+#else
     float sum = 0.0f;
     for (int i = 0; i < count; ++i) {
         sum += data[i];
     }
     return sum / count;
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 }
 
 float image_std(const Image2D& img) {
     if (img.size() == 0) return 0.0f;
     float mean = image_mean(img);
+#ifdef USE_ACCELERATE // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+    // Subtract mean, square, then compute mean of squares
+    std::vector<float> diff(img.size());
+    float neg_mean = -mean;
+    vDSP_vsadd(img.data.data(), 1, &neg_mean, diff.data(), 1, img.size());
+    float sum_sq;
+    vDSP_dotpr(diff.data(), 1, diff.data(), 1, &sum_sq, img.size());
+    return std::sqrt(sum_sq / img.size());
+#else
     float var = 0.0f;
     for (int i = 0; i < img.size(); ++i) {
         float diff = img.data[i] - mean;
         var += diff * diff;
     }
     return std::sqrt(var / img.size());
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 }
 
 void image_overlap(Image2D& img1, const Image2D& img2, int div) {
@@ -166,6 +191,39 @@ std::vector<float> likelihood( // Modified by Claude (claude-opus-4-6, Anthropic
         double denom = (double)bg_squared_sums[n] - surface_window * bg_mean;
         if (std::abs(denom) < 1e-12) denom = 1e-12;
 
+#ifdef USE_ACCELERATE // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+        // vDSP-accelerated path (Apple Silicon)
+        std::vector<float> i_hat(surface_window);
+        float neg_bg_mean = -(float)bg_mean;
+
+        for (int c = 0; c < nb_crops; ++c) {
+            int base = n * nb_crops * surface_window + c * surface_window;
+
+            // i_hat = crop - bg_mean (vDSP_vsadd: vector + scalar)
+            vDSP_vsadd(crop_imgs.data() + base, 1, &neg_bg_mean, i_hat.data(), 1, surface_window);
+
+            // Find min(i_hat)
+            float local_min;
+            vDSP_minv(i_hat.data(), 1, &local_min, surface_window);
+            float shift_val = std::max(0.0f, local_min);
+
+            // i_hat -= shift_val
+            float neg_shift = -shift_val;
+            vDSP_vsadd(i_hat.data(), 1, &neg_shift, i_hat.data(), 1, surface_window);
+
+            // dot(i_hat, g_bar)
+            float dot_f;
+            vDSP_dotpr(i_hat.data(), 1, g_bar.data(), 1, &dot_f, surface_window);
+
+            double i_hat_proj = (double)dot_f / g_squared_sum;
+            i_hat_proj = std::max(0.0, i_hat_proj);
+
+            double ratio = i_hat_proj * i_hat_proj * g_squared_sum / denom;
+            if (ratio >= 1.0) ratio = 1.0 - 1e-7;
+            L[n * nb_crops + c] = (float)((surface_window / 2.0) * std::log(1.0 - ratio));
+        }
+#else // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+        // Scalar fallback path
         for (int c = 0; c < nb_crops; ++c) {
             int base = n * nb_crops * surface_window + c * surface_window;
 
@@ -191,6 +249,7 @@ std::vector<float> likelihood( // Modified by Claude (claude-opus-4-6, Anthropic
             if (ratio >= 1.0) ratio = 1.0 - 1e-7;
             L[n * nb_crops + c] = (float)((surface_window / 2.0) * std::log(1.0 - ratio));
         }
+#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
     }
     return L;
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-14
