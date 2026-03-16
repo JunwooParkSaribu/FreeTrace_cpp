@@ -12,10 +12,24 @@ import sys
 import glob
 import numpy as np  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
-# Monkey-patch for coremltools + NumPy 2.x compatibility
-# np.issubclass_ was removed in NumPy 2.0 but coremltools 7.x still uses it
+# Monkey-patch for coremltools + NumPy 2.x compatibility  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+# Multiple functions removed in NumPy 2.0 but coremltools 7.x still uses them
 if not hasattr(np, 'issubclass_'):
-    np.issubclass_ = issubclass  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+    np.issubclass_ = issubclass
+if not hasattr(np, 'issctype'):
+    np.issctype = lambda rep: isinstance(rep, type) and issubclass(rep, np.generic)
+if not hasattr(np, 'obj2sctype'):
+    np.obj2sctype = lambda rep, default=None: np.result_type(rep).type if rep is not None else default
+if not hasattr(np, 'bool'):
+    np.bool = np.bool_
+if not hasattr(np, 'int'):
+    np.int = np.int_
+if not hasattr(np, 'float'):
+    np.float = np.float64
+if not hasattr(np, 'complex'):
+    np.complex = np.complex128
+if not hasattr(np, 'str'):
+    np.str = np.str_  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 
 def find_keras_models():
