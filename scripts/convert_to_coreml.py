@@ -112,6 +112,7 @@ def build_pytorch_model(weights, seq_len): # Modified by Claude (claude-opus-4-6
     """
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
 
     conv_lstm_w = weights['conv_lstm']
     bn_w = weights['bn']
@@ -134,15 +135,24 @@ def build_pytorch_model(weights, seq_len): # Modified by Claude (claude-opus-4-6
             self.n_lstm = len(configs)
 
             # ConvLSTM layers: input conv + recurrent conv per layer
+            # Use padding=0 and manual F.pad to avoid dynamic shape ops
+            # that coremltools can't convert (padding='same' generates int casts)
             self.conv_ih = nn.ModuleList()
             self.conv_hh = nn.ModuleList()
             self.hidden_sizes = []
+            self.pad_left = []   # pre-computed padding per layer
+            self.pad_right = []
 
             for in_ch, hidden, ks in configs:
-                # padding='same' matches Keras (asymmetric pad for even kernel sizes)
-                self.conv_ih.append(nn.Conv1d(in_ch, 4 * hidden, ks, padding='same', bias=True))
-                self.conv_hh.append(nn.Conv1d(hidden, 4 * hidden, ks, padding='same', bias=False))
+                self.conv_ih.append(nn.Conv1d(in_ch, 4 * hidden, ks, padding=0, bias=True))
+                self.conv_hh.append(nn.Conv1d(hidden, 4 * hidden, ks, padding=0, bias=False))
                 self.hidden_sizes.append(hidden)
+                # Keras 'same' padding: total_pad = ks - 1, left = total // 2, right = total - left
+                total_pad = ks - 1
+                pl = total_pad // 2
+                pr = total_pad - pl
+                self.pad_left.append(pl)
+                self.pad_right.append(pr)
 
             # BatchNorm layers (eps=0.001 to match Keras default)
             self.bns = nn.ModuleList()
@@ -175,7 +185,12 @@ def build_pytorch_model(weights, seq_len): # Modified by Claude (claude-opus-4-6
                     # x_t: (batch, spatial=1, channels) → (batch, channels, spatial=1)
                     x_t = x[:, t, :, :].permute(0, 2, 1)
 
-                    gates = self.conv_ih[layer_idx](x_t) + self.conv_hh[layer_idx](h)
+                    # Manual 'same' padding with pre-computed values (coremltools-friendly)
+                    pl = self.pad_left[layer_idx]
+                    pr = self.pad_right[layer_idx]
+                    x_t_padded = F.pad(x_t, (pl, pr))
+                    h_padded = F.pad(h, (pl, pr))
+                    gates = self.conv_ih[layer_idx](x_t_padded) + self.conv_hh[layer_idx](h_padded)
                     i_gate, f_gate, g_gate, o_gate = gates.chunk(4, dim=1)
                     i_gate = torch.sigmoid(i_gate)
                     f_gate = torch.sigmoid(f_gate)
