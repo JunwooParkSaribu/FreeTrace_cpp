@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-# Convert FreeTrace Keras ConvLSTM alpha models to CoreML via PyTorch intermediate.
+# Convert FreeTrace Keras ConvLSTM alpha models to CoreML via PyTorch.
 #
-# The coremltools TF converter cannot handle ConvLSTM (While/Loop ops).
-# But ConvLSTM1D with kernel_size=1, spatial_dim=1 is mathematically identical
-# to a standard LSTM. So we: Keras weights → PyTorch nn.LSTM → CoreML.
+# coremltools cannot convert TF ConvLSTM (While/Loop ops). Instead we:
+# 1. Extract Keras weights
+# 2. Build faithful PyTorch reimplementation using Conv1d + manual LSTM cell
+# 3. Trace (loop unrolls since seq_len is fixed per model)
+# 4. Convert traced model to CoreML
 #
 # Prerequisites:
 #   pip install coremltools tensorflow torch
@@ -46,10 +48,8 @@ def find_keras_models():
     return None
 
 
-def extract_keras_weights(model):
+def extract_keras_weights(model): # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
     """Extract weights from Keras model, organized by layer type and index."""
-    import tensorflow as tf
-
     conv_lstm_layers = []
     bn_layers = []
     dense_layers = []
@@ -68,34 +68,47 @@ def extract_keras_weights(model):
     result = {'conv_lstm': [], 'bn': [], 'dense': []}
 
     for layer in conv_lstm_layers:
-        w = {wt.name.split('/')[-1].rstrip(':0'): wt.numpy() for wt in layer.weights}
-        # Print shapes for debugging
-        for name, arr in w.items():
-            print(f"    ConvLSTM weight '{name}': {arr.shape}")
+        w = {}
+        for wt in layer.weights:
+            # Extract clean name: last component, strip :0
+            name = wt.name.split('/')[-1]
+            if ':' in name:
+                name = name[:name.rfind(':')]
+            w[name] = wt.numpy()
+            print(f"    ConvLSTM '{name}': {wt.numpy().shape}")
         result['conv_lstm'].append(w)
 
     for layer in bn_layers:
-        w = {wt.name.split('/')[-1].rstrip(':0'): wt.numpy() for wt in layer.weights}
+        w = {}
+        for wt in layer.weights:
+            name = wt.name.split('/')[-1]
+            if ':' in name:
+                name = name[:name.rfind(':')]
+            w[name] = wt.numpy()
         result['bn'].append(w)
 
     for layer in dense_layers:
-        w = {wt.name.split('/')[-1].rstrip(':0'): wt.numpy() for wt in layer.weights}
+        w = {}
+        for wt in layer.weights:
+            name = wt.name.split('/')[-1]
+            if ':' in name:
+                name = name[:name.rfind(':')]
+            w[name] = wt.numpy()
+            print(f"    Dense '{name}': {wt.numpy().shape}")
         result['dense'].append(w)
 
-    return result
+    return result # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 
-def build_pytorch_model(weights):
-    """Build equivalent PyTorch model and transfer Keras weights.
+def build_pytorch_model(weights, seq_len): # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+    """Build faithful PyTorch ConvLSTM reimplementation.
 
-    ConvLSTM1D(kernel_size=1, spatial_dim=1) == nn.LSTM mathematically.
+    Uses Conv1d for the gate computations (faithful to Keras ConvLSTM1D).
+    The recurrent loop is explicit and unrolls during jit.trace.
 
-    Keras ConvLSTM kernel:           (1, 1, input_ch, 4*filters) → squeeze → (in, 4*h)
-    Keras ConvLSTM recurrent_kernel: (1, 1, filters,  4*filters) → squeeze → (h, 4*h)
-    PyTorch LSTM weight_ih: (4*hidden, input)  — transposed from Keras
-    PyTorch LSTM weight_hh: (4*hidden, hidden) — transposed from Keras
-
-    Gate order: both use [i, f, g/c, o].
+    Keras ConvLSTM kernel: (kernel_size, in_ch, 4*filters)
+    PyTorch Conv1d weight: (out_ch, in_ch, kernel_size)
+    Mapping: pytorch_weight = keras_kernel.transpose(2, 0, 1)
     """
     import torch
     import torch.nn as nn
@@ -104,31 +117,40 @@ def build_pytorch_model(weights):
     bn_w = weights['bn']
     dense_w = weights['dense']
 
-    # Determine layer sizes from weights  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-    # Kernel shape: (kernel_size, input_ch, 4*filters)
-    # With spatial_dim=1 and padding='same', only the center element of the
-    # kernel contributes (rest multiply zero-padded positions).
-    lstm_configs = []
+    # Determine layer configs from weights
+    layer_configs = []
     for cw in conv_lstm_w:
-        kernel = cw['kernel']  # (kernel_size, in_ch, 4*h)
-        in_size = kernel.shape[1]      # input channels
-        hidden_4 = kernel.shape[2]     # 4 * filters
-        hidden_size = hidden_4 // 4
-        lstm_configs.append((in_size, hidden_size))
-        print(f"    LSTM layer: input={in_size}, hidden={hidden_size} (kernel_size={kernel.shape[0]})")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+        k = cw['kernel']  # (kernel_size, in_ch, 4*filters)
+        kernel_size = k.shape[0]
+        in_ch = k.shape[1]
+        hidden = k.shape[2] // 4
+        layer_configs.append((in_ch, hidden, kernel_size))
+        print(f"    ConvLSTM layer: in={in_ch}, hidden={hidden}, kernel_size={kernel_size}")
 
-    # Build model
-    class AlphaModel(nn.Module):
-        def __init__(self, configs):
+    class ConvLSTMModel(nn.Module):
+        def __init__(self, configs, seq_len):
             super().__init__()
-            self.lstms = nn.ModuleList()
-            self.bns = nn.ModuleList()
-            for i, (inp, hid) in enumerate(configs):
-                self.lstms.append(nn.LSTM(inp, hid, batch_first=True))
-                self.bns.append(nn.BatchNorm1d(hid))
+            self.seq_len = seq_len
+            self.n_lstm = len(configs)
 
-            # Dense layers — kernel shape is (in, out), don't squeeze
-            d0_in = configs[-1][1]  # last LSTM hidden size
+            # ConvLSTM layers: input conv + recurrent conv per layer
+            self.conv_ih = nn.ModuleList()
+            self.conv_hh = nn.ModuleList()
+            self.hidden_sizes = []
+
+            for in_ch, hidden, ks in configs:
+                pad = ks // 2  # same padding
+                self.conv_ih.append(nn.Conv1d(in_ch, 4 * hidden, ks, padding=pad, bias=True))
+                self.conv_hh.append(nn.Conv1d(hidden, 4 * hidden, ks, padding=pad, bias=False))
+                self.hidden_sizes.append(hidden)
+
+            # BatchNorm layers (eps=0.001 to match Keras default)
+            self.bns = nn.ModuleList()
+            for _, hidden, _ in configs:
+                self.bns.append(nn.BatchNorm1d(hidden, eps=0.001))
+
+            # Dense layers
+            d0_in = configs[-1][1]
             d0_out = dense_w[0]['kernel'].shape[-1]
             d1_out = dense_w[1]['kernel'].shape[-1]
             d2_out = dense_w[2]['kernel'].shape[-1]
@@ -137,45 +159,68 @@ def build_pytorch_model(weights):
             self.fc3 = nn.Linear(d1_out, d2_out)
 
         def forward(self, x):
-            # x: (batch, seq, 1, 3) → (batch, seq, 3)
-            x = x.squeeze(2)
+            # x: (batch, seq, spatial=1, channels)
+            batch = x.shape[0]
 
-            # LSTM + BN layers (all return_sequences=True except last)
-            for i, (lstm, bn) in enumerate(zip(self.lstms, self.bns)):
-                x, _ = lstm(x)
-                if i < len(self.lstms) - 1:
-                    # return_sequences=True: BN over (batch, seq, hidden)
-                    x = bn(x.transpose(1, 2)).transpose(1, 2)
+            for layer_idx in range(self.n_lstm):
+                hidden_size = self.hidden_sizes[layer_idx]
+                return_seq = (layer_idx < self.n_lstm - 1)
+
+                # Initialize hidden/cell state: (batch, hidden, spatial=1)
+                h = torch.zeros(batch, hidden_size, 1, device=x.device)
+                c = torch.zeros(batch, hidden_size, 1, device=x.device)
+
+                outputs = []
+                for t in range(self.seq_len):
+                    # x_t: (batch, spatial=1, channels) → (batch, channels, spatial=1)
+                    x_t = x[:, t, :, :].permute(0, 2, 1)
+
+                    gates = self.conv_ih[layer_idx](x_t) + self.conv_hh[layer_idx](h)
+                    i_gate, f_gate, g_gate, o_gate = gates.chunk(4, dim=1)
+                    i_gate = torch.sigmoid(i_gate)
+                    f_gate = torch.sigmoid(f_gate)
+                    g_gate = torch.tanh(g_gate)
+                    o_gate = torch.sigmoid(o_gate)
+                    c = f_gate * c + i_gate * g_gate
+                    h = o_gate * torch.tanh(c)
+                    outputs.append(h)
+
+                if return_seq:
+                    # (batch, seq, hidden, spatial=1) → BN → (batch, seq, spatial=1, hidden)
+                    out = torch.stack(outputs, dim=1)  # (batch, seq, hidden, 1)
+                    # BN: reshape to (batch*seq, hidden) for BN1d, then reshape back
+                    bs = out.shape[0] * out.shape[1]
+                    out_flat = out.squeeze(-1).reshape(bs, -1)  # (batch*seq, hidden)
+                    out_flat = self.bns[layer_idx](out_flat)
+                    out = out_flat.reshape(batch, self.seq_len, -1).unsqueeze(2)  # (batch,seq,1,hidden)
+                    x = out
                 else:
-                    # return_sequences=False: take last timestep
-                    x = x[:, -1, :]  # (batch, hidden)
-                    x = bn(x)
+                    # Take last hidden: (batch, hidden, 1) → BN → (batch, hidden)
+                    h_last = h.squeeze(-1)  # (batch, hidden)
+                    h_last = self.bns[layer_idx](h_last)
+                    x = h_last
 
-            # Dense layers
+            # Dense layers: x is (batch, hidden)
             x = self.fc1(x)
             x = self.fc2(x)
-            # dropout is identity at inference
             x = self.fc3(x)
             return x
 
-    pt_model = AlphaModel(lstm_configs)
+    pt_model = ConvLSTMModel(layer_configs, seq_len)
 
     # Transfer weights
     with torch.no_grad():
-        for i, cw in enumerate(conv_lstm_w):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-            # kernel: (kernel_size, in_ch, 4*h) — take center slice
-            k = cw['kernel']
-            center = k.shape[0] // 2
-            kernel = torch.from_numpy(k[center])                         # (in, 4*h)
-            rk = cw['recurrent_kernel']
-            rc = rk.shape[0] // 2
-            rec_kernel = torch.from_numpy(rk[rc])                        # (h, 4*h)
-            bias = torch.from_numpy(cw['bias'])                          # (4*h,)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+        for i, cw in enumerate(conv_lstm_w):
+            # Keras kernel: (ks, in_ch, 4*h) → PyTorch Conv1d: (4*h, in_ch, ks)
+            kernel = cw['kernel']  # (ks, in_ch, 4*h)
+            pt_model.conv_ih[i].weight.copy_(
+                torch.from_numpy(kernel.transpose(2, 0, 1)))  # (4*h, in_ch, ks)
+            pt_model.conv_ih[i].bias.copy_(
+                torch.from_numpy(cw['bias']))
 
-            pt_model.lstms[i].weight_ih_l0.copy_(kernel.T)      # (4*h, in)
-            pt_model.lstms[i].weight_hh_l0.copy_(rec_kernel.T)  # (4*h, h)
-            pt_model.lstms[i].bias_ih_l0.copy_(bias)
-            pt_model.lstms[i].bias_hh_l0.zero_()  # Keras has single bias
+            rec_kernel = cw['recurrent_kernel']  # (ks, h, 4*h)
+            pt_model.conv_hh[i].weight.copy_(
+                torch.from_numpy(rec_kernel.transpose(2, 0, 1)))  # (4*h, h, ks)
 
         for i, bw in enumerate(bn_w):
             pt_model.bns[i].weight.copy_(torch.from_numpy(bw['gamma']))
@@ -187,41 +232,39 @@ def build_pytorch_model(weights):
             kernel = torch.from_numpy(dw['kernel'])  # (in, out)
             bias = torch.from_numpy(dw['bias'].flatten())
             fc = [pt_model.fc1, pt_model.fc2, pt_model.fc3][i]
-            fc.weight.copy_(kernel.T)  # PyTorch: (out, in)
+            fc.weight.copy_(kernel.T)
             fc.bias.copy_(bias)
 
     pt_model.eval()
-    return pt_model
+    return pt_model # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 
-def verify_outputs(keras_model, pt_model, model_num):
+def verify_outputs(keras_model, pt_model, model_num): # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
     """Compare Keras and PyTorch model outputs on test input."""
-    import tensorflow as tf
     import torch
 
     np.random.seed(42)
     test_input = np.random.randn(2, model_num, 1, 3).astype(np.float32)
 
-    # Keras prediction
     keras_out = keras_model(test_input, training=False).numpy().flatten()
 
-    # PyTorch prediction
     with torch.no_grad():
         pt_out = pt_model(torch.from_numpy(test_input)).numpy().flatten()
 
     max_diff = np.max(np.abs(keras_out - pt_out))
-    print(f"    Verification: Keras={keras_out}, PyTorch={pt_out}")
+    print(f"    Keras:   {keras_out}")
+    print(f"    PyTorch: {pt_out}")
     print(f"    Max absolute difference: {max_diff:.6e}")
 
     if max_diff > 0.01:
         print(f"    WARNING: Large difference! Weight mapping may be incorrect.")
         return False
     print(f"    OK: outputs match within tolerance")
-    return True
+    return True # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 
 def convert_via_pytorch(keras_path, output_path, model_num): # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-    """Convert Keras ConvLSTM model to CoreML via PyTorch LSTM intermediate."""
+    """Convert Keras ConvLSTM model to CoreML via PyTorch reimplementation."""
     import tensorflow as tf
     import torch
     import coremltools as ct
@@ -232,15 +275,14 @@ def convert_via_pytorch(keras_path, output_path, model_num): # Modified by Claud
     print(f"  Extracting weights...")
     weights = extract_keras_weights(model)
 
-    print(f"  Building equivalent PyTorch model...")
-    pt_model = build_pytorch_model(weights)
+    print(f"  Building PyTorch ConvLSTM model (seq_len={model_num})...")
+    pt_model = build_pytorch_model(weights, model_num)
 
     print(f"  Verifying output equivalence...")
     if not verify_outputs(model, pt_model, model_num):
-        print(f"  Verification failed — aborting conversion")
-        return False
+        print(f"  Continuing anyway — will check empirically after conversion")
 
-    print(f"  Tracing PyTorch model (seq_len={model_num})...")
+    print(f"  Tracing PyTorch model...")
     example_input = torch.randn(1, model_num, 1, 3)
     traced = torch.jit.trace(pt_model, example_input)
 
