@@ -194,15 +194,19 @@ jobs:
             codesign --force --deep --sign - "$DIST/FreeTrace GUI.app"
           fi
 
-          # Create .dmg (two-step: rw image → compressed) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+          # Create .dmg (two-step: rw image → ditto → compressed) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
           CONTENT_KB=$(du -sk "$DIST" | cut -f1)
-          DMG_MB=$(( (CONTENT_KB / 1024) + 50 ))
+          DMG_MB=$(( (CONTENT_KB / 1024) + 100 ))
           hdiutil create -volname "FreeTrace" -size "${DMG_MB}m" -fs HFS+ -ov "$DMG_NAME.rw.dmg"
-          hdiutil attach "$DMG_NAME.rw.dmg" -mountpoint /tmp/freetrace_dmg_mount
-          cp -R "$DIST"/* /tmp/freetrace_dmg_mount/
-          hdiutil detach /tmp/freetrace_dmg_mount
+          MOUNT_POINT="$(pwd)/_dmg_mount_$$"
+          mkdir -p "$MOUNT_POINT"
+          hdiutil attach "$DMG_NAME.rw.dmg" -mountpoint "$MOUNT_POINT" -nobrowse
+          ditto "$DIST/" "$MOUNT_POINT/"
+          ls -la "$MOUNT_POINT/"
+          hdiutil detach "$MOUNT_POINT"
           hdiutil convert "$DMG_NAME.rw.dmg" -format UDZO -o "$DMG_NAME.dmg"
           rm -f "$DMG_NAME.rw.dmg"
+          rmdir "$MOUNT_POINT" 2>/dev/null || true
 
           # Also create tar.gz for backward compatibility
           tar czf "$DIST.tar.gz" -C "$DIST" FreeTrace
