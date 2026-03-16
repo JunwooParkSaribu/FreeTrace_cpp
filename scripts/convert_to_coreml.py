@@ -169,16 +169,15 @@ def build_pytorch_model(weights, seq_len): # Modified by Claude (claude-opus-4-6
             self.fc3 = nn.Linear(d1_out, d2_out)
 
         def forward(self, x):
-            # x: (batch, seq, spatial=1, channels)
-            batch = x.shape[0]
-
+            # x: (1, seq, spatial=1, channels) — batch=1 for CoreML
             for layer_idx in range(self.n_lstm):
                 hidden_size = self.hidden_sizes[layer_idx]
                 return_seq = (layer_idx < self.n_lstm - 1)
 
-                # Initialize hidden/cell state: (batch, hidden, spatial=1)
-                h = torch.zeros(batch, hidden_size, 1, device=x.device)
-                c = torch.zeros(batch, hidden_size, 1, device=x.device)
+                # Initialize hidden/cell state: (1, hidden, spatial=1)
+                # Use fixed batch=1 to avoid dynamic shape ops (coremltools compat)
+                h = torch.zeros(1, hidden_size, 1, device=x.device, dtype=x.dtype)
+                c = torch.zeros(1, hidden_size, 1, device=x.device, dtype=x.dtype)
 
                 outputs = []
                 for t in range(self.seq_len):
@@ -201,13 +200,12 @@ def build_pytorch_model(weights, seq_len): # Modified by Claude (claude-opus-4-6
                     outputs.append(h)
 
                 if return_seq:
-                    # (batch, seq, hidden, spatial=1) → BN → (batch, seq, spatial=1, hidden)
-                    out = torch.stack(outputs, dim=1)  # (batch, seq, hidden, 1)
-                    # BN: reshape to (batch*seq, hidden) for BN1d, then reshape back
-                    bs = out.shape[0] * out.shape[1]
-                    out_flat = out.squeeze(-1).reshape(bs, -1)  # (batch*seq, hidden)
+                    # (1, seq, hidden, 1) → BN → (1, seq, 1, hidden)
+                    out = torch.stack(outputs, dim=1)  # (1, seq, hidden, 1)
+                    # BN: reshape to (seq, hidden) for BN1d, then reshape back
+                    out_flat = out.squeeze(0).squeeze(-1)  # (seq, hidden)
                     out_flat = self.bns[layer_idx](out_flat)
-                    out = out_flat.reshape(batch, self.seq_len, -1).unsqueeze(2)  # (batch,seq,1,hidden)
+                    out = out_flat.unsqueeze(0).unsqueeze(2)  # (1, seq, 1, hidden)
                     x = out
                 else:
                     # Take last hidden: (batch, hidden, 1) → BN → (batch, hidden)
@@ -259,7 +257,8 @@ def verify_outputs(keras_model, pt_model, model_num): # Modified by Claude (clau
     import torch
 
     np.random.seed(42)
-    test_input = np.random.randn(2, model_num, 1, 3).astype(np.float32)
+    # Use batch=1 (matches CoreML and avoids dynamic shape issues in PyTorch model)
+    test_input = np.random.randn(1, model_num, 1, 3).astype(np.float32)
 
     keras_out = keras_model(test_input, training=False).numpy().flatten()
 
