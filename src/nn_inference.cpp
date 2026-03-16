@@ -3,10 +3,6 @@
 
 #ifdef USE_ONNXRUNTIME
 #include <onnxruntime_cxx_api.h>
-#if defined(__APPLE__) && __has_include(<coreml_provider_factory.h>) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-#include <coreml_provider_factory.h>
-#define HAS_COREML_PROVIDER 1
-#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 #endif
 
 #include <cmath>
@@ -14,6 +10,7 @@
 #include <numeric>
 #include <iostream>
 #include <fstream>
+#include <thread> // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 namespace freetrace {
 
@@ -229,22 +226,15 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
         auto* env = new Ort::Env(ORT_LOGGING_LEVEL_ERROR, "freetrace"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
         models.env = env;
 
-        Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(1); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        Ort::SessionOptions opts; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+        // Use multiple threads for CPU inference (critical for Mac without CUDA)
+        int num_threads = std::max(1, (int)std::thread::hardware_concurrency());
+        opts.SetIntraOpNumThreads(num_threads);
+        opts.SetInterOpNumThreads(num_threads);
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-        bool gpu_enabled = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-#if defined(HAS_COREML_PROVIDER)
-        // Try CoreML execution provider (Apple Neural Engine + Metal GPU)
-        try {
-            uint32_t coreml_flags = 0;
-            OrtStatus* status = OrtSessionOptionsAppendExecutionProvider_CoreML(opts, coreml_flags);
-            if (status == nullptr) {
-                gpu_enabled = true;
-            }
-        } catch (...) {
-        }
-#elif !defined(__APPLE__)
+        bool gpu_enabled = false;
+#if !defined(__APPLE__)
         try {
             OrtCUDAProviderOptions cuda_opts;
             cuda_opts.device_id = 0;
@@ -295,14 +285,10 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
         }
 
         models.loaded = true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-        if (gpu_enabled) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-#if defined(HAS_COREML_PROVIDER)
-            std::cout << "\n  NN inference: CoreML (Apple Neural Engine / Metal)\n" << std::endl;
-#else
+        if (gpu_enabled) {
             std::cout << "\n  NN inference: GPU (CUDA)\n" << std::endl;
-#endif
         } else {
-            std::cout << "\n  NN inference: CPU - this may be slower\n" << std::endl;
+            std::cout << "\n  NN inference: CPU (" << num_threads << " threads)\n" << std::endl;
         } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
         return true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     } catch (const Ort::Exception&) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
