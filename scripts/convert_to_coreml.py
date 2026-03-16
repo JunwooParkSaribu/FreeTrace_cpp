@@ -37,51 +37,75 @@ def find_keras_models():
 
 
 def convert_keras_to_coreml(keras_path, output_path, model_num): # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-    """Convert Keras model to CoreML via TF SavedModel intermediary."""
+    """Convert Keras model to CoreML. Tries multiple strategies."""
     import tensorflow as tf
     import coremltools as ct
-    import shutil
 
     print(f"  Loading Keras model: {keras_path}")
     model = tf.keras.models.load_model(keras_path)
     model.summary()
 
-    # Wrap model in a single concrete function to avoid
-    # "Only a single concrete function is supported" error from coremltools.
-    # model.export() creates multiple concrete functions; tf.saved_model.save()
-    # with an explicit signature creates exactly one.
-    saved_model_dir = keras_path.replace('.keras', '_saved_model')
-    print(f"  Saving as TF SavedModel with single concrete function: {saved_model_dir}")
-
-    # Get input shape from model — ConvLSTM models expect (batch, seq_len, 1, 3)
-    input_shape = model.input_shape  # e.g. (None, None, 1, 3) or (None, 8, 1, 3)
-    # Use dynamic batch + fixed spatial dims
+    # Build input spec from model
+    input_shape = model.input_shape  # e.g. (None, None, 1, 3)
     if input_shape[1] is None:
-        # Fully dynamic sequence length
         spec = tf.TensorSpec(shape=[None, None, 1, 3], dtype=tf.float32, name='input')
     else:
-        seq_len = input_shape[1]
-        spec = tf.TensorSpec(shape=[None, seq_len, 1, 3], dtype=tf.float32, name='input')
+        spec = tf.TensorSpec(shape=[None, input_shape[1], 1, 3], dtype=tf.float32, name='input')
 
-    @tf.function(input_signature=[spec])
-    def serve(x):
-        return model(x, training=False)
+    # Strategy 1: Convert concrete function directly (no SavedModel on disk)
+    print(f"  Strategy 1: converting concrete function directly...")
+    try:
+        @tf.function(input_signature=[spec])
+        def serve(x):
+            return model(x, training=False)
+        concrete_func = serve.get_concrete_function()
+        mlmodel = ct.convert(
+            [concrete_func],
+            source='tensorflow',
+            compute_units=ct.ComputeUnit.ALL,
+        )
+        mlmodel.save(output_path)
+        print(f"  -> OK (strategy 1): {output_path}")
+        return True
+    except Exception as e:
+        print(f"  Strategy 1 failed: {e}")
 
-    # Save with explicit single signature — coremltools requires exactly one
-    tf.saved_model.save(model, saved_model_dir, signatures={'serving_default': serve})
+    # Strategy 2: Pass Keras model object directly to coremltools
+    print(f"  Strategy 2: converting Keras model object directly...")
+    try:
+        mlmodel = ct.convert(
+            model,
+            source='tensorflow',
+            compute_units=ct.ComputeUnit.ALL,
+        )
+        mlmodel.save(output_path)
+        print(f"  -> OK (strategy 2): {output_path}")
+        return True
+    except Exception as e:
+        print(f"  Strategy 2 failed: {e}")
 
-    print(f"  Converting SavedModel to CoreML (compute_units=ALL for GPU/ANE)...")
-    mlmodel = ct.convert(
-        saved_model_dir,
-        source='tensorflow',
-        compute_units=ct.ComputeUnit.ALL,
-    )
-    mlmodel.save(output_path)
+    # Strategy 3: Use model.export() then convert with ct.convert on the dir
+    # (the "multiple concrete functions" error — try with minimum_deployment_target)
+    import shutil
+    saved_model_dir = keras_path.replace('.keras', '_saved_model')
+    print(f"  Strategy 3: export SavedModel + minimum_deployment_target...")
+    try:
+        model.export(saved_model_dir)
+        mlmodel = ct.convert(
+            saved_model_dir,
+            source='tensorflow',
+            compute_units=ct.ComputeUnit.ALL,
+            minimum_deployment_target=ct.target.macOS15,
+        )
+        mlmodel.save(output_path)
+        shutil.rmtree(saved_model_dir, ignore_errors=True)
+        print(f"  -> OK (strategy 3): {output_path}")
+        return True
+    except Exception as e:
+        print(f"  Strategy 3 failed: {e}")
+        shutil.rmtree(saved_model_dir, ignore_errors=True)
 
-    # Cleanup temp SavedModel
-    shutil.rmtree(saved_model_dir, ignore_errors=True)
-    print(f"  -> OK: {output_path}")
-    return True # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+    return False # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 
 def main():
