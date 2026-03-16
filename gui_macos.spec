@@ -65,7 +65,7 @@ app = BUNDLE(
     bundle_identifier='fr.sorbonne-universite.freetrace',
     info_plist={
         'CFBundleDisplayName': 'FreeTrace',
-        'CFBundleShortVersionString': '1.6.0.4',
+        'CFBundleShortVersionString': '1.6.0.5',  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
         'NSHighResolutionCapable': True,
     },
 )
