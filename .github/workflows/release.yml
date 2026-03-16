@@ -146,16 +146,15 @@ jobs:
             rm -rf icon/freetrace_icon.iconset
           fi
 
-          python3 -m PyInstaller gui_macos.spec --noconfirm --clean \
-            --distpath dist_gui --workpath build_pyinstaller 2>&1 || true
-          if [ -d "dist_gui/FreeTrace GUI.app" ]; then
-            cp -R "dist_gui/FreeTrace GUI.app" "$DIST/FreeTrace GUI.app"
+          python3 -m PyInstaller gui_macos.spec --noconfirm --clean 2>&1 || true
+          if [ -d "dist/FreeTrace GUI.app" ]; then
+            ditto "dist/FreeTrace GUI.app" "$DIST/FreeTrace GUI.app"
             echo "GUI app built successfully"
           else
             echo "WARNING: GUI app build failed, including gui.py as fallback"
             cp gui.py "$DIST/FreeTrace/" 2>/dev/null || true
           fi
-          rm -rf dist_gui build_pyinstaller
+          rm -rf dist build
 
           # Fix dylib paths to use @executable_path
           for dylib in "$DIST/FreeTrace/lib"/libonnxruntime*.dylib; do

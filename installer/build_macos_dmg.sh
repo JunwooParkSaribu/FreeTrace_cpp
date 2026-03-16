@@ -100,21 +100,24 @@ if command -v iconutil &>/dev/null && [ -f "$PROJECT_DIR/icon/freetrace_icon.png
     rm -rf "$ICONSET"
 fi
 
-# Build GUI with PyInstaller
+# Build GUI with PyInstaller # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 GUI_BUILT=false
 if command -v python3 &>/dev/null; then
-    python3 -m pip install pyinstaller PyQt6 --quiet 2>/dev/null
-    if python3 -m PyInstaller "$PROJECT_DIR/gui_macos.spec" \
-        --noconfirm --clean \
-        --distpath "$PROJECT_DIR/dist_gui" \
-        --workpath "$PROJECT_DIR/build_pyinstaller" 2>&1; then
-        if [ -d "$PROJECT_DIR/dist_gui/FreeTrace GUI.app" ]; then
-            cp -R "$PROJECT_DIR/dist_gui/FreeTrace GUI.app" "$STAGING/FreeTrace GUI.app"
+    python3 -m pip install pyinstaller PyQt6 --quiet 2>/dev/null || true
+    cd "$PROJECT_DIR"
+    if python3 -m PyInstaller gui_macos.spec --noconfirm --clean 2>&1; then
+        if [ -d "$PROJECT_DIR/dist/FreeTrace GUI.app" ]; then
+            ditto "$PROJECT_DIR/dist/FreeTrace GUI.app" "$STAGING/FreeTrace GUI.app"
             GUI_BUILT=true
             echo "GUI app built successfully."
+        else
+            echo "WARNING: .app not found in dist/"
+            ls -la "$PROJECT_DIR/dist/" 2>/dev/null
         fi
+    else
+        echo "WARNING: PyInstaller build failed."
     fi
-    rm -rf "$PROJECT_DIR/dist_gui" "$PROJECT_DIR/build_pyinstaller"
+    rm -rf "$PROJECT_DIR/dist" "$PROJECT_DIR/build"
 fi
 
 if [ "$GUI_BUILT" = false ]; then
