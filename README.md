@@ -6,10 +6,9 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 
 **Data privacy:** FreeTrace runs entirely on your local machine. No data is transmitted to any external server.
 
-> **Windows standalone installer (GPU):** Download the self-contained installer with full GPU support (CUDA + cuDNN + ONNX Runtime) — no compilation or dependency installation required (only NVIDIA GPU driver needed):
-> **[Download FreeTrace for Windows (GPU)](https://psilo.sorbonne-universite.fr/public.php/dav/files/XmTL99cCx4iXDdH/?accept=zip)**
->
-> **Note:** The standalone installer uses cuDNN 9.2, which does **not** support RTX 5000 series (Blackwell) or newer GPUs. On unsupported GPUs, H (Hurst exponent) estimation will silently produce incorrect values (zeros). Supported GPUs: RTX 2000/3000/4000 series and equivalent. For RTX 5000 series, a custom [build from source](#build) with a Blackwell-compatible cuDNN version is required.
+> **Windows standalone installer (GPU):** Download the self-contained installer with full GPU support (CUDA + cuDNN + ONNX Runtime) — no compilation or dependency installation required (only NVIDIA GPU driver needed): <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 -->
+> - **RTX 2000 / 3000 / 4000 series:** **[Download FreeTrace (cuDNN 9.2)](https://psilo.sorbonne-universite.fr/public.php/dav/files/XmTL99cCx4iXDdH/?accept=zip)**
+> - **RTX 5000 series (Blackwell):** **[Download FreeTrace (cuDNN 9.20)](https://psilo.sorbonne-universite.fr/public.php/dav/files/jXMnok9WDWAX8c2/?accept=zip)** <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 -->
 
 > **Just want to run it?** Download a pre-built binary from the [Releases page](https://github.com/JunwooParkSaribu/FreeTrace_cpp/releases) — no compilers needed. Available for Linux, macOS (Apple Silicon), and Windows.
 >
@@ -249,7 +248,7 @@ cd C:\path\to\FreeTrace_cpp
 mkdir build; cd build; cmake .. -G "Visual Studio 17 2022" "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake"; cmake --build . --config Release
 ```
 
-**With fBm (GPU):** requires [**CUDA Toolkit 12.x**](https://developer.nvidia.com/cuda-downloads) (install after VS 2022) and [**cuDNN 9.2**](https://developer.nvidia.com/cudnn-downloads) (CUDA 12, Windows, Tarball). **Note:** cuDNN 9.5+ has a Frontend API incompatibility with ONNX Runtime Conv1D operations — use 9.2.x.
+**With fBm (GPU):** requires [**CUDA Toolkit 12.x**](https://developer.nvidia.com/cuda-downloads) (install after VS 2022) and [**cuDNN 9.x**](https://developer.nvidia.com/cudnn-downloads) (CUDA 12, Windows, Tarball). Use cuDNN 9.2 for RTX 2000/3000/4000, or cuDNN 9.20+ for RTX 5000 (Blackwell).
 ```powershell
 Invoke-WebRequest -Uri https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-gpu-1.24.3.zip -OutFile ort.zip; tar -xf ort.zip; mkdir build; cd build; cmake .. -G "Visual Studio 17 2022" "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" "-DUSE_ONNXRUNTIME=ON" "-DONNXRUNTIME_DIR=..\onnxruntime-win-x64-gpu-1.24.3"; cmake --build . --config Release; copy ..\onnxruntime-win-x64-gpu-1.24.3\lib\*.dll Release\
 ```
