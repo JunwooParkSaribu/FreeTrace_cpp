@@ -6,11 +6,9 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 
 **Data privacy:** FreeTrace runs entirely on your local machine. No data is transmitted to any external server.
 
-> **Standalone installer (GPU):** Download the self-contained installer — no compilation or dependency installation required: <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 18:00 -->
-> - **Windows (NVIDIA GPU required):**
->   - **RTX 2000 / 3000 series:** **[Download FreeTrace (cuDNN 9.2)](https://psilo.sorbonne-universite.fr/public.php/dav/files/xz6qFa2zTxDQPYJ/?accept=zip)** <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 19:00 -->
->   - **RTX 4000 / 5000 series:** **[Download FreeTrace (cuDNN 9.20)](https://psilo.sorbonne-universite.fr/public.php/dav/files/ToCEbcMSkqyMZHD/?accept=zip)**
-> - **Mac (Apple Silicon — Apple Neural Engine):** **[Download FreeTrace for macOS](https://psilo.sorbonne-universite.fr/public.php/dav/files/z5SWaBXqns4tB53/?accept=zip)** <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 19:00 --> <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 18:00 -->
+> **Standalone installer (GPU):** Download the self-contained installer — no compilation or dependency installation required: <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-17 11:00 -->
+> - **Windows (NVIDIA GPU required):** **[Download FreeTrace](https://psilo.sorbonne-universite.fr/public.php/dav/files/ToCEbcMSkqyMZHD/?accept=zip)** (RTX 2000 / 3000 / 4000 / 5000 series, cuDNN 9.20) <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-17 11:00 -->
+> - **Mac (Apple Silicon — Apple Neural Engine):** **[Download FreeTrace for macOS](https://psilo.sorbonne-universite.fr/public.php/dav/files/z5SWaBXqns4tB53/?accept=zip)**
 
 > **Don't have a GPU? Run it on CPU:** Download a pre-built binary from the [Releases page](https://github.com/JunwooParkSaribu/FreeTrace_cpp/releases) — no compilers needed. Available for Linux, macOS (Apple Silicon), and Windows. <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 -->
 
@@ -248,7 +246,7 @@ cd C:\path\to\FreeTrace_cpp
 mkdir build; cd build; cmake .. -G "Visual Studio 17 2022" "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake"; cmake --build . --config Release
 ```
 
-**With fBm (GPU):** requires [**CUDA Toolkit 12.x**](https://developer.nvidia.com/cuda-downloads) (install after VS 2022) and [**cuDNN 9.x**](https://developer.nvidia.com/cudnn-downloads) (CUDA 12, Windows, Tarball). Use cuDNN 9.2 for RTX 2000/3000, or cuDNN 9.20+ for RTX 4000/5000.
+**With fBm (GPU):** requires [**CUDA Toolkit 12.x**](https://developer.nvidia.com/cuda-downloads) (install after VS 2022) and [**cuDNN 9.20+**](https://developer.nvidia.com/cudnn-downloads) (CUDA 12, Windows, Tarball). <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-17 11:00 -->
 ```powershell
 Invoke-WebRequest -Uri https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-win-x64-gpu-1.24.3.zip -OutFile ort.zip; tar -xf ort.zip; mkdir build; cd build; cmake .. -G "Visual Studio 17 2022" "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" "-DUSE_ONNXRUNTIME=ON" "-DONNXRUNTIME_DIR=..\onnxruntime-win-x64-gpu-1.24.3"; cmake --build . --config Release; copy ..\onnxruntime-win-x64-gpu-1.24.3\lib\*.dll Release\
 ```
