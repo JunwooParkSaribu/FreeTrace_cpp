@@ -87,7 +87,7 @@ fi
 # Build GUI with PyInstaller
 APP_BUILT=false
 if command -v python3 &>/dev/null; then
-    python3 -m pip install pyinstaller PyQt6 scipy --quiet 2>/dev/null || true
+    python3 -m pip install pyinstaller PyQt6 scipy numpy pandas tifffile nd2 --quiet 2>/dev/null || true # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
     cd "$PROJECT_DIR"
     if python3 -m PyInstaller gui_macos.spec --noconfirm --clean 2>&1; then
         if [ -d "$PROJECT_DIR/dist/FreeTrace.app" ]; then
