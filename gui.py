@@ -864,7 +864,7 @@ class HKGatingCanvas(QGraphicsView):  # Modified by Claude (claude-opus-4-6, Ant
 class FreeTraceGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FreeTrace v1.6.1") # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+        self.setWindowTitle("FreeTrace v1.6.1.0") # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
         # Set window icon  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 23:55
         _base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
         _icon_path = os.path.join(_base, "icon", "freetrace_icon.png")
