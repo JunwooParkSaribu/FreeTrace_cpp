@@ -7,7 +7,7 @@ This C++ implementation is developed by **Claude** (claude-opus-4-6, Anthropic A
 **Data privacy:** FreeTrace runs entirely on your local machine. No data is transmitted to any external server.
 
 > **Standalone installer (GPU):** Download the self-contained installer — no compilation or dependency installation required: <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-17 11:00 -->
-> - **Windows (NVIDIA GPU required):** **[Download FreeTrace](https://psilo.sorbonne-universite.fr/public.php/dav/files/ToCEbcMSkqyMZHD/?accept=zip)** (RTX 2000 / 3000 / 4000 / 5000 series, cuDNN 9.20) <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-17 11:00 -->
+> - **Windows (NVIDIA GPU recommended):** **[Download FreeTrace](https://psilo.sorbonne-universite.fr/public.php/dav/files/ToCEbcMSkqyMZHD/?accept=zip)** (RTX 2000 / 3000 / 4000 / 5000 series, cuDNN 9.20) <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-17 11:00 -->
 > - **Mac (Apple Silicon — Apple Neural Engine):** **[Download FreeTrace for macOS](https://psilo.sorbonne-universite.fr/public.php/dav/files/z5SWaBXqns4tB53/?accept=zip)**
 
 > **Don't have a GPU? Run it on CPU:** Download a pre-built binary from the [Releases page](https://github.com/JunwooParkSaribu/FreeTrace_cpp/releases) — no compilers needed. Available for Linux, macOS (Apple Silicon), and Windows. <!-- Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16 -->
