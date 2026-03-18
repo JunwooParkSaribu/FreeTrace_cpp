@@ -46,6 +46,8 @@ installer_staging_rtx5000/
 installer/deps/
 build_win/
 build_debug/
+build_dmg/
+dmg_staging/
 
 # Test data, debug scripts, and outputs
 test_*

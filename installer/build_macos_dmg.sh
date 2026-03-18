@@ -221,8 +221,11 @@ CLI (optional):
   "/Applications/FreeTrace.app/Contents/MacOS/freetrace-bin" <input.tiff> <output_dir>
 
 If macOS blocks the app (Gatekeeper):
-  Right-click → Open, or run:
-  xattr -cr "/Applications/FreeTrace.app"
+  1. Right-click FreeTrace.app → Open, or
+  2. Go to System Settings → Privacy & Security, scroll down,
+     and click "Allow Anyway" next to the FreeTrace message, or
+  3. Run in Terminal:
+     xattr -cr "/Applications/FreeTrace.app"
 
 https://github.com/JunwooParkSaribu/FreeTrace_cpp
 README
