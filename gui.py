@@ -569,7 +569,7 @@ class HKGatingCanvas(QGraphicsView):  # Modified by Claude (claude-opus-4-6, Ant
             painter.drawEllipse(QPointF(x, y), dot_r, dot_r)
         painter.end()
         self._dot_pixmap_item = self._scene.addPixmap(pix)
-        self._dot_pixmap_item.setZValue(-1)  # behind boundaries
+        self._dot_pixmap_item.setZValue(1)  # above background, below boundaries
         # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
 
     def resizeEvent(self, event):
@@ -731,21 +731,18 @@ class HKGatingCanvas(QGraphicsView):  # Modified by Claude (claude-opus-4-6, Ant
         boundary.append(end_ext)
 
     def _classify_points(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
-        """Classify scatter points into multiple regions using flood fill.
+        """Classify scatter points into regions using vectorized flood fill."""
+        from scipy.ndimage import label as ndimage_label, distance_transform_edt
 
-        Rasterizes all boundary curves onto a grid, then flood-fills each
-        connected region with a unique label. Each data point is assigned
-        the label of the grid cell it falls in.
-        """
         if not self._boundaries:
             self._region_labels = None
             return
 
         grid_w = int(self._PLOT_W)
         grid_h = int(self._PLOT_H)
-        grid = np.zeros((grid_h, grid_w), dtype=int)  # 0 = unfilled, -1 = wall
+        wall = np.zeros((grid_h, grid_w), dtype=bool)
 
-        # Rasterize all boundary segments as walls using DDA + cross pattern
+        # Rasterize boundary segments as walls (DDA + cross pattern)
         for boundary in self._boundaries:
             for j in range(len(boundary) - 1):
                 x0 = boundary[j].x() - self._MARGIN_LEFT
@@ -754,69 +751,44 @@ class HKGatingCanvas(QGraphicsView):  # Modified by Claude (claude-opus-4-6, Ant
                 y1 = boundary[j + 1].y() - self._MARGIN_TOP
                 dx, dy = x1 - x0, y1 - y0
                 steps = max(int(abs(dx)), int(abs(dy)), 1)
-                x_inc, y_inc = dx / steps, dy / steps
-                x, y = x0, y0
-                for _ in range(steps + 1):
-                    ix, iy = int(round(x)), int(round(y))
-                    for di, dj in [(0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)]:
-                        ni, nj = iy + di, ix + dj
-                        if 0 <= ni < grid_h and 0 <= nj < grid_w:
-                            grid[ni, nj] = -1
-                    x += x_inc
-                    y += y_inc
+                xs = np.round(np.linspace(x0, x1, steps + 1)).astype(int)
+                ys = np.round(np.linspace(y0, y1, steps + 1)).astype(int)
+                for di, dj in [(0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)]:
+                    rs = np.clip(ys + di, 0, grid_h - 1)
+                    cs = np.clip(xs + dj, 0, grid_w - 1)
+                    wall[rs, cs] = True
 
-        # Flood fill each connected region (DFS with explicit stack)
-        region_id = 0
-        for r in range(grid_h):
-            for c in range(grid_w):
-                if grid[r, c] == 0:
-                    region_id += 1
-                    stack = [(r, c)]
-                    grid[r, c] = region_id
-                    while stack:
-                        cr, cc = stack.pop()
-                        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                            nr, nc = cr + dr, cc + dc
-                            if 0 <= nr < grid_h and 0 <= nc < grid_w and grid[nr, nc] == 0:
-                                grid[nr, nc] = region_id
-                                stack.append((nr, nc))
+        # Flood fill via scipy (C-level, ~100x faster than Python DFS)
+        grid, n_regions = ndimage_label(~wall)
 
-        # Assign labels to data points
-        n_pts = len(self._H)
-        self._region_labels = np.zeros(n_pts, dtype=int)
-        for i in range(n_pts):
-            px = self._h_to_x(self._H[i]) - self._MARGIN_LEFT
-            py = self._logk_to_y(self._log_K[i]) - self._MARGIN_TOP
-            gx = int(np.clip(round(px), 0, grid_w - 1))
-            gy = int(np.clip(round(py), 0, grid_h - 1))
-            label = grid[gy, gx]
-            if label <= 0:
-                # Point sits on a wall pixel — find nearest region
-                for radius in range(1, 20):
-                    found = False
-                    for dr in range(-radius, radius + 1):
-                        for dc in range(-radius, radius + 1):
-                            nr, nc = gy + dr, gx + dc
-                            if 0 <= nr < grid_h and 0 <= nc < grid_w and grid[nr, nc] > 0:
-                                label = grid[nr, nc]
-                                found = True
-                                break
-                        if found:
-                            break
-                    if found:
-                        break
-            self._region_labels[i] = max(0, label - 1)  # convert 1-based to 0-based
+        # Vectorized label assignment for all data points at once
+        px_all = (self._H - self._h_min) / (self._h_max - self._h_min) * self._PLOT_W
+        py_all = (1.0 - (self._log_K - self._logk_min) / (self._logk_max - self._logk_min)) * self._PLOT_H
+        gx = np.clip(np.round(px_all).astype(int), 0, grid_w - 1)
+        gy = np.clip(np.round(py_all).astype(int), 0, grid_h - 1)
+        self._region_labels = grid[gy, gx]
 
-        # Reorder region labels by ascending mean K  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+        # Fix points on wall pixels: find nearest labeled region via distance transform
+        on_wall = self._region_labels == 0
+        if np.any(on_wall):
+            # For each region, compute distance; assign wall points to nearest
+            _, nearest_indices = distance_transform_edt(wall, return_distances=True, return_indices=True)
+            nr, nc = nearest_indices[0], nearest_indices[1]
+            wall_gy, wall_gx = gy[on_wall], gx[on_wall]
+            self._region_labels[on_wall] = grid[nr[wall_gy, wall_gx], nc[wall_gy, wall_gx]]
+
+        # Convert to 0-based
+        self._region_labels = np.maximum(0, self._region_labels - 1)
+
+        # Reorder region labels by ascending mean K
         unique_labels = np.unique(self._region_labels)
         if len(unique_labels) > 1:
-            mean_k_per_region = []
-            for lbl in unique_labels:
-                mask = self._region_labels == lbl
-                mean_k_per_region.append((lbl, np.mean(self._K[mask])))
-            sorted_labels = sorted(mean_k_per_region, key=lambda x: x[1])
-            remap = {old_lbl: new_lbl for new_lbl, (old_lbl, _) in enumerate(sorted_labels)}
-            self._region_labels = np.array([remap[l] for l in self._region_labels], dtype=int)
+            means = np.array([np.mean(self._K[self._region_labels == lbl]) for lbl in unique_labels])
+            order = np.argsort(means)
+            remap = np.zeros(int(unique_labels.max()) + 1, dtype=int)
+            for new_lbl, idx in enumerate(order):
+                remap[unique_labels[idx]] = new_lbl
+            self._region_labels = remap[self._region_labels]
         # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
 
     def _update_dot_colors(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
@@ -1824,11 +1796,11 @@ class FreeTraceGUI(QMainWindow):
             )
 
             color_paths = {}  # (r,g,b,a) -> QPainterPath  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
-            for tidx in df['traj_idx'].unique():
-                traj_data = df[df['traj_idx'] == tidx].sort_values('frame')
-                positions = list(zip(traj_data['x'].values, traj_data['y'].values))
-                if len(positions) < 2:
+            grouped = df.sort_values('frame').groupby('traj_idx', sort=False)
+            for tidx, traj_data in grouped:
+                if len(traj_data) < 2:
                     continue
+                xs, ys = traj_data['x'].values, traj_data['y'].values
 
                 if labels is not None:
                     region = label_map.get(int(tidx), 0)
@@ -1845,9 +1817,9 @@ class FreeTraceGUI(QMainWindow):
                 if color_key not in color_paths:
                     color_paths[color_key] = QPainterPath()
                 path = color_paths[color_key]
-                path.moveTo(positions[0][0], positions[0][1])
-                for x, y in positions[1:]:
-                    path.lineTo(x, y)
+                path.moveTo(float(xs[0]), float(ys[0]))
+                for j in range(1, len(xs)):
+                    path.lineTo(float(xs[j]), float(ys[j]))
 
             for color_key, path in color_paths.items():
                 scene.addPath(path, QPen(QColor(*color_key), 0.5))  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
