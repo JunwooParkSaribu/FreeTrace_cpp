@@ -244,9 +244,11 @@ class PreviewWorker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic 
                     all_imgs = tif.asarray()
             if len(all_imgs.shape) == 2:
                 all_imgs = all_imgs[np.newaxis, ...]
-            n = min(self.n_frames, len(all_imgs))
-            imgs = all_imgs[:n]
-            self.log.emit(f"Loaded {n} frames for preview.")
+            total = len(all_imgs) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+            n = min(self.n_frames, total)
+            start = max(0, total // 2 - n // 2)
+            imgs = all_imgs[start:start + n]
+            self.log.emit(f"Loaded {n} frames for preview (frames {start}–{start + n - 1} of {total}).")
             self.progress.emit(15)
 
             # Normalize for display (same as FreeTrace read_tif)
@@ -691,10 +693,13 @@ class HKGatingCanvas(QGraphicsView):  # Modified by Claude (claude-opus-4-6, Ant
                 return candidates[0][1]
             return pt
 
-        start_ext = _extend_to_edge(boundary[0], boundary[1])
-        end_ext = _extend_to_edge(boundary[-1], boundary[-2])
+        # Use a point further along the boundary for a stable direction # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+        # (freehand drawing produces noisy endpoints)
+        n_dir = min(len(boundary) - 1, max(5, len(boundary) // 5))
+        start_ext = _extend_to_edge(boundary[0], boundary[n_dir])
+        end_ext = _extend_to_edge(boundary[-1], boundary[-1 - n_dir])
         boundary.insert(0, start_ext)
-        boundary.append(end_ext)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+        boundary.append(end_ext)
 
     def _classify_points(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
         """Classify scatter points into multiple regions using flood fill.
@@ -930,7 +935,7 @@ class FreeTraceGUI(QMainWindow):
         splitter.setSizes([380, 670])
         return tab
 
-    # ---- Analysis tab (sub-tabs: Class | Stats) -------------------------
+    # ---- Analysis tab (sub-tabs: Class | Basic Stats | Adv Stats) --------
     def _build_analysis_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -941,7 +946,8 @@ class FreeTraceGUI(QMainWindow):
         self._analysis_tabs = QTabWidget()
         self._analysis_tabs.setObjectName("analysisTabs")
         self._analysis_tabs.addTab(self._build_class_tab(), "Class")
-        self._analysis_tabs.addTab(self._build_stats_tab(), "Stats")
+        self._analysis_tabs.addTab(self._build_basic_stats_tab(), "Basic Stats")
+        self._analysis_tabs.addTab(self._build_adv_stats_tab(), "Adv Stats")
         layout.addWidget(self._analysis_tabs)
 
         return widget
@@ -985,11 +991,20 @@ class FreeTraceGUI(QMainWindow):
         # Top: two large windows side by side
         canvas_splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # H-K gating canvas (left)
+        # H-K gating canvas (left) with title # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+        hk_container = QWidget()
+        hk_layout = QVBoxLayout(hk_container)
+        hk_layout.setContentsMargins(0, 0, 0, 0)
+        hk_layout.setSpacing(2)
+        hk_title = QLabel("Trajectory Classification by H and K — Draw Lines to Define Regions")
+        hk_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hk_title.setStyleSheet("color:#ccc; font-size:12px; font-weight:bold; padding:4px;")
+        hk_layout.addWidget(hk_title)
         self._hk_canvas = HKGatingCanvas()
         self._hk_canvas.gating_changed.connect(self._on_gating_changed)
         self._hk_canvas.setMinimumSize(300, 250)
-        canvas_splitter.addWidget(self._hk_canvas)
+        hk_layout.addWidget(self._hk_canvas)
+        canvas_splitter.addWidget(hk_container)
 
         # Trajectory visualization (right) — scroll area with one view per video
         self._traj_scroll = QScrollArea()
@@ -1032,21 +1047,37 @@ class FreeTraceGUI(QMainWindow):
 
         return widget
 
-    # ---- Stats sub-tab ---------------------------------------------------
-    def _build_stats_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+    # ---- Basic Stats sub-tab ---------------------------------------------
+    def _build_basic_stats_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        placeholder = QLabel("Statistics — coming soon.")
+        placeholder = QLabel("Basic Statistics — coming soon.")
         placeholder.setWordWrap(True)
         placeholder.setStyleSheet("color:#888; font-size:14px; padding:20px;")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(placeholder)
         layout.addStretch()
 
-        return widget  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+        return widget
+
+    # ---- Adv Stats sub-tab ------------------------------------------------
+    def _build_adv_stats_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        placeholder = QLabel("Advanced Statistics — coming soon.")
+        placeholder.setWordWrap(True)
+        placeholder.setStyleSheet("color:#888; font-size:14px; padding:20px;")
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(placeholder)
+        layout.addStretch()
+
+        return widget
 
     # ---- left panel (controls) ----------------------------------------
     def _build_left_panel(self):
@@ -1251,7 +1282,7 @@ class FreeTraceGUI(QMainWindow):
         preview_layout.setContentsMargins(4, 4, 4, 4)
         preview_layout.setSpacing(4)
 
-        self._preview_info_label = QLabel("Click 'Preview' to run localization on the first 50 frames.")
+        self._preview_info_label = QLabel("Click 'Preview' to run localization on the middle 50 frames.") # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
         self._preview_info_label.setStyleSheet("color:#999; font-size:12px;")
         self._preview_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview_layout.addWidget(self._preview_info_label)
@@ -1584,10 +1615,34 @@ class FreeTraceGUI(QMainWindow):
                                     f"Traces file not found:\n{traces_path}")
                 return
 
+            # Validate diffusion CSV format # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
             df = pd.read_csv(diffusion_path)
-            if 'H' not in df.columns or 'K' not in df.columns or 'traj_idx' not in df.columns:
-                QMessageBox.warning(self, "Invalid file",
-                                    "Diffusion CSV must contain columns: traj_idx, H, K")
+            required_diff_cols = {'traj_idx', 'H', 'K'}
+            if not required_diff_cols.issubset(df.columns):
+                missing = required_diff_cols - set(df.columns)
+                QMessageBox.warning(self, "Invalid diffusion file",
+                                    f"Not a valid FreeTrace diffusion output.\n"
+                                    f"Missing columns: {', '.join(sorted(missing))}\n"
+                                    f"Expected: traj_idx, H, K")
+                return
+            if not all(df[c].dtype.kind in ('i', 'f') for c in ['H', 'K']):
+                QMessageBox.warning(self, "Invalid diffusion file",
+                                    "Columns H and K must be numeric.")
+                return
+
+            # Validate traces CSV format
+            traces_df = pd.read_csv(traces_path)
+            required_trace_cols = {'traj_idx', 'frame', 'x', 'y'}
+            if not required_trace_cols.issubset(traces_df.columns):
+                missing = required_trace_cols - set(traces_df.columns)
+                QMessageBox.warning(self, "Invalid traces file",
+                                    f"Not a valid FreeTrace traces output.\n"
+                                    f"Missing columns: {', '.join(sorted(missing))}\n"
+                                    f"Expected: traj_idx, frame, x, y, z")
+                return
+            if not all(traces_df[c].dtype.kind in ('i', 'f') for c in ['frame', 'x', 'y']):
+                QMessageBox.warning(self, "Invalid traces file",
+                                    "Columns frame, x, y must be numeric.")
                 return
 
             fname = os.path.basename(diffusion_path)
@@ -1598,7 +1653,7 @@ class FreeTraceGUI(QMainWindow):
                 'diffusion_path': diffusion_path,
                 'traces_path': traces_path,
                 'diffusion_df': df,
-                'traces_df': pd.read_csv(traces_path),
+                'traces_df': traces_df,
             })
 
             self._rebuild_canvas_data()

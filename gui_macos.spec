@@ -24,7 +24,7 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'matplotlib', 'numpy', 'scipy', 'pandas', 'PIL',
+        'matplotlib', 'scipy', 'PIL', # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
         'tkinter', 'unittest', 'xml', 'email', 'http',
     ],
     noarchive=False,
