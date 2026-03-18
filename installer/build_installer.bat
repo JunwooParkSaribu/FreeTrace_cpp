@@ -299,7 +299,7 @@ REM  Step 2: Build FreeTrace_GUI.exe with PyInstaller
 REM ============================================================
 echo.
 echo === Step 2: Building FreeTrace_GUI.exe ===
-python -m pip install pyinstaller PyQt6 --quiet
+python -m pip install pyinstaller PyQt6 scipy --quiet
 python -m PyInstaller "!ROOT!\gui.spec" --noconfirm --clean --distpath "!ROOT!\dist" --workpath "!ROOT!\build_pyinstaller"
 if errorlevel 1 (echo ERROR: PyInstaller failed && exit /b 1)
 
