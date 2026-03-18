@@ -19,7 +19,7 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         'matplotlib', 'PIL', # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
-        'tkinter', 'unittest', 'xml', 'email', 'http',
+        'tkinter',
     ],
     noarchive=False,
     optimize=1,

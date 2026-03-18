@@ -2140,11 +2140,24 @@ class FreeTraceGUI(QMainWindow):
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-def main():  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+def main():  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
     if getattr(sys, 'frozen', False):
         os.chdir(os.path.dirname(sys.executable))
     else:
         os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+    # PyQt6 kills the app on unhandled exceptions in slots — catch and show them instead
+    import traceback as _tb
+    _original_excepthook = sys.excepthook
+    def _excepthook(exc_type, exc_value, exc_traceback):
+        msg = "".join(_tb.format_exception(exc_type, exc_value, exc_traceback))
+        sys.stderr.write(msg)
+        try:
+            QMessageBox.critical(None, "Unexpected Error", msg)
+        except Exception:
+            pass
+    sys.excepthook = _excepthook  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+
     app = QApplication(sys.argv)
     app.setApplicationName("FreeTrace")
     win = FreeTraceGUI()
