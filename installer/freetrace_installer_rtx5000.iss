@@ -11,7 +11,7 @@
 ; For RTX 2000/3000/4000, use freetrace_installer.iss (cuDNN 9.2) instead.
 
 #define MyAppName "FreeTrace"
-#define MyAppVersion "1.6.0.5"
+#define MyAppVersion "1.6.1"
 #define MyAppPublisher "Junwoo PARK"
 #define MyAppURL "https://github.com/JunwooParkSaribu/FreeTrace_cpp"
 #define MyAppExeName "FreeTrace_GUI.exe"
