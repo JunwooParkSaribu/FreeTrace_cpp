@@ -315,7 +315,9 @@ mkdir "!STAGING!\models"
 REM --- Main executables ---
 copy "!BUILD_DIR!\Release\freetrace.exe" "!STAGING!\" >nul 2>&1
 if not exist "!STAGING!\freetrace.exe" copy "!BUILD_DIR!\freetrace.exe" "!STAGING!\" >nul
-copy "!ROOT!\dist\FreeTrace_GUI.exe" "!STAGING!\" >nul
+REM GUI is built in one-folder mode (fast startup) — copy exe + _internal/ # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+copy "!ROOT!\dist\FreeTrace_GUI\FreeTrace_GUI.exe" "!STAGING!\" >nul
+xcopy "!ROOT!\dist\FreeTrace_GUI\_internal" "!STAGING!\_internal\" /E /I /Q >nul
 
 REM --- Model files ---
 copy "!ROOT!\models\*.onnx" "!STAGING!\models\" >nul
