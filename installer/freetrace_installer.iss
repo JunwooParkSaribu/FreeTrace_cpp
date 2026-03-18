@@ -56,6 +56,8 @@ Name: "addtopath"; Description: "Add FreeTrace to system PATH"; GroupDescription
 ; === Main executables ===
 Source: "{#StagingDir}\freetrace.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StagingDir}\FreeTrace_GUI.exe"; DestDir: "{app}"; Flags: ignoreversion
+; === GUI Python runtime (one-folder mode for fast startup) ===
+Source: "{#StagingDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; === Model files ===
 Source: "{#StagingDir}\models\*"; DestDir: "{app}\models"; Flags: ignoreversion recursesubdirs
