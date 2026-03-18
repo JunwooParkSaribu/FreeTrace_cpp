@@ -104,7 +104,7 @@ python -m PyInstaller gui.spec --noconfirm --clean
 # Output: dist/FreeTrace.exe
 ```
 
-The GUI automatically finds the `freetrace` binary in the same directory, `build/`, or system PATH.
+The GUI automatically finds the `freetrace` binary in the same directory, `build_gpu/`, `build/`, or system PATH (GPU build is preferred over CPU).
 
 ## About
 
@@ -170,17 +170,28 @@ mkdir build && cd build && cmake .. && make -j$(nproc)
 
 **With fBm + GPU** (recommended):
 ```bash
+# Download and extract ONNX Runtime GPU
 wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-linux-x64-gpu-1.24.3.tgz
 tar xzf onnxruntime-linux-x64-gpu-1.24.3.tgz
+
+# Install cuDNN 9 (required by ONNX Runtime GPU)
+pip install nvidia-cudnn-cu12
+
+# Build
 mkdir -p build_gpu && cd build_gpu
 cmake .. -DUSE_CUDA=ON -DUSE_ONNXRUNTIME=ON -DONNXRUNTIME_DIR=$(pwd)/../onnxruntime-linux-x64-gpu-1.24.3
 make -j$(nproc)
 
-export LD_LIBRARY_PATH=$(pwd)/../onnxruntime-linux-x64-gpu-1.24.3/lib:$LD_LIBRARY_PATH
+# Run (both ORT and cuDNN must be on LD_LIBRARY_PATH)
+export LD_LIBRARY_PATH=$(pwd)/../onnxruntime-linux-x64-gpu-1.24.3/lib:$(python3 -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])")/lib:$LD_LIBRARY_PATH
 ./freetrace video.tiff results/
 ```
 
-> Use `nvcc --version` (not `nvidia-smi`) to verify your CUDA toolkit version. If CMake cannot find `nvcc`, add `-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc`.
+> **Troubleshooting:**
+> - Use `nvcc --version` (not `nvidia-smi`) to verify your CUDA toolkit version.
+> - If CMake cannot find `nvcc`, add `-DCMAKE_CUDA_COMPILER=/usr/bin/nvcc` (or `/usr/local/cuda/bin/nvcc`).
+> - If CMake fails to detect CUDA with a very new CMake version (e.g., 4.x), downgrade to CMake 3.x: `pip install cmake==3.31.6`.
+> - If you get `libcudnn.so.9: cannot open shared object file`, ensure cuDNN is installed and on `LD_LIBRARY_PATH`.
 
 **With fBm, CPU only** (no GPU needed):
 ```bash
