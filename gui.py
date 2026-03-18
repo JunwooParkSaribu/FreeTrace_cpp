@@ -72,16 +72,19 @@ def _find_freetrace_binary(): # Modified by Claude (claude-opus-4-6, Anthropic A
     else:
         script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    candidates = [ # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+    candidates = [ # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
         # Inside .app/Contents/MacOS/ (renamed to avoid case collision with PyInstaller exe)
         os.path.join(script_dir, "freetrace-bin"),
         # Same dir as gui.py or next to exe
         os.path.join(script_dir, "freetrace"),
         os.path.join(script_dir, "freetrace.exe"),
+        # build_gpu/ subdirectory (GPU development build — preferred over CPU)
+        os.path.join(script_dir, "build_gpu", "freetrace"),
+        os.path.join(script_dir, "build_gpu", "freetrace.exe"),
         # build/ subdirectory (development)
         os.path.join(script_dir, "build", "freetrace"),
         os.path.join(script_dir, "build", "freetrace.exe"),
-    ] # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+    ] # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
     for c in candidates:
         if os.path.isfile(c) and os.access(c, os.X_OK):
             return c
