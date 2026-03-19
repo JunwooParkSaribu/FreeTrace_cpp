@@ -118,6 +118,7 @@ class FreeTraceWorker(QThread):
         self.batch = batch
         self._process = None
         self._cancel = False
+        self._batch_summary = ""  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
     def cancel(self): # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
         self._cancel = True
@@ -200,7 +201,8 @@ class FreeTraceWorker(QThread):
                 elif "Estimating K" in line:
                     self.progress.emit(85, "Estimating K for trajectories")
                 elif "Batch complete" in line:
-                    self.progress.emit(95, "Finishing") # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+                    self._batch_summary = line  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                    self.progress.emit(95, "Finishing")
 
                 if self._cancel:
                     break
@@ -213,8 +215,12 @@ class FreeTraceWorker(QThread):
             elif rc == 0:
                 self.progress.emit(100, "Done")
                 self.finished.emit(True, self.output_dir)
+            elif self.batch and self._batch_summary:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                # Partial success in batch mode — not a critical error
+                self.progress.emit(100, "Done (with errors)")
+                self.finished.emit(True, f"BATCH_PARTIAL|{self.output_dir}|{self._batch_summary}")
             else:
-                self.finished.emit(False, f"Process exited with code {rc}")
+                self.finished.emit(False, f"Process exited with code {rc}")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
         except Exception as e:
             self.log.emit(str(e))
@@ -1526,6 +1532,9 @@ class FreeTraceGUI(QMainWindow):
         help_text.setTextFormat(Qt.TextFormat.RichText)
         help_text.setStyleSheet("color:#cccccc; font-size:13px; padding:12px 20px;")
         help_text.setText(  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            "<p style='font-size:13px; color:#aaaaaa;'>Suggestions for additional statistics or modifications are welcome — "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            "please contact <a style='color:#66ccff;' href='mailto:junwoo.park@sorbonne-universite.fr'>"
+            "junwoo.park@sorbonne-universite.fr</a></p>"
             "<p style='font-size:14px;'><b>Paper:</b> "
             "https://doi.org/10.64898/2026.01.08.698486</p>"
             "<h3 style='color:#66ccff;'>Loading Data</h3>"
@@ -3334,16 +3343,34 @@ class FreeTraceGUI(QMainWindow):
 
     def _on_finished(self, success: bool, message: str):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         self._reset_buttons()
-        if success:
+        if success and message.startswith("BATCH_PARTIAL|"):
+            # Batch mode: some files failed, some succeeded
+            parts = message.split("|", 2)
+            output_dir = parts[1]
+            summary = parts[2]  # e.g. "=== Batch complete: 1/2 succeeded ==="
+            self._output_dir = output_dir
+            self._append_log(f"Done (with errors). Results saved to: {output_dir}")
+            self._load_results(output_dir)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            self._tabs.setCurrentIndex(1)
+            error_log = os.path.join(output_dir, "error_log.txt")
+            QMessageBox.information(
+                self, "Batch complete",
+                f"{summary.strip('= ')}\n\n"
+                f"See error_log.txt for details:\n{error_log}"
+            )  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        elif success:
             self._output_dir = message
             self._append_log(f"Done. Results saved to: {message}")
             video_path = self._input_path.text().strip()
-            video_stem = os.path.splitext(os.path.basename(video_path))[0]
-            self._load_results(message, video_stem)
-            self._tabs.setCurrentIndex(1)
+            if os.path.isdir(video_path):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                self._load_results(message)  # Batch: show all results
+            else:
+                video_stem = os.path.splitext(os.path.basename(video_path))[0]
+                self._load_results(message, video_stem)  # Single file: filter by stem
+            self._tabs.setCurrentIndex(1)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         else:
             self._append_log(f"Failed: {message}")
-            QMessageBox.critical(self, "FreeTrace error", message)
+            QMessageBox.critical(self, "FreeTrace error", message)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
     def _reset_buttons(self):
         self._run_btn.setEnabled(True)

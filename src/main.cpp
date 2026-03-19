@@ -49,7 +49,7 @@ static TrackingOpts parse_tracking_opts(int argc, char* argv[], int start_idx) {
 
 static void print_tracking_banner(const std::string& loc_csv, const std::string& output, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
                                   int nb_frames, const freetrace::TrackingConfig& config) {
-    std::cout << "FreeTrace C++ - Tracking" << std::endl;
+    std::cout << "FreeTrace - Tracking" << std::endl;
     std::cout << "  Loc CSV:   " << loc_csv << std::endl;
     std::cout << "  Output:    " << output << std::endl;
     std::cout << "  Nb frames: " << nb_frames << std::endl;
@@ -64,7 +64,7 @@ static void print_tracking_banner(const std::string& loc_csv, const std::string&
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 static void print_usage() { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
-    std::cout << "FreeTrace C++ v1.6.1.0\n" // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+    std::cout << "FreeTrace v1.6.1.0\n" // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
               << "Usage:\n"
               << "  Full pipeline (localization + tracking):\n"
               << "    freetrace <input> <output_dir> [options]\n"
@@ -194,7 +194,7 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
         }
 
         std::filesystem::create_directories(output);
-        std::cout << "FreeTrace C++ - Batch Mode" << std::endl;
+        std::cout << "FreeTrace - Batch Mode" << std::endl;
         std::cout << "  Input folder: " << input_folder << std::endl;
         std::cout << "  Output:       " << output << std::endl;
         std::cout << "  Files found:  " << files.size() << std::endl;
@@ -208,7 +208,7 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
         auto log_error = [&](const std::string& fname, const std::string& stage, const std::string& msg) {
             if (!error_log.is_open()) {
                 error_log.open(error_log_path, std::ios::app);
-                error_log << "FreeTrace C++ Batch — Error Log" << std::endl;
+                error_log << "FreeTrace Batch — Error Log" << std::endl;
                 error_log << "Input folder: " << input_folder << std::endl;
                 error_log << "Output:       " << output << std::endl;
                 error_log << std::string(60, '-') << std::endl;
@@ -279,7 +279,7 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
         int window = 7; float threshold = 1.0f; int shift = 1; int batch_sz = 0; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
         parse_loc_opts(argc, argv, 4, window, threshold, shift, batch_sz);
 
-        std::cout << "FreeTrace C++ - Localization" << std::endl;
+        std::cout << "FreeTrace - Localization" << std::endl;
         std::cout << "  Input:  " << input << std::endl;
         std::cout << "  Output: " << output << std::endl;
         std::cout << "  Window: " << window << ", Threshold: " << threshold
@@ -304,7 +304,7 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
         bool verbose = config.verbose;
 
         // --- Step 1: Localization ---
-        std::cout << "FreeTrace C++ - Full Pipeline" << std::endl;
+        std::cout << "FreeTrace - Full Pipeline" << std::endl;
         std::cout << "  Input:  " << input << std::endl;
         std::cout << "  Output: " << output << std::endl;
         std::cout << "\n=== Step 1: Localization ===" << std::endl;
