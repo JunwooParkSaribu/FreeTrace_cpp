@@ -16,12 +16,12 @@ a = Analysis(
     pathex=[script_dir],
     binaries=[],
     datas=[(os.path.join(script_dir, 'icon'), 'icon')],
-    hiddenimports=['PyQt6.sip', 'numpy', 'pandas', 'tifffile', 'nd2'],
+    hiddenimports=['PyQt6.sip', 'numpy', 'pandas', 'tifffile', 'nd2', 'matplotlib', 'seaborn'],  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'matplotlib', 'PIL',
+        'PIL',  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         'tkinter',
     ],
     noarchive=False,

@@ -16,6 +16,12 @@ import shutil
 
 import numpy as np
 import pandas as pd
+import matplotlib  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+matplotlib.use('Agg')
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
+import seaborn as sns  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QProcess, QPointF, QRectF
 from PyQt6.QtGui import (
@@ -384,6 +390,248 @@ class CollapsibleSection(QWidget):
 
     def add_layout(self, layout):
         self._body_layout.addLayout(layout)
+
+
+# ---------------------------------------------------------------------------
+# Preprocessing helpers for Basic Stats (standalone, no FreeTrace dependency)
+# ---------------------------------------------------------------------------
+def _unit_vector(vector):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+    norm = np.linalg.norm(vector)
+    if norm == 0:
+        return vector
+    return vector / norm
+
+
+def _angle_between(v1, v2):
+    v1_u = _unit_vector(v1)
+    v2_u = _unit_vector(v2)
+    return np.degrees(np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0)))
+
+
+def _dot_product_angle(v1, v2):
+    ang = _angle_between(v1, v2)
+    if ang == np.inf or ang == np.nan or math.isnan(ang):
+        return 0
+    return 180 - ang
+
+
+def _preprocess_for_stats(data, pixelmicrons, framerate, cutoff_min=3, cutoff_max=99999,  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                          has_diffusion=True):
+    """Standalone preprocessing for Basic Stats tab.
+
+    Simplified from simple_preprocessing() — excludes TAMSD, Markov chain,
+    networkx, tqdm, color_palette, trajectory_visualization.
+
+    Trajectories are split only by state change, not by frame gaps.
+    Per-step statistics (jump distance, angles) use only consecutive-frame
+    steps (df==1), while per-trajectory metrics (duration, MSD) span the
+    full observation including gaps.
+
+    Returns (analysis_data1, analysis_data2, analysis_data3, msd, total_states)
+    """
+    data = data.dropna()
+    if 'state' in data.columns:
+        data = data.astype({'state': int})
+    else:
+        data['state'] = 0
+
+    traj_indices = pd.unique(data['traj_idx'])
+    total_states = sorted(data['state'].unique())
+
+    if len(data) == 0:
+        return None, None, None, None, total_states
+
+    # State re-ordering w.r.t. K (only if diffusion data available)
+    if has_diffusion and 'K' in data.columns and len(total_states) > 1:
+        avg_ks = []
+        for st in total_states:
+            avg_ks.append(data['K'][data['state'] == st].mean())
+        avg_ks = np.array(avg_ks)
+        prev_states = np.argsort(avg_ks)
+        state_reorder = {st: idx for idx, st in enumerate(prev_states)}
+        ordered_states = np.empty(len(data['state']), dtype=np.uint8)
+        for st_idx in range(len(ordered_states)):
+            ordered_states[st_idx] = state_reorder[data['state'].iloc[st_idx]]
+        data['state'] = ordered_states
+        total_states = sorted(data['state'].unique())
+
+    dim = 2
+    # Max trajectory duration (not max absolute frame number)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+    max_frame = int(data.groupby('traj_idx')['frame'].apply(lambda f: f.max() - f.min()).max())
+
+    analysis_data1 = {'mean_jump_d': [], 'state': [], 'duration': [], 'traj_id': []}
+    if has_diffusion:
+        analysis_data1['K'] = []
+        analysis_data1['H'] = []
+    analysis_data2 = {'2d_displacement': [], 'state': []}
+    analysis_data3 = {'angle': [], 'polar_angle': [], 'state': []}
+    msd_ragged_ens_trajs = {st: [] for st in total_states}
+    msd = {'mean': [], 'std': [], 'nb_data': [], 'state': [], 'time': []}
+
+    n_done = 0
+    n_total = len(traj_indices)
+
+    for traj_idx in traj_indices:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        single_traj = data.loc[data['traj_idx'] == traj_idx].copy()
+        single_traj = single_traj.sort_values(by=['frame'])
+
+        # Chunk by state only (no splitting by frame gap)
+        before_st = single_traj.state.iloc[0]
+        state_chunk_idx = [0, len(single_traj)]
+        for st_idx, st in enumerate(single_traj.state):
+            if st != before_st:
+                state_chunk_idx.append(st_idx)
+            before_st = st
+        state_chunk_idx = sorted(state_chunk_idx)
+
+        for si in range(len(state_chunk_idx) - 1):
+            sub_traj = single_traj.iloc[state_chunk_idx[si]:state_chunk_idx[si + 1]].copy()
+            if not (cutoff_min <= len(sub_traj) <= cutoff_max):
+                continue
+
+            state = sub_traj.state.iloc[0]
+
+            # Convert to microns
+            sub_traj.x = sub_traj.x * pixelmicrons
+            sub_traj.y = sub_traj.y * pixelmicrons
+
+            frame_diffs = sub_traj.frame.iloc[1:].to_numpy() - sub_traj.frame.iloc[:-1].to_numpy()
+            duration = np.sum(frame_diffs) * framerate
+
+            # Coordinate rescale (origin at first point)
+            sub_traj.x = sub_traj.x - sub_traj.x.iloc[0]
+            sub_traj.y = sub_traj.y - sub_traj.y.iloc[0]
+
+            # All step vectors
+            dx = sub_traj.x.iloc[1:].to_numpy() - sub_traj.x.iloc[:-1].to_numpy()
+            dy = sub_traj.y.iloc[1:].to_numpy() - sub_traj.y.iloc[:-1].to_numpy()
+
+            # Filter: only consecutive-frame steps (df == 1) for jump distances
+            consecutive = (frame_diffs == 1)
+            dx_consec = dx[consecutive]
+            dy_consec = dy[consecutive]
+            jump_distances = np.sqrt(dx_consec ** 2 + dy_consec ** 2)
+
+            # Angles: only from pairs of consecutive steps (both must be df==1)
+            vecs_consec = np.vstack([dx_consec, dy_consec]).T
+            angles = []
+            polar_angles = []
+            for vi in range(len(vecs_consec) - 1):
+                angles.append(_dot_product_angle(vecs_consec[vi], vecs_consec[vi + 1]))
+                cross = vecs_consec[vi][0] * vecs_consec[vi + 1][1] - vecs_consec[vi][1] * vecs_consec[vi + 1][0]
+                dot = vecs_consec[vi][0] * vecs_consec[vi + 1][0] + vecs_consec[vi][1] * vecs_consec[vi + 1][1]
+                ang = np.degrees(np.arctan2(cross, dot))
+                polar_angles.append(ang % 360)
+
+            # Ensemble averaged SD (MSD) — uses absolute positions, handles gaps naturally
+            copy_frames = sub_traj.frame.to_numpy()
+            copy_frames = copy_frames - copy_frames[0]
+            tmp_msd = []
+            sq_disp = (sub_traj.x.to_numpy() ** 2 + sub_traj.y.to_numpy() ** 2) / dim / 2
+            for frame_val, sd in zip(np.arange(0, copy_frames[-1], 1), sq_disp):
+                if frame_val in copy_frames:
+                    tmp_msd.append(sd)
+                else:
+                    tmp_msd.append(None)
+            msd_ragged_ens_trajs[state].append(tmp_msd)
+
+            # Store data1 (per-trajectory summary)
+            if len(jump_distances) > 0:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                analysis_data1['mean_jump_d'].append(jump_distances.mean())
+            else:
+                analysis_data1['mean_jump_d'].append(np.nan)  # no consecutive-frame steps → exclude from plot
+            analysis_data1['state'].append(state)
+            analysis_data1['duration'].append(duration)
+            analysis_data1['traj_id'].append(sub_traj.traj_idx.iloc[0])
+            if has_diffusion:
+                analysis_data1['H'].append(sub_traj.H.iloc[0] if 'H' in sub_traj.columns else 0)
+                analysis_data1['K'].append(sub_traj.K.iloc[0] if 'K' in sub_traj.columns else 0)
+
+            # Store data2 (per-step jump distances, consecutive frames only)
+            analysis_data2['2d_displacement'].extend(list(jump_distances))
+            analysis_data2['state'].extend([state] * len(jump_distances))
+
+            # Store data3 (angles from consecutive step pairs only)
+            analysis_data3['angle'].extend(angles)
+            analysis_data3['polar_angle'].extend(polar_angles)
+            analysis_data3['state'].extend([state] * len(angles))  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
+        n_done += 1
+
+    # Calculate MSD averages per state
+    for state_key in total_states:
+        msd_mean = []
+        msd_std = []
+        msd_nb_data = []
+        for t in range(max_frame):
+            msd_row_data = []
+            for row in range(len(msd_ragged_ens_trajs[state_key])):
+                if t < len(msd_ragged_ens_trajs[state_key][row]) and msd_ragged_ens_trajs[state_key][row][t] is not None:
+                    msd_row_data.append(msd_ragged_ens_trajs[state_key][row][t])
+            msd_mean.append(np.mean(msd_row_data) if msd_row_data else np.nan)
+            msd_std.append(np.std(msd_row_data) if msd_row_data else np.nan)
+            msd_nb_data.append(len(msd_row_data))
+
+        times = np.arange(0, max_frame) * framerate
+        msd['mean'].extend(msd_mean)
+        msd['std'].extend(msd_std)
+        msd['nb_data'].extend(msd_nb_data)
+        msd['state'].extend([state_key] * max_frame)
+        msd['time'].extend(times)
+
+    analysis_data1 = pd.DataFrame(analysis_data1).astype({'state': int, 'duration': float, 'traj_id': str})
+    analysis_data2 = pd.DataFrame(analysis_data2)
+    analysis_data3 = pd.DataFrame(analysis_data3)
+    msd = pd.DataFrame(msd)
+
+    return analysis_data1, analysis_data2, analysis_data3, msd, total_states  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
+
+# ---------------------------------------------------------------------------
+# StatsWorker — runs preprocessing in background thread
+# ---------------------------------------------------------------------------
+class StatsWorker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(list)  # list of per-dataset result dicts
+    error = pyqtSignal(str)
+
+    def __init__(self, datasets, pixelmicrons, framerate, cutoff_min):
+        """datasets: list of (name, DataFrame, has_diffusion) tuples."""
+        super().__init__()
+        self._datasets = datasets
+        self._pixelmicrons = pixelmicrons
+        self._framerate = framerate
+        self._cutoff_min = cutoff_min
+
+    def run(self):
+        try:
+            all_results = []
+            n = len(self._datasets)
+            for idx, (name, data, has_diff) in enumerate(self._datasets):
+                pct = int(10 + 80 * idx / max(n, 1))
+                self.progress.emit(pct, f"Processing {name}...")
+                result = _preprocess_for_stats(
+                    data, self._pixelmicrons, self._framerate,
+                    cutoff_min=self._cutoff_min, has_diffusion=has_diff,
+                )
+                ad1, ad2, ad3, msd, total_states = result
+                if ad1 is not None and len(ad1) > 0:
+                    all_results.append({
+                        'name': name,
+                        'analysis_data1': ad1,
+                        'analysis_data2': ad2,
+                        'analysis_data3': ad3,
+                        'msd': msd,
+                        'total_states': total_states,
+                        'has_diffusion': has_diff,
+                    })
+            if not all_results:
+                self.error.emit("No data remaining after filtering.")
+                return
+            self.progress.emit(95, "Building results...")
+            self.finished.emit(all_results)
+        except Exception as e:
+            self.error.emit(str(e))  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
 
 # ---------------------------------------------------------------------------
@@ -914,6 +1162,13 @@ class FreeTraceGUI(QMainWindow):
         self._main_tabs.setObjectName("mainTabs") # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
         self._main_tabs.addTab(self._build_freetrace_tab(), "FreeTrace")
         self._main_tabs.addTab(self._build_analysis_tab(), "Analysis") # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+        self._main_tabs.currentChanged.connect(self._on_main_tab_changed)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
+    def _on_main_tab_changed(self, index):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        """Rescale help image when switching to Analysis tab with Help sub-tab active."""
+        if self._main_tabs.tabText(index) == "Analysis":
+            if self._analysis_tabs.tabText(self._analysis_tabs.currentIndex()) == "Help":
+                QTimer.singleShot(0, self._rescale_help_image)
 
     def _build_freetrace_tab(self):
         tab = QWidget()
@@ -939,12 +1194,153 @@ class FreeTraceGUI(QMainWindow):
         # Sub-tab widget inside Analysis
         self._analysis_tabs = QTabWidget()
         self._analysis_tabs.setObjectName("analysisTabs")
+        self._analysis_tabs.addTab(self._build_help_tab(), "Help")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         self._analysis_tabs.addTab(self._build_class_tab(), "Class")
         self._analysis_tabs.addTab(self._build_basic_stats_tab(), "Basic Stats")
         self._analysis_tabs.addTab(self._build_adv_stats_tab(), "Adv Stats")
+        self._analysis_tabs.currentChanged.connect(self._on_analysis_tab_changed)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         layout.addWidget(self._analysis_tabs)
 
         return widget
+
+    # ---- Help sub-tab (variable explanation image) -------------------------  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+    def _build_help_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # Scroll area for the help content (vertical only)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; background: #1e1e1e; }")
+
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+
+        self._help_image_label = QLabel()
+        self._help_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._help_image_label.setWordWrap(True)
+        self._help_pixmap = None
+
+        # Try to load help image from icon/ directory
+        help_img_path = None
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        for name in ('help.png', 'help.jpg', 'help.svg'):
+            candidate = os.path.join(base_dir, 'icon', name)
+            if os.path.isfile(candidate):
+                help_img_path = candidate
+                break
+
+        if help_img_path:
+            pixmap = QPixmap(help_img_path)
+            if not pixmap.isNull():  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                self._help_pixmap = pixmap
+                self._help_image_label.setPixmap(pixmap)
+            else:
+                self._help_image_label.setText("Failed to load help image.")
+                self._help_image_label.setStyleSheet("color:#ff8800; font-size:14px; padding:20px;")
+        else:
+            self._help_image_label.setText(
+                "Place a help image (help.png, help.jpg, or help.svg) in the icon/ folder\n"
+                "to display variable explanations here.")
+            self._help_image_label.setStyleSheet("color:#888; font-size:14px; padding:20px;")
+        self._help_scroll = scroll  # keep reference for resize
+
+        container_layout.addWidget(self._help_image_label)
+
+        # Summary text below image
+        help_text = QLabel()
+        help_text.setWordWrap(True)
+        help_text.setTextFormat(Qt.TextFormat.RichText)
+        help_text.setStyleSheet("color:#cccccc; font-size:13px; padding:12px 20px;")
+        help_text.setText(  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            "<p style='font-size:14px;'><b>Paper:</b> "
+            "https://doi.org/10.64898/2026.01.08.698486</p>"
+            "<h3 style='color:#66ccff;'>Loading Data</h3>"
+            "<p><b>Class tab</b> — Requires both <code>_diffusion.csv</code> and "
+            "<code>_traces.csv</code>. Select either file; the other is loaded automatically. "
+            "Multiple datasets can be loaded at once.</p>"
+            "<p><b>Basic Stats tab</b> — Requires <code>_traces.csv</code>; "
+            "<code>_diffusion.csv</code> is optional. If only traces are available, "
+            "all trajectory-based plots (jump distance, duration, EA-SD, angles) work normally. "
+            "H and K distributions require <code>_diffusion.csv</code>.</p>"
+            "<p><b>Advanced Stats tab</b> — Same as Basic Stats: <code>_traces.csv</code> required, "
+            "<code>_diffusion.csv</code> optional.</p>"
+            "<h3 style='color:#66ccff;'>Key Concepts</h3>"
+            "<p><b>Consecutive frames only (Δt = 1)</b> — Jump distance, mean jump distance, "
+            "1D displacement, 1D displacement ratio, and angle distributions use only steps "
+            "between consecutive frames. Steps spanning frame gaps (Δt &gt; 1) are excluded "
+            "because they are not directly comparable: a molecule diffusing for 2 frames "
+            "covers a different distance than one diffusing for 1 frame.</p>"
+            "<p><b>Trajectory splitting</b> — Trajectories are split only at <i>state changes</i>, "
+            "not at frame gaps. This preserves trajectory identity and avoids artificially "
+            "inflating trajectory counts. Duration and MSD span the full observation "
+            "including gaps.</p>"
+            "<h3 style='color:#66ccff;'>Class Tab</h3>"
+            "<p>The Class tab provides an interactive H-K scatter plot for gating trajectories "
+            "by their diffusion properties. Load one or more FreeTrace output datasets "
+            "(<code>_diffusion.csv</code> + <code>_traces.csv</code>) and visualise the "
+            "Hurst exponent (H) vs. diffusion coefficient (K) for each trajectory.</p>"
+            "<p><b>Gating</b> — Draw boundaries on the H-K scatter plot to select subsets of "
+            "trajectories. Gated trajectories can be exported or further analysed.</p>"
+            "<p><b>Load Boundary</b> — Import a previously saved gating boundary.</p>"
+            "<h3 style='color:#66ccff;'>Basic Stats Tab</h3>"
+            "<p><b>H &amp; K distributions</b> — Per-trajectory Hurst exponent and diffusion "
+            "coefficient (requires <code>_diffusion.csv</code>). "
+            "K is computed in pixel &amp; frame scale, not converted to μm &amp; s.</p>"
+            "<p><b>Jump Distance</b> — Per-step Euclidean displacement √(Δx² + Δy²), Δt = 1 only. "
+            "Assumes isotropic motion.</p>"
+            "<p><b>Mean Jump Distance</b> — Average jump distance per trajectory (one value per trajectory).</p>"
+            "<p><b>Duration</b> — Total observation time Σ(frame diffs) × framerate.</p>"
+            "<p><b>EA-SD</b> — Ensemble-Averaged Squared Displacement: average SD over all "
+            "trajectories at each time point.</p>"
+            "<p><b>Angle / Polar Angle</b> — Deflection angle (0°–180°) and signed turning "
+            "angle (0°–360°) between consecutive step pairs, both Δt = 1. "
+            "Uniform if isotropic &amp; Brownian.</p>"
+            "<h3 style='color:#66ccff;'>Advanced Stats Tab (planned)</h3>"
+            "<p><b>TA-EA-SD</b> — Time-Averaged, Ensemble-Averaged SD. For each trajectory, "
+            "compute SD at each lag τ by averaging over all time windows, then ensemble-average "
+            "across trajectories. More robust than EA-SD for short trajectories.</p>"
+            "<p><b>1D Displacement</b> — Projection of a step onto one axis (Δx or Δy). "
+            "Gaussian for Brownian or fBm molecules in a homogeneous population. "
+            "Non-Gaussian → heterogeneous population (mixed diffusion states). "
+            "Only Δt = 1 steps. Assumes isotropic motion (Δx ≡ Δy).</p>"
+            "<p><b>1D Displacement Ratio</b> — Ratio of consecutive 1D displacements: "
+            "Δx(t+1) / Δx(t). For fBm (any H), the ratio follows a Cauchy-like distribution. "
+            "Deviation from Cauchy → the motion is not purely fractional Brownian. "
+            "Assumes homogeneous &amp; isotropic.</p>"
+            "<h3 style='color:#66ccff;'>Common Normalisation</h3>"
+            "<p>When enabled, all datasets share the same bin edges and the y-axis is "
+            "normalised to the dataset with the most data points. The largest dataset "
+            "sums to 100%, smaller datasets sum proportionally less. This preserves "
+            "population size information when comparing datasets.</p>"
+        )
+        container_layout.addWidget(help_text)
+
+        container_layout.addStretch()
+        scroll.setWidget(container)
+        layout.addWidget(scroll)
+
+        # Deferred rescale after layout is complete  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        QTimer.singleShot(0, self._rescale_help_image)
+
+        return widget
+
+    def _rescale_help_image(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        """Rescale help image to fit scroll area viewport width."""
+        if self._help_pixmap is not None and hasattr(self, '_help_scroll'):
+            w = self._help_scroll.viewport().width() - 10
+            if w > 50:
+                self._help_image_label.setPixmap(
+                    self._help_pixmap.scaledToWidth(w, Qt.TransformationMode.SmoothTransformation))
+
+    def _on_analysis_tab_changed(self, index):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        """Rescale help image when the Help tab becomes visible."""
+        if self._analysis_tabs.tabText(index) == "Help":
+            QTimer.singleShot(0, self._rescale_help_image)
 
     # ---- Class sub-tab (H-K gating) --------------------------------------
     def _build_class_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
@@ -1042,20 +1438,683 @@ class FreeTraceGUI(QMainWindow):
         return widget
 
     # ---- Basic Stats sub-tab ---------------------------------------------
-    def _build_basic_stats_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+    def _build_basic_stats_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        placeholder = QLabel("Basic Statistics — coming soon.")
-        placeholder.setWordWrap(True)
-        placeholder.setStyleSheet("color:#888; font-size:14px; padding:20px;")
-        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(placeholder)
-        layout.addStretch()
+        # Toolbar
+        toolbar = QHBoxLayout()
+        self._stats_load_btn = QPushButton("Load Data")
+        self._stats_load_btn.clicked.connect(self._on_stats_load_data)
+        toolbar.addWidget(self._stats_load_btn)
+
+        toolbar.addWidget(QLabel("Pixel size (μm):"))
+        self._stats_pixelsize = QDoubleSpinBox()
+        self._stats_pixelsize.setRange(0.001, 10.0)
+        self._stats_pixelsize.setValue(1.0)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        self._stats_pixelsize.setDecimals(4)
+        self._stats_pixelsize.setSingleStep(0.01)
+        toolbar.addWidget(self._stats_pixelsize)
+
+        toolbar.addWidget(QLabel("Frame rate (s):"))
+        self._stats_framerate = QDoubleSpinBox()
+        self._stats_framerate.setRange(0.0001, 10.0)
+        self._stats_framerate.setValue(1.0)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        self._stats_framerate.setDecimals(4)
+        self._stats_framerate.setSingleStep(0.001)
+        toolbar.addWidget(self._stats_framerate)
+
+        toolbar.addWidget(QLabel("Min traj length:"))
+        self._stats_cutoff = QSpinBox()
+        self._stats_cutoff.setRange(1, 9999)
+        self._stats_cutoff.setValue(3)
+        toolbar.addWidget(self._stats_cutoff)
+
+        self._stats_common_norm = QCheckBox("Common normalisation")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        self._stats_common_norm.setChecked(False)
+        toolbar.addWidget(self._stats_common_norm)
+
+        self._stats_run_btn = QPushButton("▶ Run Preprocessing")
+        self._stats_run_btn.clicked.connect(self._on_run_preprocessing)
+        toolbar.addWidget(self._stats_run_btn)
+
+        self._stats_save_btn = QPushButton("Save Plots")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        self._stats_save_btn.clicked.connect(self._on_save_stats_plots)
+        self._stats_save_btn.setEnabled(False)
+        toolbar.addWidget(self._stats_save_btn)
+
+        self._stats_status_label = QLabel("")
+        self._stats_status_label.setStyleSheet("color:#888;")
+        toolbar.addWidget(self._stats_status_label)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        # Scroll area for plots
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background:#1e1e1e; border:none;")
+        scroll_widget = QWidget()
+        self._stats_plot_layout = QVBoxLayout(scroll_widget)
+        self._stats_plot_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._stats_plot_layout.setContentsMargins(4, 4, 4, 4)
+        self._stats_plot_layout.setSpacing(4)
+
+        self._stats_placeholder = QLabel("Load data and click 'Run Preprocessing' to generate plots.")
+        self._stats_placeholder.setWordWrap(True)
+        self._stats_placeholder.setStyleSheet("color:#888; font-size:14px; padding:20px;")
+        self._stats_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._stats_plot_layout.addWidget(self._stats_placeholder)
+
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll)
+
+        # State
+        self._stats_datasets = []  # separate from Class tab's _loaded_datasets
+        self._stats_worker = None
+        self._stats_results = None
+        self._stats_canvases = []  # keep refs to FigureCanvasQTAgg
 
         return widget
+
+    def _on_stats_load_data(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        """Load data for Basic Stats — traces required, diffusion optional."""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select FreeTrace output CSV(s)", "",
+            "CSV files (*_traces.csv *_diffusion.csv);;All files (*)",
+        )
+        if not paths:
+            return
+        paths = sorted(paths)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        self._stats_datasets.clear()
+        for p in paths:
+            self._load_stats_data_from_file(p)
+        n = len(self._stats_datasets)
+        if n > 0:
+            has_diff = sum(1 for ds in self._stats_datasets if ds['diffusion_df'] is not None)
+            self._stats_status_label.setText(
+                f"Loaded {n} video(s) ({has_diff} with diffusion data)."
+            )
+
+    def _load_stats_data_from_file(self, selected_path):
+        """Load data for Basic Stats — accepts _traces.csv (required), _diffusion.csv (optional)."""
+        try:
+            if '_traces.csv' in selected_path:
+                traces_path = selected_path
+                diffusion_path = selected_path.replace('_traces.csv', '_diffusion.csv')
+            elif '_diffusion.csv' in selected_path:
+                diffusion_path = selected_path
+                traces_path = selected_path.replace('_diffusion.csv', '_traces.csv')
+            else:
+                return
+
+            # Skip duplicates
+            for ds in self._stats_datasets:
+                if ds['traces_path'] == traces_path:
+                    return
+
+            if not os.path.exists(traces_path):
+                QMessageBox.warning(self, "File not found", f"Traces file not found:\n{traces_path}")
+                return
+
+            traces_df = pd.read_csv(traces_path)
+            required_cols = {'traj_idx', 'frame', 'x', 'y'}
+            if not required_cols.issubset(traces_df.columns):
+                missing = required_cols - set(traces_df.columns)
+                QMessageBox.warning(self, "Invalid traces file",
+                                    f"Missing columns: {', '.join(sorted(missing))}")
+                return
+
+            # Diffusion file is optional
+            diffusion_df = None
+            if os.path.exists(diffusion_path):
+                df = pd.read_csv(diffusion_path)
+                if {'traj_idx', 'H', 'K'}.issubset(df.columns):
+                    diffusion_df = df
+
+            fname = os.path.basename(traces_path)
+            video_name = fname.replace('_traces.csv', '')
+
+            self._stats_datasets.append({
+                'video_name': video_name,
+                'traces_path': traces_path,
+                'diffusion_path': diffusion_path,
+                'traces_df': traces_df,
+                'diffusion_df': diffusion_df,
+            })
+        except Exception as e:
+            QMessageBox.critical(self, "Error loading data", str(e))
+
+    def _on_run_preprocessing(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        if not self._stats_datasets:
+            QMessageBox.warning(self, "No data", "Load data first.")
+            return
+        if self._stats_worker is not None and self._stats_worker.isRunning():
+            return
+
+        # Build per-dataset tuples: (name, merged_df, has_diffusion)
+        dataset_tuples = []
+        for ds in self._stats_datasets:
+            tdf = ds['traces_df'].copy()
+            has_diff = ds['diffusion_df'] is not None
+            if has_diff:
+                ddf = ds['diffusion_df'][['traj_idx', 'H', 'K']].copy()
+                if 'state' in ds['diffusion_df'].columns:
+                    ddf['state'] = ds['diffusion_df']['state']
+                merged = tdf.merge(ddf, on='traj_idx', how='left')
+            else:
+                merged = tdf.copy()
+            if 'z' not in merged.columns:
+                merged['z'] = 0.0
+            if 'state' not in merged.columns:
+                merged['state'] = 0
+            dataset_tuples.append((ds['video_name'], merged, has_diff))
+
+        self._stats_run_btn.setEnabled(False)
+        self._stats_status_label.setText("Preprocessing...")
+        self._stats_worker = StatsWorker(
+            dataset_tuples, self._stats_pixelsize.value(), self._stats_framerate.value(),
+            self._stats_cutoff.value(),
+        )
+        self._stats_worker.progress.connect(
+            lambda pct, msg: self._stats_status_label.setText(f"{msg} ({pct}%)")
+        )
+        self._stats_worker.finished.connect(self._stats_worker_finished)
+        self._stats_worker.error.connect(self._stats_worker_error)
+        self._stats_worker.start()
+
+    def _stats_worker_error(self, msg):
+        self._stats_run_btn.setEnabled(True)
+        self._stats_status_label.setText(f"Error: {msg}")
+
+    def _stats_worker_finished(self, results_list):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        self._stats_run_btn.setEnabled(True)
+        self._stats_status_label.setText("Done.")
+        self._stats_results = results_list
+        self._stats_save_btn.setEnabled(True)
+        self._render_stats_plots(results_list)
+
+    def _render_stats_plots(self, results_list):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        """Render all Basic Stats plots — overlay multiple datasets with distinct colors."""
+        # Clear previous plots
+        for canvas in self._stats_canvases:
+            canvas.setParent(None)
+            canvas.deleteLater()
+        self._stats_canvases.clear()
+        while self._stats_plot_layout.count():
+            item = self._stats_plot_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+
+        n_datasets = len(results_list)
+        single = (n_datasets == 1)
+        common_norm = self._stats_common_norm.isChecked()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        hist_ylabel = 'Percent'
+        # Per-dataset colors (tab10 for multi-dataset, per-state colors for single)
+        ds_palette = sns.color_palette('tab10', n_colors=max(n_datasets, 1))
+        any_has_diff = any(r['has_diffusion'] for r in results_list)
+
+        dark_style = {
+            'figure.facecolor': '#1e1e1e',
+            'axes.facecolor': '#1a1a1a',
+            'text.color': '#cccccc',
+            'axes.labelcolor': '#cccccc',
+            'xtick.color': '#cccccc',
+            'ytick.color': '#cccccc',
+            'axes.edgecolor': '#555555',
+            'grid.color': '#333333',
+        }
+
+        def _make_canvas(fig):
+            canvas = FigureCanvasQTAgg(fig)
+            canvas.setMinimumHeight(350)
+            self._stats_canvases.append(canvas)
+            return canvas
+
+        def _ds_label(r, state=None):
+            """Build legend label: dataset name (+ state if multi-state single dataset)."""
+            name = r['name']
+            if single and len(r['total_states']) > 1 and state is not None:
+                return f'State {state}'
+            if not single:
+                if state is not None and len(r['total_states']) > 1:
+                    return f'{name} (st {state})'
+                return name
+            return None  # single dataset, single state — no legend
+
+        def _iter_colors(results_list):
+            """Yield (dataset_idx, result, state, color) for plotting.
+
+            Single dataset: one color per state (tab10 by state index).
+            Multiple datasets: one color per dataset (states share that color, alpha varies).
+            """
+            if single:
+                r = results_list[0]
+                st_palette = sns.color_palette('tab10', n_colors=max(len(r['total_states']), 1))
+                for si, st in enumerate(r['total_states']):
+                    yield 0, r, st, st_palette[si % len(st_palette)]
+            else:
+                for di, r in enumerate(results_list):
+                    for st in r['total_states']:
+                        yield di, r, st, ds_palette[di % len(ds_palette)]
+
+        need_legend = not single or (single and len(results_list[0]['total_states']) > 1)
+
+        # Precompute shared bin edges across all datasets (always, for equal bin widths)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        common_bins = {}
+
+        def _common_edges(key, df_getter, n_bins, log_scale=False):
+            all_vals = pd.concat([df_getter(r) for r in results_list], ignore_index=True).dropna()
+            if len(all_vals) > 0:
+                vmin, vmax = all_vals.min(), all_vals.max()
+                if log_scale and vmin > 0:
+                    return np.geomspace(vmin, vmax, n_bins + 1)
+                return np.linspace(vmin, vmax, n_bins + 1)
+            return n_bins
+        common_bins['H'] = _common_edges('H', lambda r: r['analysis_data1']['H'] if 'H' in r['analysis_data1'].columns else pd.Series(dtype=float), 50)
+        common_bins['K'] = _common_edges('K', lambda r: r['analysis_data1']['K'][r['analysis_data1']['K'] > 0] if 'K' in r['analysis_data1'].columns else pd.Series(dtype=float), 50, log_scale=True)
+        common_bins['mean_jump_d'] = _common_edges('mean_jump_d', lambda r: r['analysis_data1']['mean_jump_d'], 50)
+        common_bins['2d_displacement'] = _common_edges('2d_displacement', lambda r: r['analysis_data2']['2d_displacement'], 50)
+        common_bins['duration'] = _common_edges('duration', lambda r: r['analysis_data1']['duration'], 200)
+        common_bins['angle'] = _common_edges('angle', lambda r: r['analysis_data3']['angle'], 50)
+
+        def _bins(key, default):
+            return common_bins[key] if key in common_bins else default  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
+        # Precompute max row counts per data source for common normalisation  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        n_max = {}
+        if common_norm:
+            n_max['data1'] = max(len(r['analysis_data1']) for r in results_list)
+            n_max['data2'] = max(len(r['analysis_data2']) for r in results_list)
+            n_max['data3'] = max(len(r['analysis_data3']) for r in results_list)
+
+        def _hist_kwargs(subset, data_key):
+            """Return dict with stat/weights for histplot depending on common_norm."""
+            if common_norm and data_key in n_max and n_max[data_key] > 0:
+                w = np.ones(len(subset)) * (100.0 / n_max[data_key])
+                return {'stat': 'count', 'weights': w}
+            return {'stat': 'percent'}
+
+        def _bins_safe(key, default):
+            """Return bin edges as list (avoids seaborn bug with numpy array + weights)."""
+            b = _bins(key, default)
+            return list(b) if isinstance(b, np.ndarray) else b
+
+        def _make_fig_with_stats():  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            """Create a figure with 80% plot area (left) and 20% stats panel (right).
+
+            Uses constrained_layout instead of tight_layout (incompatible with GridSpec).
+            Do NOT call fig.tight_layout() on figures returned by this function.
+            """
+            fig = Figure(figsize=(10, 4), dpi=100, constrained_layout=True)
+            gs = fig.add_gridspec(1, 2, width_ratios=[4, 1], wspace=0.02)
+            ax = fig.add_subplot(gs[0])
+            ax_stats = fig.add_subplot(gs[1])
+            ax_stats.axis('off')
+            return fig, ax, ax_stats
+
+        def _fill_stats_panel(ax_stats, stat_lines):
+            """Fill the stats panel with lines of (label, color, mean, std)."""
+            y = 0.95
+            ax_stats.text(0.05, y, 'Mean \u00b1 Std', color='#aaaaaa', fontsize=9,
+                         fontweight='bold', transform=ax_stats.transAxes, va='top')
+            y -= 0.08
+            for label, color, mean_val, std_val in stat_lines:
+                txt = f'{label}' if label else ''
+                if txt:
+                    ax_stats.text(0.05, y, txt, color=color, fontsize=8,
+                                 transform=ax_stats.transAxes, va='top', fontweight='bold')
+                    y -= 0.06
+                ax_stats.text(0.05, y, f'{mean_val:.4g} \u00b1 {std_val:.4g}', color=color, fontsize=8,
+                             transform=ax_stats.transAxes, va='top')
+                y -= 0.07  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
+        # --- Summary table ---
+        summary_section = CollapsibleSection("Summary")
+        html = "<table style='color:#ccc; font-size:13px; border-collapse:collapse;'>"
+        html += "<tr style='border-bottom:1px solid #555;'>"
+        html += "<th style='padding:4px 12px;'>Dataset</th>"
+        html += "<th style='padding:4px 12px;'>State</th><th style='padding:4px 12px;'>Count</th>"
+        html += "<th style='padding:4px 12px;'>Mean Jump Dist</th>"
+        html += "<th style='padding:4px 12px;'>Mean Duration</th>"
+        if any_has_diff:
+            html += "<th style='padding:4px 12px;'>Mean H</th><th style='padding:4px 12px;'>Median H</th>"
+            html += "<th style='padding:4px 12px;'>Mean K</th><th style='padding:4px 12px;'>Median K</th>"
+        html += "</tr>"
+        for r in results_list:
+            ad1 = r['analysis_data1']
+            for st in r['total_states']:
+                subset = ad1[ad1['state'] == st]
+                html += f"<tr><td style='padding:4px 12px;'>{r['name']}</td>"
+                html += f"<td style='padding:4px 12px;'>{st}</td>"
+                html += f"<td style='padding:4px 12px;'>{len(subset)}</td>"
+                html += f"<td style='padding:4px 12px;'>{subset['mean_jump_d'].mean():.4f}</td>"
+                html += f"<td style='padding:4px 12px;'>{subset['duration'].mean():.4f}</td>"
+                if any_has_diff:
+                    if r['has_diffusion'] and 'H' in ad1.columns:
+                        html += f"<td style='padding:4px 12px;'>{subset['H'].mean():.4f}</td>"
+                        html += f"<td style='padding:4px 12px;'>{subset['H'].median():.4f}</td>"
+                        html += f"<td style='padding:4px 12px;'>{subset['K'].mean():.4f}</td>"
+                        html += f"<td style='padding:4px 12px;'>{subset['K'].median():.4f}</td>"
+                    else:
+                        html += "<td style='padding:4px 12px;'>—</td>" * 4
+                html += "</tr>"
+        html += "</table>"
+        summary_label = QLabel(html)
+        summary_label.setTextFormat(Qt.TextFormat.RichText)
+        summary_section.add_widget(summary_label)
+        self._stats_plot_layout.addWidget(summary_section)
+
+        # --- Population Pie Chart ---  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        pie_section = CollapsibleSection("Trajectory Population")
+        with plt.style.context(dark_style):
+            fig = Figure(figsize=(6, 4), dpi=100)
+            ax = fig.add_subplot(111)
+            labels = []
+            sizes = []
+            colors = []
+            if single and len(results_list[0]['total_states']) > 1:
+                r = results_list[0]
+                st_palette = sns.color_palette('tab10', n_colors=len(r['total_states']))
+                for si, st in enumerate(r['total_states']):
+                    count = len(r['analysis_data1'][r['analysis_data1']['state'] == st])
+                    labels.append(f'State {st}')
+                    sizes.append(count)
+                    colors.append(st_palette[si % len(st_palette)])
+            else:
+                for di, r in enumerate(results_list):
+                    count = len(r['analysis_data1'])
+                    labels.append(r['name'])
+                    sizes.append(count)
+                    colors.append(ds_palette[di % len(ds_palette)])
+            total = sum(sizes)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            ax.pie(sizes, labels=labels, colors=colors,
+                   autopct=lambda pct: f'{pct:.1f}%\n({int(round(pct * total / 100))})',
+                   textprops={'color': '#cccccc', 'fontsize': 10},
+                   wedgeprops={'edgecolor': '#333333', 'linewidth': 0.5})
+            ax.set_title('Trajectory Population')
+            fig.tight_layout()
+        pie_section.add_widget(_make_canvas(fig))
+        self._stats_plot_layout.addWidget(pie_section)
+
+        # --- H Distribution ---  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        h_section = CollapsibleSection("H Distribution")
+        if any_has_diff:
+            with plt.style.context(dark_style):
+                fig, ax, ax_stats = _make_fig_with_stats()
+                plotted = False
+                stat_lines = []
+                for di, r, st, color in _iter_colors(results_list):
+                    if not r['has_diffusion'] or 'H' not in r['analysis_data1'].columns:
+                        continue
+                    subset = r['analysis_data1'][r['analysis_data1']['state'] == st]
+                    if len(subset) > 0:
+                        sns.histplot(data=subset, x='H', bins=_bins_safe('H', 50),
+                                     kde=True, ax=ax, color=color,
+                                     label=_ds_label(r, st), alpha=0.5, **_hist_kwargs(subset, 'data1'))
+                        stat_lines.append((_ds_label(r, st) or '', color, subset['H'].mean(), subset['H'].std()))
+                        plotted = True
+                ax.set_xlabel('H')
+                ax.set_ylabel(hist_ylabel)
+                ax.set_title('H Distribution')
+                if need_legend and plotted:
+                    ax.legend(loc='upper right')
+                if stat_lines:
+                    _fill_stats_panel(ax_stats, stat_lines)
+            h_section.add_widget(_make_canvas(fig))  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        else:
+            warn = QLabel("_diffusion.csv required for this plot.")
+            warn.setStyleSheet("color:#ff8800; padding:12px;")
+            h_section.add_widget(warn)
+        self._stats_plot_layout.addWidget(h_section)
+
+        # --- K Distribution ---  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        k_section = CollapsibleSection("K Distribution (pixel && frame scale)")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        if any_has_diff:
+            # Always use log-spaced bins for K (linear bins look uneven on log axis)
+            if not common_norm:
+                all_k = pd.concat([r['analysis_data1']['K'][r['analysis_data1']['K'] > 0]
+                                   for r in results_list if r['has_diffusion'] and 'K' in r['analysis_data1'].columns],
+                                  ignore_index=True).dropna()
+                k_default_bins = list(np.geomspace(all_k.min(), all_k.max(), 51)) if len(all_k) > 0 else 50
+            else:
+                k_default_bins = _bins_safe('K', 50)
+            from scipy.stats import gaussian_kde
+            log_k_edges = np.log10(np.array(k_default_bins)) if isinstance(k_default_bins, list) else None
+            with plt.style.context(dark_style):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                fig, ax, ax_stats = _make_fig_with_stats()
+                plotted = False
+                stat_lines = []
+                for di, r, st, color in _iter_colors(results_list):
+                    if not r['has_diffusion'] or 'K' not in r['analysis_data1'].columns:
+                        continue
+                    subset = r['analysis_data1'][r['analysis_data1']['state'] == st]
+                    k_vals = subset['K'][subset['K'] > 0] if len(subset) > 0 else pd.Series(dtype=float)
+                    if len(k_vals) > 0:
+                        sns.histplot(x=k_vals, bins=k_default_bins, kde=False,  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                                     ax=ax, color=color, label=_ds_label(r, st),
+                                     alpha=0.5, **_hist_kwargs(k_vals, 'data1'))
+                        for patch in ax.patches:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                            patch.set_edgecolor('black')
+                            patch.set_linewidth(0.5)
+                        # KDE in log space (seaborn's kde computes in linear space, distorts on log axis)
+                        log_k = np.log10(k_vals.values)
+                        kde = gaussian_kde(log_k)
+                        x_log = np.linspace(log_k.min(), log_k.max(), 200)
+                        kde_density = kde(x_log)
+                        bin_w = np.mean(np.diff(log_k_edges)) if log_k_edges is not None else np.mean(np.diff(x_log))
+                        hkw = _hist_kwargs(k_vals, 'data1')
+                        if hkw.get('stat') == 'count' and 'weights' in hkw:
+                            kde_scaled = kde_density * bin_w * hkw['weights'][0] * len(k_vals)
+                        else:
+                            kde_scaled = kde_density * bin_w * 100
+                        ax.plot(10**x_log, kde_scaled, color=color, linewidth=1.5)
+                        stat_lines.append((_ds_label(r, st) or '', color, k_vals.mean(), k_vals.std()))
+                        plotted = True
+                ax.set_xscale('log')
+                ax.set_xlabel('K')
+                ax.set_ylabel(hist_ylabel)
+                ax.set_title('K Distribution')
+                if need_legend and plotted:
+                    ax.legend(loc='upper right')
+                if stat_lines:
+                    _fill_stats_panel(ax_stats, stat_lines)
+            k_section.add_widget(_make_canvas(fig))  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        else:
+            warn = QLabel("_diffusion.csv required for this plot.")
+            warn.setStyleSheet("color:#ff8800; padding:12px;")
+            k_section.add_widget(warn)
+        self._stats_plot_layout.addWidget(k_section)
+
+        # --- Mean Jump Distance ---  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        mjd_section = CollapsibleSection("Mean Jump Distance (consecutive frames only, Δt = 1)")
+        with plt.style.context(dark_style):
+            fig, ax, ax_stats = _make_fig_with_stats()
+            plotted = False
+            stat_lines = []
+            for di, r, st, color in _iter_colors(results_list):
+                subset = r['analysis_data1'][r['analysis_data1']['state'] == st]
+                if len(subset) > 0:
+                    sns.histplot(data=subset, x='mean_jump_d', bins=_bins_safe('mean_jump_d', 50),
+                                 kde=True, ax=ax, color=color,
+                                 label=_ds_label(r, st), alpha=0.5, **_hist_kwargs(subset, 'data1'))
+                    stat_lines.append((_ds_label(r, st) or '', color, subset['mean_jump_d'].mean(), subset['mean_jump_d'].std()))
+                    plotted = True
+            ax.set_xlabel('Mean Jump Distance (μm)')
+            ax.set_ylabel(hist_ylabel)
+            ax.set_title('Mean Jump Distance')
+            if need_legend and plotted:
+                ax.legend(loc='upper right')
+            if stat_lines:
+                _fill_stats_panel(ax_stats, stat_lines)
+        mjd_section.add_widget(_make_canvas(fig))
+        self._stats_plot_layout.addWidget(mjd_section)
+
+        # --- Jump Distance ---  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        disp_section = CollapsibleSection("Jump Distance (consecutive frames only, Δt = 1)")
+        with plt.style.context(dark_style):
+            fig, ax, ax_stats = _make_fig_with_stats()
+            plotted = False
+            stat_lines = []
+            for di, r, st, color in _iter_colors(results_list):
+                subset = r['analysis_data2'][r['analysis_data2']['state'] == st]
+                if len(subset) > 0:
+                    sns.histplot(data=subset, x='2d_displacement', bins=_bins_safe('2d_displacement', 50),
+                                 kde=True, ax=ax, color=color,
+                                 label=_ds_label(r, st), alpha=0.5, **_hist_kwargs(subset, 'data2'))
+                    stat_lines.append((_ds_label(r, st) or '', color, subset['2d_displacement'].mean(), subset['2d_displacement'].std()))
+                    plotted = True
+            ax.set_xlabel('Jump Distance (μm)')
+            ax.set_ylabel(hist_ylabel)
+            ax.set_title('Jump Distance')
+            if need_legend and plotted:
+                ax.legend(loc='upper right')
+            if stat_lines:
+                _fill_stats_panel(ax_stats, stat_lines)
+        disp_section.add_widget(_make_canvas(fig))
+        self._stats_plot_layout.addWidget(disp_section)
+
+        # --- Duration ---  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        dur_section = CollapsibleSection("Duration")
+        with plt.style.context(dark_style):
+            fig, ax, ax_stats = _make_fig_with_stats()
+            plotted = False
+            stat_lines = []
+            all_durations = []
+            for di, r, st, color in _iter_colors(results_list):
+                subset = r['analysis_data1'][r['analysis_data1']['state'] == st]
+                if len(subset) > 0:
+                    sns.histplot(data=subset, x='duration', bins=_bins_safe('duration', 200),
+                                 kde=True, ax=ax, color=color,
+                                 label=_ds_label(r, st), alpha=0.5, **_hist_kwargs(subset, 'data1'))
+                    all_durations.extend(subset['duration'].tolist())
+                    stat_lines.append((_ds_label(r, st) or '', color, subset['duration'].mean(), subset['duration'].std()))
+                    plotted = True
+            if all_durations:
+                ax.set_xlim(0, np.percentile(all_durations, 99))
+            ax.set_xlabel('Duration (s)')
+            ax.set_ylabel(hist_ylabel)
+            ax.set_title('Duration')
+            if need_legend and plotted:
+                ax.legend(loc='upper right')
+            if stat_lines:
+                _fill_stats_panel(ax_stats, stat_lines)
+        dur_section.add_widget(_make_canvas(fig))
+        self._stats_plot_layout.addWidget(dur_section)
+
+        # --- MSD ---
+        msd_section = CollapsibleSection("Ensemble-Averaged Squared Displacement")
+        with plt.style.context(dark_style):
+            fig = Figure(figsize=(8, 4), dpi=100)
+            ax = fig.add_subplot(111)
+            plotted = False
+            for di, r, st, color in _iter_colors(results_list):
+                msd_df = r['msd']
+                msd_clean = msd_df.dropna(subset=['mean'])
+                msd_clean = msd_clean[msd_clean['nb_data'] >= 3]
+                subset = msd_clean[msd_clean['state'] == st]
+                if len(subset) > 0:
+                    ax.plot(subset['time'], subset['mean'], color=color,
+                            label=_ds_label(r, st))
+                    ax.fill_between(subset['time'],
+                                    subset['mean'] - subset['std'],
+                                    subset['mean'] + subset['std'],
+                                    alpha=0.15, color=color)
+                    plotted = True
+            ax.set_xlabel('Time (s)')
+            ax.set_ylabel('EA-SD (μm²)')
+            ax.set_title('Ensemble-Averaged Squared Displacement')
+            if need_legend and plotted:
+                ax.legend(loc='upper right')
+            fig.tight_layout()
+        msd_section.add_widget(_make_canvas(fig))
+        self._stats_plot_layout.addWidget(msd_section)
+
+        # --- Angle Distribution ---  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        angle_section = CollapsibleSection("Angle Distribution (consecutive frames only, Δt = 1)")
+        with plt.style.context(dark_style):
+            fig, ax, ax_stats = _make_fig_with_stats()
+            plotted = False
+            stat_lines = []
+            for di, r, st, color in _iter_colors(results_list):
+                subset = r['analysis_data3'][r['analysis_data3']['state'] == st]
+                if len(subset) > 0:
+                    ang_kwargs = _hist_kwargs(subset, 'data3')
+                    if not common_norm:
+                        ang_kwargs = {'stat': 'proportion'}
+                    sns.histplot(data=subset, x='angle', bins=_bins_safe('angle', 50),
+                                 kde=True, ax=ax, color=color,
+                                 label=_ds_label(r, st), alpha=0.5, **ang_kwargs)
+                    stat_lines.append((_ds_label(r, st) or '', color, subset['angle'].mean(), subset['angle'].std()))
+                    plotted = True
+            ax.set_xlabel('Angle (degrees)')
+            ax.set_ylabel(hist_ylabel if common_norm else 'Proportion')
+            ax.set_title('Angle Distribution')
+            if need_legend and plotted:
+                ax.legend(loc='upper right')
+            if stat_lines:
+                _fill_stats_panel(ax_stats, stat_lines)
+        angle_section.add_widget(_make_canvas(fig))
+        self._stats_plot_layout.addWidget(angle_section)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
+        # --- Polar Angle Distribution ---  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        polar_section = CollapsibleSection("Polar Angle Distribution, 0°–360° (consecutive frames only, Δt = 1)")
+        with plt.style.context(dark_style):
+            fig = Figure(figsize=(6, 6), dpi=100)
+            ax = fig.add_subplot(111, projection='polar')
+            ax.set_facecolor('#1a1a1a')
+            n_bins_polar = 36  # 10° per bin
+            bin_edges = np.linspace(0, 2 * np.pi, n_bins_polar + 1)
+            n_max_polar = n_max.get('data3', 0) if common_norm else 0  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            for di, r, st, color in _iter_colors(results_list):
+                subset = r['analysis_data3'][r['analysis_data3']['state'] == st]
+                if len(subset) > 0 and 'polar_angle' in subset.columns:
+                    theta_rad = np.radians(subset['polar_angle'].values)
+                    counts, _ = np.histogram(theta_rad, bins=bin_edges)
+                    denom = n_max_polar if common_norm and n_max_polar > 0 else counts.sum()
+                    proportions = counts / denom if denom > 0 else counts
+                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                    width = 2 * np.pi / n_bins_polar
+                    ax.bar(bin_centers, proportions, width=width, color=color,
+                           alpha=0.5, label=_ds_label(r, st), edgecolor='#555555', linewidth=0.3)
+            ax.set_theta_zero_location('E')  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            ax.set_theta_direction(1)  # counterclockwise
+            ax.set_yticklabels([])  # hide radial tick labels
+            ax.set_title('Polar Angle Distribution', pad=15)
+            ax.tick_params(colors='#cccccc')
+            ax.spines['polar'].set_color('#555555')
+            if need_legend:
+                ax.legend(loc='upper left', bbox_to_anchor=(-0.35, 1.15))  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            fig.subplots_adjust(left=0.15, right=0.85, top=0.9, bottom=0.05)
+        polar_section.add_widget(_make_canvas(fig))
+        self._stats_plot_layout.addWidget(polar_section)
+
+        self._stats_plot_layout.addStretch()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
+    def _on_save_stats_plots(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        """Save all rendered plot canvases as PNG files to a user-selected directory."""
+        if not self._stats_canvases:
+            QMessageBox.warning(self, "No plots", "Run preprocessing first.")
+            return
+        save_dir = QFileDialog.getExistingDirectory(self, "Select directory to save plots")
+        if not save_dir:
+            return
+        plot_names = ['population_pie']  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        if self._stats_results and any(r.get('has_diffusion', False) for r in self._stats_results):
+            plot_names += ['H_distribution', 'K_distribution']
+        plot_names += ['mean_jump_distance', 'jump_distance', 'duration',
+                       'ensemble_averaged_SD', 'angle_distribution', 'polar_angle_distribution']
+        saved = 0
+        for i, canvas in enumerate(self._stats_canvases):
+            name = plot_names[i] if i < len(plot_names) else f'plot_{i}'
+            path = os.path.join(save_dir, f'{name}.png')
+            canvas.figure.savefig(path, dpi=150, bbox_inches='tight',
+                                  transparent=True)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            saved += 1
+        self._stats_status_label.setText(f"Saved {saved} plots to {save_dir}")
 
     # ---- Adv Stats sub-tab ------------------------------------------------
     def _build_adv_stats_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
@@ -1312,8 +2371,10 @@ class FreeTraceGUI(QMainWindow):
     # ------------------------------------------------------------------
     # Dynamic font scaling
     # ------------------------------------------------------------------
-    def resizeEvent(self, event):
+    def resizeEvent(self, event):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         super().resizeEvent(event)
+        self._rescale_help_image()
+        # Debounce: wait 80 ms after the last resize before updating fonts
         self._resize_timer.start(80)
 
     def _apply_fonts(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
@@ -1459,12 +2520,14 @@ class FreeTraceGUI(QMainWindow):
         self._progress_bar.setValue(value)
         self._stage_label.setText(label)
 
-    def _on_finished(self, success: bool, message: str):
+    def _on_finished(self, success: bool, message: str):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         self._reset_buttons()
         if success:
             self._output_dir = message
             self._append_log(f"Done. Results saved to: {message}")
-            self._load_results(message)
+            video_path = self._input_path.text().strip()
+            video_stem = os.path.splitext(os.path.basename(video_path))[0]
+            self._load_results(message, video_stem)
             self._tabs.setCurrentIndex(1)
         else:
             self._append_log(f"Failed: {message}")
@@ -1581,6 +2644,7 @@ class FreeTraceGUI(QMainWindow):
         )
         if not paths:
             return
+        paths = sorted(paths)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         self._loaded_datasets = []
         for path in paths:
             self._load_data_from_file(path)
@@ -1959,14 +3023,14 @@ class FreeTraceGUI(QMainWindow):
                 os.path.join(output_dir, diffusion_files[0])
             )  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-17
 
-    def _load_results(self, output_dir: str):
+    def _load_results(self, output_dir: str, video_stem: str = ""):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         # Clear previous dynamic result widgets
         for w in self._result_widgets:
             self._results_layout.removeWidget(w)
             w.deleteLater()
         self._result_widgets.clear()
 
-        image_suffixes = {  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 23:50
+        image_suffixes = {
             "Trajectory Map": "_traces.png",
             "Localisation Density": "_loc_2d_density.png",
             "H-K Distribution": "_diffusion_distribution.png",
@@ -1977,7 +3041,7 @@ class FreeTraceGUI(QMainWindow):
             for title, suffix in image_suffixes.items():
                 matches = [
                     f for f in os.listdir(output_dir)
-                    if f.endswith(suffix)
+                    if f.endswith(suffix) and (not video_stem or f.startswith(video_stem))
                 ]
                 for fname in sorted(matches):
                     fpath = os.path.join(output_dir, fname)
@@ -2007,7 +3071,7 @@ class FreeTraceGUI(QMainWindow):
                     self._result_widgets.append(img_label)
 
             # Also show CSV files
-            csv_files = sorted(f for f in os.listdir(output_dir) if f.endswith(".csv"))
+            csv_files = sorted(f for f in os.listdir(output_dir) if f.endswith(".csv") and (not video_stem or f.startswith(video_stem)))  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
             if csv_files:
                 header = QLabel(f"<b>Output files:</b>")
                 header.setStyleSheet(
