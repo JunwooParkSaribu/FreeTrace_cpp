@@ -159,8 +159,10 @@ class FreeTraceWorker(QThread):
                 bufsize=1,
                 env=env,
             )
-            if sys.platform == "win32":
-                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            if sys.platform == "win32":  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                popen_kwargs["creationflags"] = (
+                    subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+                )
             else:
                 popen_kwargs["start_new_session"] = True
 
@@ -302,10 +304,15 @@ class PreviewWorker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic 
                 "--shift", "1",
             ]
             self.log.emit(f"$ {' '.join(cmd)}")
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            popen_kw = dict(  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, env=env,
             )
+            if sys.platform == "win32":
+                popen_kw["creationflags"] = (
+                    subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+                )
+            proc = subprocess.Popen(cmd, **popen_kw)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
             for line in proc.stdout:
                 line = line.rstrip("\n")
                 if not line.startswith("TIFFReadDirectory: Warning"):
