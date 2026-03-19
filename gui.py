@@ -16,6 +16,7 @@ import shutil
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 import matplotlib  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 matplotlib.use('Agg')
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
@@ -415,6 +416,39 @@ def _dot_product_angle(v1, v2):
     return 180 - ang
 
 
+# ---------------------------------------------------------------------------
+# Distribution helpers for Adv Stats (standalone, no FreeTrace dependency)
+# ---------------------------------------------------------------------------
+def _pdf_gaussian(x, mu, sigma, alpha):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+    """Scaled Gaussian PDF: alpha * N(x; mu, sigma)."""
+    return alpha / (sigma * np.sqrt(2 * np.pi)) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+
+
+
+def _pdf_cauchy(u, h, t=1, s=1):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+    """PDF of the Cauchy distribution for fBm displacement ratio."""
+    assert 0 < h < 1
+    return 1/(np.pi * np.sqrt(1-(2**(2*h-1)-1)**2)) * 1 / (
+        (u - (2**(2*h-1) - 1)*(t/s)**h)**2 / ((1 - (2**(2*h-1)-1)**2)*np.sqrt((t/s)**(2*h)))
+        + (np.sqrt((t/s)**(2*h))))
+
+
+def _pdf_cauchy_1mixture(x, h1, alpha):
+    """Scaled single-component Cauchy PDF."""
+    return alpha * _pdf_cauchy(x, h1)
+
+
+def _cauchy_location(h1, t=1, s=1):
+    """Peak location of the Cauchy distribution given H."""
+    return (2**(2*h1-1) - 1)*(t/s)**h1
+
+
+def _func_to_minimise(params, func, x, y):
+    """Objective for scipy.optimize.minimize — L1 norm."""
+    y_pred = func(x, *params)
+    return np.sum(abs(y_pred - y))  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
+
 def _preprocess_for_stats(data, pixelmicrons, framerate, cutoff_min=3, cutoff_max=99999,  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
                           has_diffusion=True):
     """Standalone preprocessing for Basic Stats tab.
@@ -587,6 +621,194 @@ def _preprocess_for_stats(data, pixelmicrons, framerate, cutoff_min=3, cutoff_ma
     return analysis_data1, analysis_data2, analysis_data3, msd, total_states  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
 
+def _preprocess_for_adv_stats(data, pixelmicrons, framerate, cutoff_min=3, cutoff_max=99999):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+    """Preprocessing for Advanced Stats tab — TAMSD, 1D displacements, 1D ratios + Cauchy/Gaussian fits.
+
+    Works with traces-only data (no H/K needed).
+    Returns (tamsd_df, displacements_1d_df, ratios_1d_df, cauchy_fits, gaussian_fits, total_states)
+    """
+    data = data.dropna()
+    if 'state' in data.columns:
+        data = data.astype({'state': int})
+    else:
+        data['state'] = 0
+
+    traj_indices = pd.unique(data['traj_idx'])
+    total_states = sorted(data['state'].unique())
+
+    if len(data) == 0:
+        return None, None, None, None, total_states
+
+    dim = 2
+
+    # TAMSD ragged arrays per state
+    tamsd_ragged = {st: [] for st in total_states}
+    # 1D displacements
+    disp_1d = {'dx': [], 'dy': [], 'state': []}
+    # 1D ratios
+    ratios_1d = {'ratio': [], 'state': []}
+
+    for traj_idx in traj_indices:
+        single_traj = data.loc[data['traj_idx'] == traj_idx].copy()
+        single_traj = single_traj.sort_values(by=['frame'])
+
+        # Chunk by state only
+        before_st = single_traj.state.iloc[0]
+        state_chunk_idx = [0, len(single_traj)]
+        for st_idx, st in enumerate(single_traj.state):
+            if st != before_st:
+                state_chunk_idx.append(st_idx)
+            before_st = st
+        state_chunk_idx = sorted(state_chunk_idx)
+
+        for si in range(len(state_chunk_idx) - 1):
+            sub_traj = single_traj.iloc[state_chunk_idx[si]:state_chunk_idx[si + 1]].copy()
+            if not (cutoff_min <= len(sub_traj) <= cutoff_max):
+                continue
+
+            state = sub_traj.state.iloc[0]
+
+            # Convert to microns
+            sub_traj.x = sub_traj.x * pixelmicrons
+            sub_traj.y = sub_traj.y * pixelmicrons
+
+            # Coordinate rescale (origin at first point)
+            x0 = sub_traj.x.iloc[0]
+            y0 = sub_traj.y.iloc[0]
+            sub_traj.x = sub_traj.x - x0
+            sub_traj.y = sub_traj.y - y0
+
+            frames = sub_traj.frame.to_numpy()
+            xs = sub_traj.x.to_numpy()
+            ys = sub_traj.y.to_numpy()
+            n_pts = len(xs)
+
+            # --- TAMSD: for each lag τ, average SD over all valid windows ---
+            tmp_tamsd = []
+            for tau in range(1, n_pts):
+                sd_vals = []
+                for i in range(n_pts - tau):
+                    actual_gap = frames[i + tau] - frames[i]
+                    if actual_gap == tau:
+                        sd = ((xs[i + tau] - xs[i])**2 + (ys[i + tau] - ys[i])**2) / dim / 2
+                        sd_vals.append(sd)
+                if sd_vals:
+                    tmp_tamsd.append(np.mean(sd_vals))
+                else:
+                    tmp_tamsd.append(None)
+            tamsd_ragged[state].append(tmp_tamsd)
+
+            # --- 1D Displacements (consecutive frames only, Δt=1) ---
+            frame_diffs = frames[1:] - frames[:-1]
+            consecutive = (frame_diffs == 1)
+            dx_consec = (xs[1:] - xs[:-1])[consecutive]
+            dy_consec = (ys[1:] - ys[:-1])[consecutive]
+            disp_1d['dx'].extend(dx_consec.tolist())
+            disp_1d['dy'].extend(dy_consec.tolist())
+            disp_1d['state'].extend([state] * len(dx_consec))
+
+            # --- 1D Ratios (consecutive displacement ratios) ---
+            if len(dx_consec) > 1:
+                rx = dx_consec[1:] / dx_consec[:-1]
+                ry = dy_consec[1:] / dy_consec[:-1]
+                ratios = np.concatenate([rx, ry])
+                valid = np.isfinite(ratios)
+                ratios_1d['ratio'].extend(ratios[valid].tolist())
+                ratios_1d['state'].extend([state] * int(valid.sum()))
+
+    # --- Ensemble average TAMSD per state ---
+    tamsd = {'mean': [], 'std': [], 'nb_data': [], 'state': [], 'time': []}
+    for state_key in total_states:
+        tamsd_mean = []
+        tamsd_std = []
+        tamsd_nb = []
+        max_lag = max((len(row) for row in tamsd_ragged[state_key]), default=0)
+        for t in range(max_lag):
+            row_data = []
+            for row in tamsd_ragged[state_key]:
+                if t < len(row) and row[t] is not None:
+                    row_data.append(row[t])
+            tamsd_mean.append(np.mean(row_data) if row_data else np.nan)
+            tamsd_std.append(np.std(row_data) if row_data else np.nan)
+            tamsd_nb.append(len(row_data))
+        times = (np.arange(1, max_lag + 1)) * framerate
+        tamsd['mean'].extend(tamsd_mean)
+        tamsd['std'].extend(tamsd_std)
+        tamsd['nb_data'].extend(tamsd_nb)
+        tamsd['state'].extend([state_key] * max_lag)
+        tamsd['time'].extend(times.tolist())
+
+    tamsd_df = pd.DataFrame(tamsd)
+    displacements_1d_df = pd.DataFrame(disp_1d)
+    ratios_1d_df = pd.DataFrame(ratios_1d)
+
+    # --- Cauchy fit per state ---
+    cauchy_fits = {}
+    for state_key in total_states:
+        try:
+            subset = ratios_1d_df[ratios_1d_df['state'] == state_key]['ratio'].to_numpy()
+            if len(subset) < 10:
+                continue
+            # Clip to reasonable range for histogram
+            subset_clipped = subset[(subset > -10) & (subset < 10)]
+            if len(subset_clipped) < 10:
+                continue
+            counts, bin_edges = np.histogram(subset_clipped, bins=100, density=True)
+            bin_centres = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+            result = minimize(  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                _func_to_minimise, x0=[0.5, 1.0],
+                args=(_pdf_cauchy_1mixture, bin_centres, counts),
+                method='Nelder-Mead',
+            )
+            h_est, alpha_est = np.clip(result.x[0], 0.01, 0.99), max(result.x[1], 0.01)
+            loc_est = _cauchy_location(h_est)
+            x_fit = np.linspace(bin_edges[0], bin_edges[-1], 500)
+            y_fit = _pdf_cauchy_1mixture(x_fit, h_est, alpha_est)
+            cauchy_fits[state_key] = {
+                'h_est': h_est, 'alpha_est': alpha_est, 'location': loc_est,
+                'x_fit': x_fit, 'y_fit': y_fit,
+                'bin_centres': bin_centres, 'counts': counts, 'bin_edges': bin_edges,
+            }
+        except Exception:
+            pass
+
+    # --- Gaussian fit per state for 1D displacements ---
+    gaussian_fits = {}  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+    for state_key in total_states:
+        try:
+            subset = displacements_1d_df[displacements_1d_df['state'] == state_key]
+            dx_arr = subset['dx'].to_numpy()
+            dy_arr = subset['dy'].to_numpy()
+            if len(dx_arr) < 10:
+                continue
+            fits = {}
+            for axis_name, arr in [('dx', dx_arr), ('dy', dy_arr)]:
+                counts, bin_edges = np.histogram(arr, bins=80, density=True)
+                bin_centres = (bin_edges[:-1] + bin_edges[1:]) / 2
+                # Initial guess: mean, std, amplitude=1
+                mu0, sigma0 = np.mean(arr), np.std(arr)
+                result = minimize(  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                    _func_to_minimise, x0=[mu0, max(sigma0, 1e-6), 1.0],
+                    args=(_pdf_gaussian, bin_centres, counts),
+                    method='Nelder-Mead',
+                )
+                mu_est = result.x[0]
+                sigma_est = max(result.x[1], 1e-8)
+                alpha_est = max(result.x[2], 0.01)
+                x_fit = np.linspace(bin_edges[0], bin_edges[-1], 500)
+                y_fit = _pdf_gaussian(x_fit, mu_est, sigma_est, alpha_est)
+                fits[axis_name] = {
+                    'mu': mu_est, 'sigma': sigma_est, 'alpha': alpha_est,
+                    'x_fit': x_fit, 'y_fit': y_fit,
+                }
+            gaussian_fits[state_key] = fits
+        except Exception:
+            pass
+
+    return tamsd_df, displacements_1d_df, ratios_1d_df, cauchy_fits, gaussian_fits, total_states  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
+
 # ---------------------------------------------------------------------------
 # StatsWorker — runs preprocessing in background thread
 # ---------------------------------------------------------------------------
@@ -624,6 +846,53 @@ class StatsWorker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic AI
                         'msd': msd,
                         'total_states': total_states,
                         'has_diffusion': has_diff,
+                    })
+            if not all_results:
+                self.error.emit("No data remaining after filtering.")
+                return
+            self.progress.emit(95, "Building results...")
+            self.finished.emit(all_results)
+        except Exception as e:
+            self.error.emit(str(e))  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
+
+class AdvStatsWorker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+    """Background worker for Advanced Stats — runs TAMSD + 1D displacement + Cauchy fit."""
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, datasets, pixelmicrons, framerate, cutoff_min):
+        """datasets: list of (name, DataFrame) tuples."""
+        super().__init__()
+        self._datasets = datasets
+        self._pixelmicrons = pixelmicrons
+        self._framerate = framerate
+        self._cutoff_min = cutoff_min
+
+    def run(self):
+        try:
+            all_results = []
+            n = len(self._datasets)
+            for idx, (name, data) in enumerate(self._datasets):
+                pct = int(10 + 80 * idx / max(n, 1))
+                self.progress.emit(pct, f"Processing {name}...")
+                result = _preprocess_for_adv_stats(
+                    data, self._pixelmicrons, self._framerate,
+                    cutoff_min=self._cutoff_min,
+                )
+                tamsd_df, disp_df, ratios_df, cauchy_fits, gaussian_fits, total_states = result  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                n_trajs = int(data['traj_idx'].nunique())
+                if tamsd_df is not None and len(tamsd_df) > 0:
+                    all_results.append({
+                        'name': name,
+                        'tamsd': tamsd_df,
+                        'displacements_1d': disp_df,
+                        'ratios_1d': ratios_df,
+                        'cauchy_fits': cauchy_fits,
+                        'gaussian_fits': gaussian_fits,
+                        'total_states': total_states,
+                        'n_trajectories': n_trajs,
                     })
             if not all_results:
                 self.error.emit("No data remaining after filtering.")
@@ -1300,18 +1569,66 @@ class FreeTraceGUI(QMainWindow):
             "<p><b>Angle / Polar Angle</b> — Deflection angle (0°–180°) and signed turning "
             "angle (0°–360°) between consecutive step pairs, both Δt = 1. "
             "Uniform if isotropic &amp; Brownian.</p>"
-            "<h3 style='color:#66ccff;'>Advanced Stats Tab (planned)</h3>"
-            "<p><b>TA-EA-SD</b> — Time-Averaged, Ensemble-Averaged SD. For each trajectory, "
-            "compute SD at each lag τ by averaging over all time windows, then ensemble-average "
-            "across trajectories. More robust than EA-SD for short trajectories.</p>"
-            "<p><b>1D Displacement</b> — Projection of a step onto one axis (Δx or Δy). "
-            "Gaussian for Brownian or fBm molecules in a homogeneous population. "
-            "Non-Gaussian → heterogeneous population (mixed diffusion states). "
-            "Only Δt = 1 steps. Assumes isotropic motion (Δx ≡ Δy).</p>"
-            "<p><b>1D Displacement Ratio</b> — Ratio of consecutive 1D displacements: "
-            "Δx(t+1) / Δx(t). For fBm (any H), the ratio follows a Cauchy-like distribution. "
-            "Deviation from Cauchy → the motion is not purely fractional Brownian. "
-            "Assumes homogeneous &amp; isotropic.</p>"
+            "<h3 style='color:#66ccff;'>Advanced Stats Tab</h3>"  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            "<p>The Advanced Stats tab provides computationally intensive analyses that "
+            "complement the Basic Stats tab. It requires only <code>_traces.csv</code> "
+            "(no diffusion data needed). Each plot is computed per diffusion state.</p>"
+            "<p><b>TA-EA-SD (Time-Averaged Ensemble-Averaged Squared Displacement)</b> — "
+            "For each trajectory, the squared displacement at lag τ is averaged over all "
+            "valid time windows of size τ (the <i>time-average</i>). These per-trajectory "
+            "means are then averaged across all trajectories in the ensemble (the "
+            "<i>ensemble-average</i>). This two-stage averaging is more robust than the "
+            "EA-SD in Basic Stats, especially for short trajectories with frame gaps: "
+            "EA-SD uses only the displacement from origin at each time point, while "
+            "TA-EA-SD exploits all overlapping windows. The slope on a log-log plot "
+            "gives the anomalous diffusion exponent: slope = 1 for Brownian motion, "
+            "&lt; 1 for subdiffusion, &gt; 1 for superdiffusion. Only windows where the "
+            "actual frame gap equals the lag τ are included (gaps are skipped, not "
+            "interpolated). The shaded region shows ± 1 std across the ensemble. "
+            "A log-log version is shown below: on a log-log scale, the slope directly "
+            "gives the anomalous diffusion exponent (slope = 1 for Brownian, &lt; 1 for "
+            "subdiffusion, &gt; 1 for superdiffusion). The log-log plot omits the std "
+            "fill to avoid y-axis distortion.</p>"
+            "<p><b>1D Displacement (Δx, Δy)</b> — Projection of each step onto the x and y "
+            "axes separately, using only consecutive-frame steps (Δt = 1). For a "
+            "homogeneous population of Brownian or fBm molecules, each projection is "
+            "Gaussian with zero mean. A non-Gaussian shape (heavy tails, multiple peaks) "
+            "indicates a heterogeneous population with mixed diffusion states. Δx and Δy "
+            "are shown overlaid; for isotropic motion they should be identical. "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            "A Gaussian N(x; μ, σ) × α is fitted to each histogram using L1 minimisation "
+            "(<code>scipy.optimize.minimize</code>, Nelder-Mead). "
+            "The stats panel reports empirical location/scale, plus the fitted parameters:</p>"
+            "<ul>"
+            "<li><b>Location</b> — Fitted mean μ of the Gaussian. Should be ≈ 0 for "
+            "unbiased diffusion (no drift).</li>"
+            "<li><b>Scale</b> — Fitted standard deviation σ. Related to the diffusion "
+            "coefficient: σ² = 2D·Δt for free Brownian motion.</li>"
+            "<li><b>Amplitude</b> — Vertical scaling factor α that adjusts the PDF to "
+            "the histogram density. For a perfect fit, α ≈ 1.</li>"
+            "</ul>"
+            "<p><b>1D Displacement Ratio — Cauchy Fit</b> — The ratio of consecutive "
+            "1D displacements: Δx(t+1) / Δx(t) (and similarly for Δy). For fractional "
+            "Brownian motion with Hurst exponent H, this ratio follows a Cauchy "
+            "distribution whose location parameter depends on H:</p>"
+            "<p style='margin-left:20px;'><code>location = 2<sup>2H−1</sup> − 1</code></p>"
+            "<p>A single-component Cauchy is fitted to the histogram using L1 minimisation "
+            "(<code>scipy.optimize.minimize</code>, Nelder-Mead). The fitted parameters are:</p>"
+            "<ul>"
+            "<li><b>Ĥ</b> — Estimated Hurst exponent from the Cauchy fit. "
+            "H = 0.5 → Brownian, H &lt; 0.5 → anti-persistent (subdiffusive), "
+            "H &gt; 0.5 → persistent (superdiffusive).</li>"
+            "<li><b>Location parameter</b> — The peak (mode) of the fitted Cauchy, "
+            "equal to 2<sup>2Ĥ−1</sup> − 1. Negative for H &lt; 0.5, zero at H = 0.5, "
+            "positive for H &gt; 0.5.</li>"
+            "<li><b>Amplitude factor</b> — A vertical scaling factor that adjusts the "
+            "PDF amplitude to match the observed histogram density. It is a fitting "
+            "nuisance parameter, not a physical quantity.</li>"
+            "</ul>"
+            "<p>Deviation of the observed histogram from the fitted Cauchy curve suggests "
+            "the underlying motion is not purely fractional Brownian (e.g., confined "
+            "diffusion, active transport, or a mixture of diffusion states). "
+            "Ratios are clipped to [−10, 10] and data with fewer than 10 valid ratios "
+            "per state are excluded from fitting.</p>"
             "<h3 style='color:#66ccff;'>Common Normalisation</h3>"
             "<p>When enabled, all datasets share the same bin edges and the y-axis is "
             "normalised to the dataset with the most data points. The largest dataset "
@@ -1476,7 +1793,7 @@ class FreeTraceGUI(QMainWindow):
         self._stats_common_norm.setChecked(False)
         toolbar.addWidget(self._stats_common_norm)
 
-        self._stats_run_btn = QPushButton("▶ Run Preprocessing")
+        self._stats_run_btn = QPushButton("▶ Run Basic Stats")
         self._stats_run_btn.clicked.connect(self._on_run_preprocessing)
         toolbar.addWidget(self._stats_run_btn)
 
@@ -1501,7 +1818,7 @@ class FreeTraceGUI(QMainWindow):
         self._stats_plot_layout.setContentsMargins(4, 4, 4, 4)
         self._stats_plot_layout.setSpacing(4)
 
-        self._stats_placeholder = QLabel("Load data and click 'Run Preprocessing' to generate plots.")
+        self._stats_placeholder = QLabel("Load data and click 'Run Basic Stats' to generate plots.")
         self._stats_placeholder.setWordWrap(True)
         self._stats_placeholder.setStyleSheet("color:#888; font-size:14px; padding:20px;")
         self._stats_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1530,6 +1847,7 @@ class FreeTraceGUI(QMainWindow):
         self._stats_datasets.clear()
         for p in paths:
             self._load_stats_data_from_file(p)
+        self._stats_datasets.sort(key=lambda ds: ds['video_name'])
         n = len(self._stats_datasets)
         if n > 0:
             has_diff = sum(1 for ds in self._stats_datasets if ds['diffusion_df'] is not None)
@@ -2024,7 +2342,7 @@ class FreeTraceGUI(QMainWindow):
                                     subset['mean'] + subset['std'],
                                     alpha=0.15, color=color)
                     plotted = True
-            ax.set_xlabel('Time (s)')
+            ax.set_xlabel('Time lag (s)')
             ax.set_ylabel('EA-SD (μm²)')
             ax.set_title('Ensemble-Averaged Squared Displacement')
             if need_legend and plotted:
@@ -2117,20 +2435,436 @@ class FreeTraceGUI(QMainWindow):
         self._stats_status_label.setText(f"Saved {saved} plots to {save_dir}")
 
     # ---- Adv Stats sub-tab ------------------------------------------------
-    def _build_adv_stats_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+    def _build_adv_stats_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        placeholder = QLabel("Advanced Statistics — coming soon.")
-        placeholder.setWordWrap(True)
-        placeholder.setStyleSheet("color:#888; font-size:14px; padding:20px;")
-        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(placeholder)
-        layout.addStretch()
+        # Toolbar
+        toolbar = QHBoxLayout()
+        self._adv_stats_load_btn = QPushButton("Load Data")
+        self._adv_stats_load_btn.clicked.connect(self._on_adv_stats_load_data)
+        toolbar.addWidget(self._adv_stats_load_btn)
+
+        toolbar.addWidget(QLabel("Pixel size (μm):"))
+        self._adv_stats_pixelsize = QDoubleSpinBox()
+        self._adv_stats_pixelsize.setRange(0.001, 10.0)
+        self._adv_stats_pixelsize.setValue(1.0)
+        self._adv_stats_pixelsize.setDecimals(4)
+        self._adv_stats_pixelsize.setSingleStep(0.01)
+        toolbar.addWidget(self._adv_stats_pixelsize)
+
+        toolbar.addWidget(QLabel("Frame rate (s):"))
+        self._adv_stats_framerate = QDoubleSpinBox()
+        self._adv_stats_framerate.setRange(0.0001, 10.0)
+        self._adv_stats_framerate.setValue(1.0)
+        self._adv_stats_framerate.setDecimals(4)
+        self._adv_stats_framerate.setSingleStep(0.001)
+        toolbar.addWidget(self._adv_stats_framerate)
+
+        toolbar.addWidget(QLabel("Min traj length:"))
+        self._adv_stats_cutoff = QSpinBox()
+        self._adv_stats_cutoff.setRange(1, 9999)
+        self._adv_stats_cutoff.setValue(3)
+        toolbar.addWidget(self._adv_stats_cutoff)
+
+        self._adv_stats_run_btn = QPushButton("▶ Run Advanced Stats")
+        self._adv_stats_run_btn.clicked.connect(self._on_run_adv_stats)
+        toolbar.addWidget(self._adv_stats_run_btn)
+
+        self._adv_stats_save_btn = QPushButton("Save Plots")
+        self._adv_stats_save_btn.clicked.connect(self._on_save_adv_stats_plots)
+        self._adv_stats_save_btn.setEnabled(False)
+        toolbar.addWidget(self._adv_stats_save_btn)
+
+        self._adv_stats_status_label = QLabel("")
+        self._adv_stats_status_label.setStyleSheet("color:#888;")
+        toolbar.addWidget(self._adv_stats_status_label)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        # Scroll area for plots
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background:#1e1e1e; border:none;")
+        scroll_widget = QWidget()
+        self._adv_stats_plot_layout = QVBoxLayout(scroll_widget)
+        self._adv_stats_plot_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._adv_stats_plot_layout.setContentsMargins(4, 4, 4, 4)
+        self._adv_stats_plot_layout.setSpacing(4)
+
+        self._adv_stats_placeholder = QLabel("Load data and click 'Run Advanced Stats' to generate plots.")
+        self._adv_stats_placeholder.setWordWrap(True)
+        self._adv_stats_placeholder.setStyleSheet("color:#888; font-size:14px; padding:20px;")
+        self._adv_stats_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._adv_stats_plot_layout.addWidget(self._adv_stats_placeholder)
+
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll)
+
+        # State
+        self._adv_stats_datasets = []
+        self._adv_stats_worker = None
+        self._adv_stats_results = None
+        self._adv_stats_canvases = []
 
         return widget
+
+    def _on_adv_stats_load_data(self):
+        """Load data for Advanced Stats — only _traces.csv needed."""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select FreeTrace traces CSV(s)", "",
+            "CSV files (*_traces.csv);;All files (*)",
+        )
+        if not paths:
+            return
+        paths = sorted(paths)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        self._adv_stats_datasets.clear()
+        for p in paths:
+            self._load_adv_stats_data_from_file(p)
+        self._adv_stats_datasets.sort(key=lambda ds: ds['video_name'])
+        n = len(self._adv_stats_datasets)
+        if n > 0:
+            self._adv_stats_status_label.setText(f"Loaded {n} video(s).")
+
+    def _load_adv_stats_data_from_file(self, selected_path):
+        """Load traces CSV for Advanced Stats."""
+        try:
+            if '_traces.csv' not in selected_path:
+                return
+            traces_path = selected_path
+
+            # Skip duplicates
+            for ds in self._adv_stats_datasets:
+                if ds['traces_path'] == traces_path:
+                    return
+
+            if not os.path.exists(traces_path):
+                QMessageBox.warning(self, "File not found", f"Traces file not found:\n{traces_path}")
+                return
+
+            traces_df = pd.read_csv(traces_path)
+            required_cols = {'traj_idx', 'frame', 'x', 'y'}
+            if not required_cols.issubset(traces_df.columns):
+                missing = required_cols - set(traces_df.columns)
+                QMessageBox.warning(self, "Invalid traces file",
+                                    f"Missing columns: {', '.join(sorted(missing))}")
+                return
+
+            if 'state' not in traces_df.columns:
+                traces_df['state'] = 0
+
+            fname = os.path.basename(traces_path)
+            video_name = fname.replace('_traces.csv', '')
+
+            self._adv_stats_datasets.append({
+                'video_name': video_name,
+                'traces_path': traces_path,
+                'traces_df': traces_df,
+            })
+        except Exception as e:
+            QMessageBox.critical(self, "Error loading data", str(e))
+
+    def _on_run_adv_stats(self):
+        """Run Advanced Stats preprocessing in background thread."""
+        if not self._adv_stats_datasets:
+            QMessageBox.warning(self, "No data", "Load data first.")
+            return
+        if self._adv_stats_worker is not None and self._adv_stats_worker.isRunning():
+            return
+
+        dataset_tuples = []
+        for ds in self._adv_stats_datasets:
+            tdf = ds['traces_df'].copy()
+            if 'state' not in tdf.columns:
+                tdf['state'] = 0
+            dataset_tuples.append((ds['video_name'], tdf))
+
+        self._adv_stats_run_btn.setEnabled(False)
+        self._adv_stats_status_label.setText("Processing...")
+        self._adv_stats_worker = AdvStatsWorker(
+            dataset_tuples, self._adv_stats_pixelsize.value(),
+            self._adv_stats_framerate.value(), self._adv_stats_cutoff.value(),
+        )
+        self._adv_stats_worker.progress.connect(
+            lambda pct, msg: self._adv_stats_status_label.setText(f"{msg} ({pct}%)")
+        )
+        self._adv_stats_worker.finished.connect(self._adv_stats_worker_finished)
+        self._adv_stats_worker.error.connect(self._adv_stats_worker_error)
+        self._adv_stats_worker.start()
+
+    def _adv_stats_worker_error(self, msg):
+        self._adv_stats_run_btn.setEnabled(True)
+        self._adv_stats_status_label.setText(f"Error: {msg}")
+
+    def _adv_stats_worker_finished(self, results_list):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        self._adv_stats_run_btn.setEnabled(True)
+        parts = []
+        for r in results_list:
+            parts.append(f"{r['name']}: {r['n_trajectories']} trajectories")
+        self._adv_stats_status_label.setText("Done. " + ", ".join(parts))
+        self._adv_stats_results = results_list
+        self._adv_stats_save_btn.setEnabled(True)
+        self._render_adv_stats_plots(results_list)
+
+    def _render_adv_stats_plots(self, results_list):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        """Render Advanced Stats plots — TA-EA-SD, 1D Displacement, 1D Ratio + Cauchy fit."""
+        # Clear previous plots
+        for canvas in self._adv_stats_canvases:
+            canvas.setParent(None)
+            canvas.deleteLater()
+        self._adv_stats_canvases.clear()
+        while self._adv_stats_plot_layout.count():
+            item = self._adv_stats_plot_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+
+        n_datasets = len(results_list)
+        ds_palette = sns.color_palette('tab10', n_colors=max(n_datasets, 1))
+
+        dark_style = {
+            'figure.facecolor': '#1e1e1e',
+            'axes.facecolor': '#1a1a1a',
+            'text.color': '#cccccc',
+            'axes.labelcolor': '#cccccc',
+            'xtick.color': '#cccccc',
+            'ytick.color': '#cccccc',
+            'axes.edgecolor': '#555555',
+            'grid.color': '#333333',
+        }
+
+        def _make_canvas(fig):
+            canvas = FigureCanvasQTAgg(fig)
+            canvas.setMinimumHeight(350)
+            self._adv_stats_canvases.append(canvas)
+            return canvas
+
+        def _make_fig_with_stats():
+            fig = Figure(figsize=(10, 4), dpi=100, constrained_layout=True)
+            gs = fig.add_gridspec(1, 2, width_ratios=[4, 1], wspace=0.02)
+            ax = fig.add_subplot(gs[0])
+            ax_stats = fig.add_subplot(gs[1])
+            ax_stats.axis('off')
+            return fig, ax, ax_stats
+
+        def _fill_stats_panel(ax_stats, stat_lines):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            y = 0.95
+            ax_stats.text(0.05, y, 'Statistics', color='#aaaaaa', fontsize=9,
+                         fontweight='bold', transform=ax_stats.transAxes, va='top')
+            y -= 0.08
+            for label, color, loc_val, scale_val in stat_lines:
+                txt = f'{label}' if label else ''
+                if loc_val is not None:
+                    txt += f'  loc={loc_val:.4g}'
+                if scale_val is not None:
+                    txt += f'  scale={scale_val:.4g}'
+                ax_stats.text(0.05, y, txt, color=color, fontsize=8,
+                             transform=ax_stats.transAxes, va='top')
+                y -= 0.06
+
+        def _ds_label(r, state=None):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            name = r['name']
+            if state is not None and len(r['total_states']) > 1:
+                return f"{name} S{state}" if n_datasets > 1 else f"State {state}"
+            return name
+
+        def _iter_colors(results_list):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            """Match Basic Stats color logic: single dataset → per-state tab10,
+            multiple datasets → per-dataset tab10."""
+            single = (n_datasets == 1)
+            if single:
+                r = results_list[0]
+                state_pal = sns.color_palette('tab10', n_colors=max(len(r['total_states']), 1))
+                for si, st in enumerate(r['total_states']):
+                    yield r, st, state_pal[si % len(state_pal)]
+            else:
+                for ds_idx, r in enumerate(results_list):
+                    for st in r['total_states']:
+                        yield r, st, ds_palette[ds_idx % len(ds_palette)]
+
+        with plt.style.context(dark_style):
+            # ---- 1. TA-EA-SD (Time-Averaged Ensemble-Averaged Squared Displacement) ----
+            section1 = CollapsibleSection("TA-EA-SD (Time-Averaged Ensemble-Averaged Squared Displacement)")
+            fig = Figure(figsize=(10, 4), dpi=100, constrained_layout=True)
+            ax = fig.add_subplot(111)
+
+            for r, st, color in _iter_colors(results_list):
+                tamsd = r['tamsd']
+                subset = tamsd[tamsd['state'] == st]
+                if subset.empty:
+                    continue
+                label = _ds_label(r, st)
+                ax.plot(subset['time'], subset['mean'], color=color, label=label, linewidth=1.5)
+                mean_arr = subset['mean'].to_numpy()
+                std_arr = subset['std'].to_numpy()
+                time_arr = subset['time'].to_numpy()
+                ax.fill_between(time_arr, mean_arr - std_arr, mean_arr + std_arr,
+                               color=color, alpha=0.2)
+
+            ax.set_xlabel('Time lag (s)')
+            ax.set_ylabel('TA-EA-SD (μm²)')
+            ax.set_title('TA-EA-SD')
+            ax.legend(fontsize=7, loc='best')
+            ax.grid(True, alpha=0.3)
+            section1.add_widget(_make_canvas(fig))
+            self._adv_stats_plot_layout.addWidget(section1)
+
+            # ---- 1b. TA-EA-SD log-log ----
+            section1b = CollapsibleSection("TA-EA-SD — log-log")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            fig_log = Figure(figsize=(10, 4), dpi=100, constrained_layout=True)
+            ax_log = fig_log.add_subplot(111)
+
+            for r, st, color in _iter_colors(results_list):
+                tamsd = r['tamsd']
+                subset = tamsd[tamsd['state'] == st]
+                if subset.empty:
+                    continue
+                label = _ds_label(r, st)
+                valid = (subset['mean'] > 0) & (subset['time'] > 0)
+                s = subset[valid]
+                if s.empty:
+                    continue
+                ax_log.plot(s['time'], s['mean'], color=color, label=label, linewidth=1.5)
+
+            ax_log.set_xscale('log')
+            ax_log.set_yscale('log')
+            ax_log.set_xlabel('Time lag (s)')
+            ax_log.set_ylabel('TA-EA-SD (μm²)')
+            ax_log.set_title('TA-EA-SD — log-log')
+            ax_log.legend(fontsize=7, loc='best')
+            ax_log.grid(True, alpha=0.3, which='both')
+            section1b.add_widget(_make_canvas(fig_log))
+            self._adv_stats_plot_layout.addWidget(section1b)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
+            # ---- 2. 1D Displacement (Δx, Δy) ----
+            section2 = CollapsibleSection("1D Displacement (Δx, Δy) — consecutive frames only, Δt = 1")
+
+            for r, st, color in _iter_colors(results_list):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                disp = r['displacements_1d']
+                gaussian_fits = r['gaussian_fits']
+                subset = disp[disp['state'] == st]
+                if subset.empty:
+                    continue
+
+                fig2, ax2, ax2_stats = _make_fig_with_stats()
+                label = _ds_label(r, st)
+                dx_data = subset['dx'].to_numpy()
+                dy_data = subset['dy'].to_numpy()
+
+                bins_range = max(abs(np.percentile(np.concatenate([dx_data, dy_data]), [1, 99]))) * 1.2
+                bins = np.linspace(-bins_range, bins_range, 80)
+
+                ax2.hist(dx_data, bins=bins, alpha=0.5, color=color, label=f'{label} Δx',
+                        density=True, edgecolor='none')
+                ax2.hist(dy_data, bins=bins, alpha=0.5, color=(*color[:3], 0.6) if len(color) >= 3 else color,
+                        label=f'{label} Δy', density=True, edgecolor='none',
+                        linestyle='--')
+
+                # Overlay Gaussian fits
+                stat_lines = [
+                    (f'Δx (n={len(dx_data)})', color, np.mean(dx_data), np.std(dx_data)),
+                    (f'Δy (n={len(dy_data)})', color, np.mean(dy_data), np.std(dy_data)),
+                ]
+                if st in gaussian_fits:
+                    gf = gaussian_fits[st]
+                    if 'dx' in gf:
+                        ax2.plot(gf['dx']['x_fit'], gf['dx']['y_fit'], color='#ff6666',
+                                linewidth=2, label='Gaussian fit Δx')
+                        stat_lines.append(('--- Gaussian Δx ---', '#ff6666', None, None))
+                        stat_lines.append((f'Location = {gf["dx"]["mu"]:.4f}', '#ff6666', None, None))
+                        stat_lines.append((f'Scale = {gf["dx"]["sigma"]:.4f}', '#ff6666', None, None))
+                        stat_lines.append((f'Amplitude = {gf["dx"]["alpha"]:.4f}', '#ff6666', None, None))
+                    if 'dy' in gf:
+                        ax2.plot(gf['dy']['x_fit'], gf['dy']['y_fit'], color='#66ff66',
+                                linewidth=2, linestyle='--', label='Gaussian fit Δy')
+                        stat_lines.append(('--- Gaussian Δy ---', '#66ff66', None, None))
+                        stat_lines.append((f'Location = {gf["dy"]["mu"]:.4f}', '#66ff66', None, None))
+                        stat_lines.append((f'Scale = {gf["dy"]["sigma"]:.4f}', '#66ff66', None, None))
+                        stat_lines.append((f'Amplitude = {gf["dy"]["alpha"]:.4f}', '#66ff66', None, None))
+
+                ax2.set_xlabel('Displacement (μm)')
+                ax2.set_ylabel('Density')
+                ax2.set_title(f'1D Displacement — Gaussian Fit — {label}')
+                ax2.legend(fontsize=7, loc='best')
+                ax2.grid(True, alpha=0.3)
+
+                _fill_stats_panel(ax2_stats, stat_lines)
+                section2.add_widget(_make_canvas(fig2))  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
+            self._adv_stats_plot_layout.addWidget(section2)
+
+            # ---- 3. 1D Displacement Ratio — Cauchy Fit ----
+            section3 = CollapsibleSection("1D Displacement Ratio — Cauchy Fit")
+
+            for r, st, color in _iter_colors(results_list):
+                ratios = r['ratios_1d']
+                cauchy_fits = r['cauchy_fits']
+                subset = ratios[ratios['state'] == st]
+                if subset.empty:
+                    continue
+
+                fig3, ax3, ax3_stats = _make_fig_with_stats()
+                label = _ds_label(r, st)
+                ratio_data = subset['ratio'].to_numpy()
+                ratio_clipped = ratio_data[(ratio_data > -10) & (ratio_data < 10)]
+
+                if len(ratio_clipped) > 0:
+                    ax3.hist(ratio_clipped, bins=100, density=True, alpha=0.6,
+                            color=color, edgecolor='none', label=f'{label} data')
+
+                stat_lines = [(f'Ratio (n={len(ratio_clipped)})', color,
+                              np.mean(ratio_clipped) if len(ratio_clipped) > 0 else None,
+                              np.std(ratio_clipped) if len(ratio_clipped) > 0 else None)]
+
+                if st in cauchy_fits:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                    cf = cauchy_fits[st]
+                    ax3.plot(cf['x_fit'], cf['y_fit'], color='#ff6666', linewidth=2,
+                            label=f'Cauchy fit (Ĥ={cf["h_est"]:.3f})')
+                    ax3.axvline(cf['location'], color='#ff6666', linestyle='--',
+                               alpha=0.6, linewidth=1)
+                    stat_lines.append((f'Ĥ = {cf["h_est"]:.4f}', '#ff6666', None, None))
+                    stat_lines.append((f'Location param = {cf["location"]:.4f}', '#ff6666', None, None))
+                    stat_lines.append((f'Amplitude factor = {cf["alpha_est"]:.4f}', '#ff6666', None, None))
+
+                ax3.set_xlabel('Displacement Ratio')
+                ax3.set_ylabel('Density')
+                ax3.set_title(f'1D Ratio — Cauchy Fit — {label}')
+                ax3.legend(fontsize=7, loc='best')
+                ax3.grid(True, alpha=0.3)
+                ax3.set_xlim(-5, 5)
+
+                _fill_stats_panel(ax3_stats, stat_lines)
+                section3.add_widget(_make_canvas(fig3))
+
+            self._adv_stats_plot_layout.addWidget(section3)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
+    def _on_save_adv_stats_plots(self):
+        """Save all Advanced Stats plot canvases as PNG files."""
+        if not self._adv_stats_canvases:
+            QMessageBox.warning(self, "No plots", "Run Advanced Stats first.")
+            return
+        save_dir = QFileDialog.getExistingDirectory(self, "Select directory to save plots")
+        if not save_dir:
+            return
+        plot_names = ['ta_ea_sd']
+        # Remaining canvases are 1D displacement and ratio plots per state
+        idx = 1
+        for canvas in self._adv_stats_canvases[1:]:
+            if idx <= len(self._adv_stats_canvases) // 2:
+                plot_names.append(f'displacement_1d_{idx}')
+            else:
+                plot_names.append(f'ratio_cauchy_{idx}')
+            idx += 1
+        saved = 0
+        for i, canvas in enumerate(self._adv_stats_canvases):
+            name = plot_names[i] if i < len(plot_names) else f'adv_plot_{i}'
+            path = os.path.join(save_dir, f'{name}.png')
+            canvas.figure.savefig(path, dpi=150, bbox_inches='tight', transparent=True)
+            saved += 1
+        self._adv_stats_status_label.setText(f"Saved {saved} plots to {save_dir}")
 
     # ---- left panel (controls) ----------------------------------------
     def _build_left_panel(self):
