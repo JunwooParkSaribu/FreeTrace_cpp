@@ -24,8 +24,7 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'PIL',  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
-        'tkinter',
+        'tkinter',  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
     ],
     noarchive=False,
     optimize=1,
