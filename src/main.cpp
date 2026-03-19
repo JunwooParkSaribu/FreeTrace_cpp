@@ -3,7 +3,11 @@
 #include <cstring>
 #include <algorithm>
 #include <filesystem>
+#include <fstream> // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 #include <vector>
+#include <chrono>
+#include <iomanip>
+#include <sstream>
 #include "image_pad.h"
 #include "regression.h"
 #include "cost_function.h"
@@ -198,38 +202,71 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
                   << ", Shift: " << shift << std::endl;
         std::cout << std::endl;
 
+        // Error log for batch mode  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        std::string error_log_path = (std::filesystem::path(output) / "error_log.txt").string();
+        std::ofstream error_log;
+        auto log_error = [&](const std::string& fname, const std::string& stage, const std::string& msg) {
+            if (!error_log.is_open()) {
+                error_log.open(error_log_path, std::ios::app);
+                error_log << "FreeTrace C++ Batch — Error Log" << std::endl;
+                error_log << "Input folder: " << input_folder << std::endl;
+                error_log << "Output:       " << output << std::endl;
+                error_log << std::string(60, '-') << std::endl;
+            }
+            auto now = std::chrono::system_clock::now();
+            auto t = std::chrono::system_clock::to_time_t(now);
+            std::ostringstream ts;
+            ts << std::put_time(std::localtime(&t), "%Y-%m-%d %H:%M:%S");
+            error_log << "[" << ts.str() << "] " << fname << " — " << stage << ": " << msg << std::endl;
+            error_log.flush();
+        };  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
         int success_count = 0;
         for (size_t idx = 0; idx < files.size(); ++idx) {
             const auto& input = files[idx];
             auto fname = std::filesystem::path(input).filename().string();
             std::cout << "=== [" << (idx + 1) << "/" << files.size() << "] " << fname << " ===" << std::endl;
 
-            // Step 1: Localization
-            bool lok = freetrace::run(input, output, window, threshold, shift, verbose, "", batch_sz); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
-            if (!lok) {
-                std::cerr << "  Localization FAILED for " << fname << ", skipping." << std::endl;
-                std::cout << std::endl;
-                continue;
-            }
+            try {  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                // Step 1: Localization
+                bool lok = freetrace::run(input, output, window, threshold, shift, verbose, "", batch_sz);
+                if (!lok) {
+                    std::cerr << "  Localization FAILED for " << fname << ", skipping." << std::endl;
+                    log_error(fname, "Localization", "returned false");
+                    std::cout << std::endl;
+                    continue;
+                }
 
-            // Step 2: Tracking
-            int nb_frames, img_h, img_w;
-            freetrace::read_image(input, nb_frames, img_h, img_w);
-            auto track_config = config;
-            track_config.tiff_path = input;
-            track_config.img_rows = img_h;
-            track_config.img_cols = img_w;
+                // Step 2: Tracking
+                int nb_frames, img_h, img_w;
+                freetrace::read_image(input, nb_frames, img_h, img_w);
+                auto track_config = config;
+                track_config.tiff_path = input;
+                track_config.img_rows = img_h;
+                track_config.img_cols = img_w;
 
-            std::string loc_csv = build_loc_csv_path(input, output);
-            bool tok = freetrace::run_tracking(loc_csv, output, nb_frames, track_config);
-            if (!tok) {
-                std::cerr << "  Tracking FAILED for " << fname << "." << std::endl;
-            } else {
-                success_count++;
-            }
+                std::string loc_csv = build_loc_csv_path(input, output);
+                bool tok = freetrace::run_tracking(loc_csv, output, nb_frames, track_config);
+                if (!tok) {
+                    std::cerr << "  Tracking FAILED for " << fname << "." << std::endl;
+                    log_error(fname, "Tracking", "returned false");
+                } else {
+                    success_count++;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "  ERROR for " << fname << ": " << e.what() << std::endl;
+                log_error(fname, "Exception", e.what());
+            } catch (...) {
+                std::cerr << "  UNKNOWN ERROR for " << fname << std::endl;
+                log_error(fname, "Exception", "unknown error (non-std::exception)");
+            }  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
             std::cout << std::endl;
         }
 
+        if (error_log.is_open()) {
+            error_log.close();
+            std::cout << "Error log written to: " << error_log_path << std::endl;
+        }
         std::cout << "=== Batch complete: " << success_count << "/" << files.size() << " succeeded ===" << std::endl;
         return (success_count == static_cast<int>(files.size())) ? 0 : 1;
     } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15

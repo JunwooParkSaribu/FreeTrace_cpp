@@ -637,7 +637,7 @@ def _preprocess_for_adv_stats(data, pixelmicrons, framerate, cutoff_min=3, cutof
     total_states = sorted(data['state'].unique())
 
     if len(data) == 0:
-        return None, None, None, None, total_states
+        return None, None, None, None, None, total_states  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
     dim = 2
 
@@ -1629,6 +1629,37 @@ class FreeTraceGUI(QMainWindow):
             "diffusion, active transport, or a mixture of diffusion states). "
             "Ratios are clipped to [−10, 10] and data with fewer than 10 valid ratios "
             "per state are excluded from fitting.</p>"
+            "<h3 style='color:#66ccff;'>Log-log TA-EA-SD vs Cauchy Fit — When to Use Which?</h3>"  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            "<p>Both the log-log TA-EA-SD plot and the Cauchy ratio fit estimate the "
+            "anomalous diffusion exponent (and hence the Hurst exponent H), but they "
+            "have different strengths:</p>"
+            "<table style='border-collapse:collapse; margin:8px 0;'>"
+            "<tr style='border-bottom:1px solid #555;'>"
+            "<th style='padding:4px 12px; text-align:left;'></th>"
+            "<th style='padding:4px 12px; text-align:left;'>Log-log TA-EA-SD</th>"
+            "<th style='padding:4px 12px; text-align:left;'>Cauchy Ratio Fit</th></tr>"
+            "<tr><td style='padding:4px 12px;'><b>Output</b></td>"
+            "<td style='padding:4px 12px;'>Visual slope (anomalous exponent α)</td>"
+            "<td style='padding:4px 12px;'>Single number Ĥ (with α = 2H)</td></tr>"
+            "<tr><td style='padding:4px 12px;'><b>Best for</b></td>"
+            "<td style='padding:4px 12px;'>Qualitative inspection — spotting regime "
+            "changes across time scales (e.g., subdiffusive at short lags, normal at "
+            "long lags)</td>"
+            "<td style='padding:4px 12px;'>Quantitative H estimation — robust "
+            "single-value estimate from the full displacement ratio distribution</td></tr>"
+            "<tr><td style='padding:4px 12px;'><b>Limitations</b></td>"
+            "<td style='padding:4px 12px;'>Large lags have few averaging windows → "
+            "noisy right tail; MSD errors across lags are correlated, so standard "
+            "line fitting can underestimate uncertainty; fitting range choice affects "
+            "the result</td>"
+            "<td style='padding:4px 12px;'>Assumes the motion is fBm (or similar); "
+            "collapses all time-scale information into one number, so regime changes "
+            "are invisible</td></tr>"
+            "</table>"
+            "<p><b>Recommendation:</b> use the log-log plot to visually inspect the "
+            "diffusion regime across time scales, and the Cauchy fit for the "
+            "quantitative Ĥ estimate. If they disagree, the motion may not be "
+            "well-described by a single fBm model.</p>"
             "<h3 style='color:#66ccff;'>Common Normalisation</h3>"
             "<p>When enabled, all datasets share the same bin edges and the y-axis is "
             "normalised to the dataset with the most data points. The largest dataset "
@@ -1793,6 +1824,11 @@ class FreeTraceGUI(QMainWindow):
         self._stats_common_norm.setChecked(False)
         toolbar.addWidget(self._stats_common_norm)
 
+        self._stats_legend_cb = QCheckBox("Legend")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        self._stats_legend_cb.setChecked(True)
+        self._stats_legend_cb.stateChanged.connect(self._on_stats_legend_toggled)
+        toolbar.addWidget(self._stats_legend_cb)
+
         self._stats_run_btn = QPushButton("▶ Run Basic Stats")
         self._stats_run_btn.clicked.connect(self._on_run_preprocessing)
         toolbar.addWidget(self._stats_run_btn)
@@ -1800,7 +1836,7 @@ class FreeTraceGUI(QMainWindow):
         self._stats_save_btn = QPushButton("Save Plots")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         self._stats_save_btn.clicked.connect(self._on_save_stats_plots)
         self._stats_save_btn.setEnabled(False)
-        toolbar.addWidget(self._stats_save_btn)
+        toolbar.addWidget(self._stats_save_btn)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
         self._stats_status_label = QLabel("")
         self._stats_status_label.setStyleSheet("color:#888;")
@@ -1970,6 +2006,7 @@ class FreeTraceGUI(QMainWindow):
         n_datasets = len(results_list)
         single = (n_datasets == 1)
         common_norm = self._stats_common_norm.isChecked()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        show_legend = self._stats_legend_cb.isChecked()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         hist_ylabel = 'Percent'
         # Per-dataset colors (tab10 for multi-dataset, per-state colors for single)
         ds_palette = sns.color_palette('tab10', n_colors=max(n_datasets, 1))
@@ -2412,6 +2449,15 @@ class FreeTraceGUI(QMainWindow):
 
         self._stats_plot_layout.addStretch()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
+        # Apply legend visibility from checkbox  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        if not show_legend:
+            for canvas in self._stats_canvases:
+                for ax in canvas.figure.get_axes():
+                    leg = ax.get_legend()
+                    if leg:
+                        leg.set_visible(False)
+                canvas.draw_idle()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
     def _on_save_stats_plots(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         """Save all rendered plot canvases as PNG files to a user-selected directory."""
         if not self._stats_canvases:
@@ -2433,6 +2479,15 @@ class FreeTraceGUI(QMainWindow):
                                   transparent=True)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
             saved += 1
         self._stats_status_label.setText(f"Saved {saved} plots to {save_dir}")
+
+    def _on_stats_legend_toggled(self, state):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        show = bool(state)
+        for canvas in self._stats_canvases:
+            for ax in canvas.figure.get_axes():
+                leg = ax.get_legend()
+                if leg:
+                    leg.set_visible(show)
+            canvas.draw_idle()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
     # ---- Adv Stats sub-tab ------------------------------------------------
     def _build_adv_stats_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
@@ -2469,6 +2524,11 @@ class FreeTraceGUI(QMainWindow):
         self._adv_stats_cutoff.setValue(3)
         toolbar.addWidget(self._adv_stats_cutoff)
 
+        self._adv_stats_legend_cb = QCheckBox("Legend")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        self._adv_stats_legend_cb.setChecked(True)
+        self._adv_stats_legend_cb.stateChanged.connect(self._on_adv_stats_legend_toggled)
+        toolbar.addWidget(self._adv_stats_legend_cb)
+
         self._adv_stats_run_btn = QPushButton("▶ Run Advanced Stats")
         self._adv_stats_run_btn.clicked.connect(self._on_run_adv_stats)
         toolbar.addWidget(self._adv_stats_run_btn)
@@ -2476,7 +2536,7 @@ class FreeTraceGUI(QMainWindow):
         self._adv_stats_save_btn = QPushButton("Save Plots")
         self._adv_stats_save_btn.clicked.connect(self._on_save_adv_stats_plots)
         self._adv_stats_save_btn.setEnabled(False)
-        toolbar.addWidget(self._adv_stats_save_btn)
+        toolbar.addWidget(self._adv_stats_save_btn)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
         self._adv_stats_status_label = QLabel("")
         self._adv_stats_status_label.setStyleSheet("color:#888;")
@@ -2623,6 +2683,7 @@ class FreeTraceGUI(QMainWindow):
                 w.deleteLater()
 
         n_datasets = len(results_list)
+        show_legend = self._adv_stats_legend_cb.isChecked()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         ds_palette = sns.color_palette('tab10', n_colors=max(n_datasets, 1))
 
         dark_style = {
@@ -2757,16 +2818,15 @@ class FreeTraceGUI(QMainWindow):
                 bins_range = max(abs(np.percentile(np.concatenate([dx_data, dy_data]), [1, 99]))) * 1.2
                 bins = np.linspace(-bins_range, bins_range, 80)
 
-                ax2.hist(dx_data, bins=bins, alpha=0.5, color=color, label=f'{label} Δx',
+                ax2.hist(dx_data, bins=bins, alpha=0.5, color='#ff6666', label=f'{label} Δx',  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
                         density=True, edgecolor='none')
-                ax2.hist(dy_data, bins=bins, alpha=0.5, color=(*color[:3], 0.6) if len(color) >= 3 else color,
-                        label=f'{label} Δy', density=True, edgecolor='none',
-                        linestyle='--')
+                ax2.hist(dy_data, bins=bins, alpha=0.5, color='#66ff66',
+                        label=f'{label} Δy', density=True, edgecolor='none')  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
                 # Overlay Gaussian fits
                 stat_lines = [
-                    (f'Δx (n={len(dx_data)})', color, np.mean(dx_data), np.std(dx_data)),
-                    (f'Δy (n={len(dy_data)})', color, np.mean(dy_data), np.std(dy_data)),
+                    (f'Δx (n={len(dx_data)})', '#ff6666', np.mean(dx_data), np.std(dx_data)),  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                    (f'Δy (n={len(dy_data)})', '#66ff66', np.mean(dy_data), np.std(dy_data)),
                 ]
                 if st in gaussian_fits:
                     gf = gaussian_fits[st]
@@ -2841,6 +2901,15 @@ class FreeTraceGUI(QMainWindow):
 
             self._adv_stats_plot_layout.addWidget(section3)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
+        # Apply legend visibility from checkbox  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        if not show_legend:
+            for canvas in self._adv_stats_canvases:
+                for ax in canvas.figure.get_axes():
+                    leg = ax.get_legend()
+                    if leg:
+                        leg.set_visible(False)
+                canvas.draw_idle()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+
     def _on_save_adv_stats_plots(self):
         """Save all Advanced Stats plot canvases as PNG files."""
         if not self._adv_stats_canvases:
@@ -2849,15 +2918,15 @@ class FreeTraceGUI(QMainWindow):
         save_dir = QFileDialog.getExistingDirectory(self, "Select directory to save plots")
         if not save_dir:
             return
-        plot_names = ['ta_ea_sd']
-        # Remaining canvases are 1D displacement and ratio plots per state
-        idx = 1
-        for canvas in self._adv_stats_canvases[1:]:
-            if idx <= len(self._adv_stats_canvases) // 2:
-                plot_names.append(f'displacement_1d_{idx}')
+        plot_names = ['ta_ea_sd', 'ta_ea_sd_loglog']  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        # After the two TA-EA-SD canvases, remaining alternate: displacement, ratio per state
+        pair_idx = 0
+        for i in range(2, len(self._adv_stats_canvases)):
+            if (i - 2) % 2 == 0:
+                plot_names.append(f'displacement_1d_{pair_idx}')
             else:
-                plot_names.append(f'ratio_cauchy_{idx}')
-            idx += 1
+                plot_names.append(f'ratio_cauchy_{pair_idx}')
+                pair_idx += 1  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         saved = 0
         for i, canvas in enumerate(self._adv_stats_canvases):
             name = plot_names[i] if i < len(plot_names) else f'adv_plot_{i}'
@@ -2865,6 +2934,15 @@ class FreeTraceGUI(QMainWindow):
             canvas.figure.savefig(path, dpi=150, bbox_inches='tight', transparent=True)
             saved += 1
         self._adv_stats_status_label.setText(f"Saved {saved} plots to {save_dir}")
+
+    def _on_adv_stats_legend_toggled(self, state):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        show = bool(state)
+        for canvas in self._adv_stats_canvases:
+            for ax in canvas.figure.get_axes():
+                leg = ax.get_legend()
+                if leg:
+                    leg.set_visible(show)
+            canvas.draw_idle()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
     # ---- left panel (controls) ----------------------------------------
     def _build_left_panel(self):
