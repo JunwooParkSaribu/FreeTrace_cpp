@@ -1836,7 +1836,7 @@ class FreeTraceGUI(QMainWindow):
             "(computed from <code>_traces.csv</code>)</td></tr>"
             "<tr><td style='padding:4px 12px;'><b>Granularity</b></td>"
             "<td style='padding:4px 12px;'>Per-trajectory — each trajectory gets its own H</td>"
-            "<td style='padding:4px 12px;'>Per-population — one Ĥ per diffusion state</td></tr>"
+            "<td style='padding:4px 12px;'>Per-population — one Ĥ per homogeneous population</td></tr>"
             "<tr><td style='padding:4px 12px;'><b>Requires</b></td>"
             "<td style='padding:4px 12px;'><code>_diffusion.csv</code> (Basic Stats / Class tab)</td>"
             "<td style='padding:4px 12px;'><code>_traces.csv</code> only (Advanced Stats tab)</td></tr>"
