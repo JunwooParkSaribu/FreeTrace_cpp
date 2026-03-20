@@ -1489,8 +1489,10 @@ class FreeTraceGUI(QMainWindow):
 
         banner = QWidget()
         banner.setObjectName("updateBanner")
-        banner.setStyleSheet(
-            "#updateBanner { background-color: #1a5276; border-bottom: 1px solid #2980b9; }"
+        banner.setStyleSheet(  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+            "#updateBanner { background-color: #1e1e1e; border-bottom: 2px solid #555; }"
+            "#updateBanner QLabel { background-color: #1e1e1e; color: #ddd; font-size: 13px; }"
+            "#updateBanner QPushButton { background-color: #1e1e1e; }"
         )
         layout = QVBoxLayout(banner)
         layout.setContentsMargins(12, 8, 12, 8)
@@ -1498,17 +1500,16 @@ class FreeTraceGUI(QMainWindow):
         # Top row: message + dismiss button
         top_row = QHBoxLayout()
         title_label = QLabel(
-            f"<b>FreeTrace v{latest_ver} is available</b> (current: v{_VERSION})"
+            f"<b>FreeTrace v{latest_ver} is available</b>  (current: v{_VERSION})"
         )
-        title_label.setStyleSheet("color: #ecf0f1; font-size: 13px;")
         top_row.addWidget(title_label)
         top_row.addStretch()
 
         download_btn = QPushButton("Download")
         download_btn.setStyleSheet(
-            "QPushButton { background-color: #2980b9; color: white; border: none; "
+            "QPushButton { background-color: #2980b9 !important; color: white; border: none; "
             "padding: 4px 12px; border-radius: 3px; font-size: 12px; }"
-            "QPushButton:hover { background-color: #3498db; }"
+            "QPushButton:hover { background-color: #3498db !important; }"
         )
         download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         download_btn.clicked.connect(lambda: __import__('webbrowser').open(url))
@@ -1517,8 +1518,9 @@ class FreeTraceGUI(QMainWindow):
         dismiss_btn = QPushButton("✕")
         dismiss_btn.setFixedSize(24, 24)
         dismiss_btn.setStyleSheet(
-            "QPushButton { background: transparent; color: #bdc3c7; border: none; font-size: 14px; }"
-            "QPushButton:hover { color: white; }"
+            "QPushButton { background: transparent !important; color: #e74c3c; "
+            "border: none; font-size: 16px; font-weight: bold; }"
+            "QPushButton:hover { color: #ff6b6b; }"
         )
         dismiss_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         dismiss_btn.clicked.connect(lambda: self._dismiss_update_banner())
@@ -1529,7 +1531,7 @@ class FreeTraceGUI(QMainWindow):
         if body.strip():
             changelog_toggle = QPushButton("▶ What's new")
             changelog_toggle.setStyleSheet(
-                "QPushButton { background: transparent; color: #85c1e9; border: none; "
+                "QPushButton { background: transparent !important; color: #7ec8e3; border: none; "
                 "font-size: 12px; text-align: left; padding: 2px 0px; }"
                 "QPushButton:hover { color: #aed6f1; }"
             )
@@ -1540,7 +1542,7 @@ class FreeTraceGUI(QMainWindow):
             changelog_text.setMarkdown(body)
             changelog_text.setMaximumHeight(200)
             changelog_text.setStyleSheet(
-                "QTextEdit { background-color: #1c2e3f; color: #d5dbdb; border: 1px solid #2c3e50; "
+                "QTextEdit { background-color: #2a2a2a; color: #ddd; border: 1px solid #555; "
                 "border-radius: 3px; font-size: 11px; padding: 6px; }"
             )
             changelog_text.setVisible(False)
