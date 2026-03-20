@@ -1411,10 +1411,12 @@ class UpdateChecker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic 
             import urllib.request
             import json as _json
             url = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
+            print(f"[UpdateChecker] Fetching {url}")  # DEBUG
             req = urllib.request.Request(url, headers={"Accept": "application/vnd.github.v3+json"})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = _json.loads(resp.read().decode())
             tag = data.get("tag_name", "").lstrip("v")
+            print(f"[UpdateChecker] Latest: {tag}, Current: {_VERSION}")  # DEBUG
             if not tag:
                 return
             # Compare version tuples
@@ -1423,9 +1425,12 @@ class UpdateChecker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic 
             if _ver_tuple(tag) > _ver_tuple(_VERSION):
                 body = data.get("body", "")
                 html_url = data.get("html_url", f"https://github.com/{_GITHUB_REPO}/releases/latest")
+                print(f"[UpdateChecker] Update found! Emitting signal.")  # DEBUG
                 self.update_available.emit(tag, body, html_url)
-        except Exception:
-            pass  # silently ignore — network issues should not affect the GUI
+            else:
+                print(f"[UpdateChecker] Already up to date.")  # DEBUG
+        except Exception as e:
+            print(f"[UpdateChecker] Error: {e}")  # DEBUG
     # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
 
 
