@@ -42,6 +42,10 @@ from PyQt6.QtWidgets import (
 # Base window size — font sizes are defined relative to this
 _BASE_W, _BASE_H = 1920, 1080
 
+# Current version — used for update check against GitHub releases  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+_VERSION = "1.6.1.0"
+_GITHUB_REPO = "JunwooParkSaribu/FreeTrace_cpp"
+
 # Generate arrow icon PNGs for spin box buttons (CSS border-triangles don't work in Qt) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 import tempfile as _tempfile
 _arrow_dir = _tempfile.mkdtemp(prefix="freetrace_arrows_")
@@ -181,6 +185,7 @@ class FreeTraceWorker(QThread):
             atexit.register(_cleanup_process) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
             seen_warnings = set()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-17
+            self._error_lines = []  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
             for line in self._process.stdout:
                 line = line.rstrip("\n")
                 # Show each libtiff warning only once per run
@@ -190,6 +195,10 @@ class FreeTraceWorker(QThread):
                         self.log.emit(line)
                     continue
                 self.log.emit(line)
+                # Collect error/failure lines for the error dialog
+                line_lower = line.lower()
+                if any(kw in line_lower for kw in ("error", "failed", "cannot", "exception", "err:")):
+                    self._error_lines.append(line)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
 
                 # Parse progress from output # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
                 if "Localization" in line and "===" in line:
@@ -221,8 +230,12 @@ class FreeTraceWorker(QThread):
                 # Partial success in batch mode — not a critical error
                 self.progress.emit(100, "Done (with errors)")
                 self.finished.emit(True, f"BATCH_PARTIAL|{self.output_dir}|{self._batch_summary}")
-            else:
-                self.finished.emit(False, f"Process exited with code {rc}")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            else:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+                if self._error_lines:
+                    detail = "\n".join(self._error_lines[-5:])  # last 5 error lines
+                    self.finished.emit(False, f"{detail}")
+                else:
+                    self.finished.emit(False, f"Process exited with code {rc}")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
 
         except Exception as e:
             self.log.emit(str(e))
@@ -1387,12 +1400,42 @@ class HKGatingCanvas(QGraphicsView):  # Modified by Claude (claude-opus-4-6, Ant
 
 
 # ---------------------------------------------------------------------------
+# Update checker — queries GitHub API for latest release in background
+# ---------------------------------------------------------------------------
+class UpdateChecker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+    """Check GitHub for a newer FreeTrace release. Emits update_available if found."""
+    update_available = pyqtSignal(str, str, str)  # latest_version, release_body, release_url
+
+    def run(self):
+        try:
+            import urllib.request
+            import json as _json
+            url = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
+            req = urllib.request.Request(url, headers={"Accept": "application/vnd.github.v3+json"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = _json.loads(resp.read().decode())
+            tag = data.get("tag_name", "").lstrip("v")
+            if not tag:
+                return
+            # Compare version tuples
+            def _ver_tuple(s):
+                return tuple(int(x) for x in s.split("."))
+            if _ver_tuple(tag) > _ver_tuple(_VERSION):
+                body = data.get("body", "")
+                html_url = data.get("html_url", f"https://github.com/{_GITHUB_REPO}/releases/latest")
+                self.update_available.emit(tag, body, html_url)
+        except Exception:
+            pass  # silently ignore — network issues should not affect the GUI
+    # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 class FreeTraceGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FreeTrace v1.6.1.0") # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+        self.setWindowTitle(f"FreeTrace v{_VERSION}") # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
         # Set window icon  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 23:55
         _base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
         _icon_path = os.path.join(_base, "icon", "freetrace_icon.png")
@@ -1415,8 +1458,99 @@ class FreeTraceGUI(QMainWindow):
         self._resize_timer.timeout.connect(self._apply_fonts)
         self._last_applied_scale = None  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
         _generate_arrow_icons() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+        self._update_banner = None  # placeholder for update notification widget
         self._setup_ui()
         self._apply_fonts()
+        # Start background update check  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+        self._update_checker = UpdateChecker()
+        self._update_checker.update_available.connect(self._show_update_banner)
+        self._update_checker.start()
+
+    # ------------------------------------------------------------------
+    # Update notification banner
+    # ------------------------------------------------------------------
+    def _show_update_banner(self, latest_ver: str, body: str, url: str):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+        """Show a dismissible banner at the top of the window when an update is available."""
+        if self._update_banner is not None:
+            return  # already showing
+
+        banner = QWidget()
+        banner.setObjectName("updateBanner")
+        banner.setStyleSheet(
+            "#updateBanner { background-color: #1a5276; border-bottom: 1px solid #2980b9; }"
+        )
+        layout = QVBoxLayout(banner)
+        layout.setContentsMargins(12, 8, 12, 8)
+
+        # Top row: message + dismiss button
+        top_row = QHBoxLayout()
+        title_label = QLabel(
+            f"<b>FreeTrace v{latest_ver} is available</b> (current: v{_VERSION})"
+        )
+        title_label.setStyleSheet("color: #ecf0f1; font-size: 13px;")
+        top_row.addWidget(title_label)
+        top_row.addStretch()
+
+        download_btn = QPushButton("Download")
+        download_btn.setStyleSheet(
+            "QPushButton { background-color: #2980b9; color: white; border: none; "
+            "padding: 4px 12px; border-radius: 3px; font-size: 12px; }"
+            "QPushButton:hover { background-color: #3498db; }"
+        )
+        download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        download_btn.clicked.connect(lambda: __import__('webbrowser').open(url))
+        top_row.addWidget(download_btn)
+
+        dismiss_btn = QPushButton("✕")
+        dismiss_btn.setFixedSize(24, 24)
+        dismiss_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #bdc3c7; border: none; font-size: 14px; }"
+            "QPushButton:hover { color: white; }"
+        )
+        dismiss_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        dismiss_btn.clicked.connect(lambda: self._dismiss_update_banner())
+        top_row.addWidget(dismiss_btn)
+        layout.addLayout(top_row)
+
+        # Changelog section (collapsible)
+        if body.strip():
+            changelog_toggle = QPushButton("▶ What's new")
+            changelog_toggle.setStyleSheet(
+                "QPushButton { background: transparent; color: #85c1e9; border: none; "
+                "font-size: 12px; text-align: left; padding: 2px 0px; }"
+                "QPushButton:hover { color: #aed6f1; }"
+            )
+            changelog_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+
+            changelog_text = QTextEdit()
+            changelog_text.setReadOnly(True)
+            changelog_text.setMarkdown(body)
+            changelog_text.setMaximumHeight(200)
+            changelog_text.setStyleSheet(
+                "QTextEdit { background-color: #1c2e3f; color: #d5dbdb; border: 1px solid #2c3e50; "
+                "border-radius: 3px; font-size: 11px; padding: 6px; }"
+            )
+            changelog_text.setVisible(False)
+
+            def _toggle_changelog():
+                vis = not changelog_text.isVisible()
+                changelog_text.setVisible(vis)
+                changelog_toggle.setText("▼ What's new" if vis else "▶ What's new")
+
+            changelog_toggle.clicked.connect(_toggle_changelog)
+            layout.addWidget(changelog_toggle)
+            layout.addWidget(changelog_text)
+
+        self._update_banner = banner
+        # Insert at the very top of the central widget layout
+        central_layout = self.centralWidget().layout()
+        central_layout.insertWidget(0, banner)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+
+    def _dismiss_update_banner(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+        if self._update_banner is not None:
+            self._update_banner.setParent(None)
+            self._update_banner.deleteLater()
+            self._update_banner = None
 
     # ------------------------------------------------------------------
     # Scale helpers
