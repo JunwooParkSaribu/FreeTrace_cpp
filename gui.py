@@ -1697,8 +1697,8 @@ class FreeTraceGUI(QMainWindow):
             "<code>_diffusion.csv</code> is optional. If only traces are available, "
             "all trajectory-based plots (jump distance, duration, EA-SD, angles) work normally. "
             "H and K distributions require <code>_diffusion.csv</code>.</p>"
-            "<p><b>Advanced Stats tab</b> — Same as Basic Stats: <code>_traces.csv</code> required, "
-            "<code>_diffusion.csv</code> optional.</p>"
+            "<p><b>Advanced Stats tab</b> — Requires only <code>_traces.csv</code> "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+            "(<code>_diffusion.csv</code> is not used).</p>"
             "<h3 style='color:#66ccff;'>Key Concepts</h3>"
             "<p><b>Consecutive frames only (Δt = 1)</b> — Jump distance, mean jump distance, "
             "1D displacement, 1D displacement ratio, and angle distributions use only steps "
