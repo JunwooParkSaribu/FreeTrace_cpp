@@ -1712,7 +1712,8 @@ class FreeTraceGUI(QMainWindow):
             "<p>The Class tab provides an interactive H-K scatter plot for gating trajectories "
             "by their diffusion properties. Load one or more FreeTrace output datasets "
             "(<code>_diffusion.csv</code> + <code>_traces.csv</code>) and visualise the "
-            "Hurst exponent (H) vs. diffusion coefficient (K) for each trajectory.</p>"
+            "Hurst exponent (H) vs. diffusion coefficient (K) for each trajectory. "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+            "Note that 2H = α (the anomalous diffusion exponent).</p>"
             "<p><b>Gating</b> — Draw boundaries on the H-K scatter plot to select subsets of "
             "trajectories. Gated trajectories can be exported or further analysed.</p>"
             "<p><b>Load Boundary</b> — Import a previously saved gating boundary.</p>"
