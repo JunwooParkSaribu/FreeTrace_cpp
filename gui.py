@@ -1724,16 +1724,18 @@ class FreeTraceGUI(QMainWindow):
             "<p><b>Jump Distance</b> — Per-step Euclidean displacement √(Δx² + Δy²), Δt = 1 only. "
             "Assumes isotropic motion.</p>"
             "<p><b>Mean Jump Distance</b> — Average jump distance per trajectory (one value per trajectory).</p>"
-            "<p><b>Duration</b> — Total observation time Σ(frame diffs) × framerate.</p>"
-            "<p><b>EA-SD</b> — Ensemble-Averaged Squared Displacement: average SD over all "
-            "trajectories at each time point.</p>"
+            "<p><b>Duration</b> — Total observation time in frames: the sum of frame differences "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+            "across the trajectory (last frame − first frame).</p>"
+            "<p><b>EA-SD</b> — Ensemble-Averaged Squared Displacement: the average of "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+            "squared displacements over all trajectories at each time point. "
+            "Here, SD stands for Squared Displacement, not standard deviation.</p>"
             "<p><b>Angle / Polar Angle</b> — Deflection angle (0°–180°) and signed turning "
             "angle (0°–360°) between consecutive step pairs, both Δt = 1. "
             "Uniform if isotropic &amp; Brownian.</p>"
             "<h3 style='color:#66ccff;'>Advanced Stats Tab</h3>"  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
             "<p>The Advanced Stats tab provides computationally intensive analyses that "
-            "complement the Basic Stats tab. It requires only <code>_traces.csv</code> "
-            "(no diffusion data needed). Each plot is computed per diffusion state.</p>"
+            "complement the Basic Stats tab. It requires only <code>_traces.csv</code> "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+            "(no diffusion data needed).</p>"
             "<p><b>TA-EA-SD (Time-Averaged Ensemble-Averaged Squared Displacement)</b> — "
             "For each trajectory, the squared displacement at lag τ is averaged over all "
             "valid time windows of size τ (the <i>time-average</i>). These per-trajectory "
