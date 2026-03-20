@@ -43,7 +43,7 @@ from PyQt6.QtWidgets import (
 _BASE_W, _BASE_H = 1920, 1080
 
 # Current version — used for update check against GitHub releases  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
-_VERSION = "1.1.1.1"
+_VERSION = "1.6.1.1"
 _GITHUB_REPO = "JunwooParkSaribu/FreeTrace_cpp"
 
 # Generate arrow icon PNGs for spin box buttons (CSS border-triangles don't work in Qt) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
