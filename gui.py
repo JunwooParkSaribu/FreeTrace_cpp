@@ -1429,16 +1429,12 @@ class UpdateChecker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic 
             # Compare version tuples
             def _ver_tuple(s):
                 return tuple(int(x) for x in s.split("."))
-            print(f"[UpdateChecker] Latest: {tag}, Current: {_VERSION}")  # DEBUG
             if _ver_tuple(tag) > _ver_tuple(_VERSION):
                 body = data.get("body", "")
                 html_url = data.get("html_url", f"https://github.com/{_GITHUB_REPO}/releases/latest")
-                print(f"[UpdateChecker] Update available! Emitting signal.")  # DEBUG
                 self.update_available.emit(tag, body, html_url)
-            else:
-                print(f"[UpdateChecker] Up to date.")  # DEBUG
-        except Exception as e:
-            print(f"[UpdateChecker] Error: {e}")  # DEBUG
+        except Exception:
+            pass  # silently ignore — network issues should not affect the GUI
     # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
 
 
