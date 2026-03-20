@@ -24,11 +24,11 @@ from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import seaborn as sns  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QProcess, QPointF, QRectF
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QProcess, QPointF, QRectF, QUrl  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
 from PyQt6.QtGui import (
     QPixmap, QFont, QColor, QPalette, QIcon, QPainter, QPolygon,
-    QPen, QBrush, QPainterPath,
-)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-17
+    QPen, QBrush, QPainterPath, QDesktopServices,
+)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
 from PyQt6.QtCore import QPoint
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -43,7 +43,7 @@ from PyQt6.QtWidgets import (
 _BASE_W, _BASE_H = 1920, 1080
 
 # Current version — used for update check against GitHub releases  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
-_VERSION = "1.6.1.1"
+_VERSION = "1.1.1.1"
 _GITHUB_REPO = "JunwooParkSaribu/FreeTrace_cpp"
 
 # Generate arrow icon PNGs for spin box buttons (CSS border-triangles don't work in Qt) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
@@ -1400,6 +1400,15 @@ class HKGatingCanvas(QGraphicsView):  # Modified by Claude (claude-opus-4-6, Ant
 
 
 # ---------------------------------------------------------------------------
+def _open_url(url: str):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+    """Open a URL in the default browser, with WSL2 fallback."""
+    import subprocess, webbrowser
+    if 'microsoft' in os.uname().release.lower():
+        subprocess.Popen(['cmd.exe', '/c', 'start', url.replace('&', '^&')])
+    elif not QDesktopServices.openUrl(QUrl(url)):
+        webbrowser.open(url)
+
+
 # Update checker — queries GitHub API for latest release in background
 # ---------------------------------------------------------------------------
 class UpdateChecker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
@@ -1508,7 +1517,7 @@ class FreeTraceGUI(QMainWindow):
             "QPushButton:hover { background-color: #3498db !important; }"
         )
         download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        download_btn.clicked.connect(lambda: __import__('webbrowser').open(url))
+        download_btn.clicked.connect(lambda: _open_url(url))  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
         top_row.addWidget(download_btn)
 
         dismiss_btn = QPushButton("X")
