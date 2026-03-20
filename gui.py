@@ -1790,8 +1790,7 @@ class FreeTraceGUI(QMainWindow):
             "the underlying motion is not purely fractional Brownian (e.g., confined "
             "diffusion, active transport, or a mixture of diffusion states). "
             "Ratios are clipped to [−10, 10] and data with fewer than 10 valid ratios "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
-            "per diffusion state (from the <code>state</code> column in "
-            "<code>_traces.csv</code>) are excluded from fitting.</p>"
+            "per homogeneous population are excluded from fitting.</p>"
             "<h3 style='color:#66ccff;'>Log-log TA-EA-SD vs Cauchy Fit — When to Use Which?</h3>"  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
             "<p>Both the log-log TA-EA-SD plot and the Cauchy ratio fit estimate the "
             "anomalous diffusion exponent (and hence the Hurst exponent H), but they "
