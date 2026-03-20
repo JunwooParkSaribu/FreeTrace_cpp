@@ -1705,6 +1705,9 @@ class FreeTraceGUI(QMainWindow):
             "between consecutive frames. Steps spanning frame gaps (Δt &gt; 1) are excluded "
             "because they are not directly comparable: a molecule diffusing for 2 frames "
             "covers a different distance than one diffusing for 1 frame.</p>"
+            "<p><b>Frame gaps</b> — Trajectories are not split at frame gaps. "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+            "This preserves trajectory identity and avoids artificially inflating "
+            "trajectory counts. Duration and MSD span the full observation including gaps.</p>"
             "<h3 style='color:#66ccff;'>Class Tab</h3>"
             "<p>The Class tab provides an interactive H-K scatter plot for gating trajectories "
             "by their diffusion properties. Load one or more FreeTrace output datasets "
