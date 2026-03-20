@@ -1515,12 +1515,12 @@ class FreeTraceGUI(QMainWindow):
         download_btn.clicked.connect(lambda: __import__('webbrowser').open(url))
         top_row.addWidget(download_btn)
 
-        dismiss_btn = QPushButton("✕")
-        dismiss_btn.setFixedSize(24, 24)
+        dismiss_btn = QPushButton("X")
+        dismiss_btn.setFixedSize(28, 28)
         dismiss_btn.setStyleSheet(
             "QPushButton { background: transparent !important; color: #e74c3c; "
-            "border: none; font-size: 16px; font-weight: bold; }"
-            "QPushButton:hover { color: #ff6b6b; }"
+            "border: 1px solid #e74c3c; border-radius: 4px; font-size: 14px; font-weight: bold; }"
+            "QPushButton:hover { color: #ff6b6b; border-color: #ff6b6b; }"
         )
         dismiss_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         dismiss_btn.clicked.connect(lambda: self._dismiss_update_banner())
