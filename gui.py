@@ -1416,7 +1416,7 @@ class UpdateChecker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic 
             # Try with default SSL first, fall back to unverified if certificates are missing
             try:
                 resp = urllib.request.urlopen(req, timeout=5)
-            except ssl.SSLCertVerificationError:
+            except (ssl.SSLError, urllib.error.URLError):
                 ctx = ssl.create_default_context()
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
