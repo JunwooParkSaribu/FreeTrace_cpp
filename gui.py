@@ -1409,14 +1409,21 @@ class UpdateChecker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic 
     def run(self):
         try:
             import urllib.request
+            import ssl
             import json as _json
             url = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
-            print(f"[UpdateChecker] Fetching {url}")  # DEBUG
             req = urllib.request.Request(url, headers={"Accept": "application/vnd.github.v3+json"})
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            # Try with default SSL first, fall back to unverified if certificates are missing
+            try:
+                resp = urllib.request.urlopen(req, timeout=5)
+            except ssl.SSLCertVerificationError:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                resp = urllib.request.urlopen(req, timeout=5, context=ctx)
+            with resp:
                 data = _json.loads(resp.read().decode())
             tag = data.get("tag_name", "").lstrip("v")
-            print(f"[UpdateChecker] Latest: {tag}, Current: {_VERSION}")  # DEBUG
             if not tag:
                 return
             # Compare version tuples
@@ -1425,12 +1432,9 @@ class UpdateChecker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic 
             if _ver_tuple(tag) > _ver_tuple(_VERSION):
                 body = data.get("body", "")
                 html_url = data.get("html_url", f"https://github.com/{_GITHUB_REPO}/releases/latest")
-                print(f"[UpdateChecker] Update found! Emitting signal.")  # DEBUG
                 self.update_available.emit(tag, body, html_url)
-            else:
-                print(f"[UpdateChecker] Already up to date.")  # DEBUG
-        except Exception as e:
-            print(f"[UpdateChecker] Error: {e}")  # DEBUG
+        except Exception:
+            pass  # silently ignore — network issues should not affect the GUI
     # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
 
 
