@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox, QSpinBox, QFileDialog, QTextEdit, QSplitter,
     QTabWidget, QScrollArea, QProgressBar, QMessageBox, QRadioButton,
     QButtonGroup, QGraphicsView, QGraphicsScene, QGraphicsEllipseItem,
-    QGraphicsPathItem, QSlider,
+    QGraphicsPathItem, QComboBox, QSlider, QSizePolicy,
 )
 
 # Base window size — font sizes are defined relative to this
@@ -1448,6 +1448,174 @@ class UpdateChecker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic 
 
 
 # ---------------------------------------------------------------------------
+# LaTeX-to-Unicode converter for chat display
+# ---------------------------------------------------------------------------
+def _latex_to_unicode(text: str) -> str:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-21
+    """Convert common LaTeX math expressions to Unicode characters."""
+    import re
+
+    _GREEK = {
+        r'\alpha': 'α', r'\beta': 'β', r'\gamma': 'γ', r'\delta': 'δ',
+        r'\epsilon': 'ε', r'\varepsilon': 'ε', r'\zeta': 'ζ', r'\eta': 'η',
+        r'\theta': 'θ', r'\vartheta': 'ϑ', r'\iota': 'ι', r'\kappa': 'κ',
+        r'\lambda': 'λ', r'\mu': 'μ', r'\nu': 'ν', r'\xi': 'ξ',
+        r'\pi': 'π', r'\rho': 'ρ', r'\sigma': 'σ', r'\tau': 'τ',
+        r'\upsilon': 'υ', r'\phi': 'φ', r'\varphi': 'φ', r'\chi': 'χ',
+        r'\psi': 'ψ', r'\omega': 'ω',
+        r'\Gamma': 'Γ', r'\Delta': 'Δ', r'\Theta': 'Θ', r'\Lambda': 'Λ',
+        r'\Xi': 'Ξ', r'\Pi': 'Π', r'\Sigma': 'Σ', r'\Phi': 'Φ',
+        r'\Psi': 'Ψ', r'\Omega': 'Ω',
+    }
+
+    _SUP = str.maketrans('0123456789+-=()nixy', '⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱˣʸ')
+    _SUB = str.maketrans('0123456789+-=()aeioruvx', '₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑᵢₒᵣᵤᵥₓ')
+
+    _SYMBOLS = {
+        r'\infty': '∞', r'\pm': '±', r'\mp': '∓', r'\times': '×',
+        r'\cdot': '·', r'\div': '÷', r'\neq': '≠', r'\approx': '≈',
+        r'\leq': '≤', r'\geq': '≥', r'\ll': '≪', r'\gg': '≫',
+        r'\propto': '∝', r'\sim': '∼', r'\simeq': '≃',
+        r'\partial': '∂', r'\nabla': '∇', r'\sqrt': '√',
+        r'\sum': 'Σ', r'\prod': '∏', r'\int': '∫',
+        r'\rightarrow': '→', r'\leftarrow': '←', r'\leftrightarrow': '↔',
+        r'\Rightarrow': '⇒', r'\Leftarrow': '⇐',
+        r'\in': '∈', r'\notin': '∉', r'\subset': '⊂', r'\supset': '⊃',
+        r'\forall': '∀', r'\exists': '∃',
+        r'\langle': '⟨', r'\rangle': '⟩',
+        r'\hat': '', r'\bar': '', r'\vec': '', r'\dot': '',
+        r'\mathrm': '', r'\text': '', r'\mathbf': '', r'\textbf': '',
+        r'\left': '', r'\right': '',
+    }
+
+    def _convert_expr(expr: str) -> str:
+        s = expr.strip()
+        for latex, uni in sorted(_GREEK.items(), key=lambda x: -len(x[0])):
+            s = s.replace(latex, uni)
+        for latex, uni in sorted(_SYMBOLS.items(), key=lambda x: -len(x[0])):
+            s = s.replace(latex, uni)
+        s = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'\1/\2', s)
+        def _sup_repl(m):
+            base = m.group(1) if m.group(1) else ''
+            return base + m.group(2).translate(_SUP)
+        s = re.sub(r'(\w?)\^\{([^}]*)\}', _sup_repl, s)
+        s = re.sub(r'(\w?)\^(\w)', lambda m: m.group(1) + m.group(2).translate(_SUP), s)
+        def _sub_repl(m):
+            base = m.group(1) if m.group(1) else ''
+            return base + m.group(2).translate(_SUB)
+        s = re.sub(r'(\w?)_\{([^}]*)\}', _sub_repl, s)
+        s = re.sub(r'(\w?)_(\w)', lambda m: m.group(1) + m.group(2).translate(_SUB), s)
+        s = s.replace('{', '').replace('}', '')
+        return s
+
+    text = re.sub(r'\$\$(.+?)\$\$', lambda m: _convert_expr(m.group(1)), text, flags=re.DOTALL)
+    text = re.sub(r'\$(.+?)\$', lambda m: _convert_expr(m.group(1)), text)
+    return text
+# Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-21
+
+
+# ---------------------------------------------------------------------------
+# Gemini AI chat worker — sends queries to Gemini API in background
+# ---------------------------------------------------------------------------
+class GeminiChatWorker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20 17:00
+    reply_chunk = pyqtSignal(str)   # partial text (streamed)
+    reply_done = pyqtSignal()       # generation finished
+    error = pyqtSignal(str)         # error message
+
+    _SYSTEM_PROMPT = (
+        "You are the FreeTrace AI Assistant, embedded in the FreeTrace GUI — "
+        "a single-molecule tracking software that uses fractional Brownian motion (fBm) inference. "
+        "FreeTrace performs: (1) particle localization via Gaussian fitting, "
+        "(2) trajectory linking via graph-based optimization, "
+        "(3) anomalous diffusion classification via a neural network that estimates the Hurst exponent H.\n\n"
+        "Key parameters users can set in the GUI:\n"
+        "- Window size: size of the sub-image for localization (default 7)\n"
+        "- Threshold: intensity threshold for spot detection (default 50)\n"
+        "- Min trajectory length: minimum number of points to keep a trajectory (default 7)\n"
+        "- Graph depth: search depth for trajectory linking (default 3)\n"
+        "- Jump threshold: maximum allowed jump distance between frames (default 2.8)\n"
+        "- FBM mode: enable/disable fBm classification\n"
+        "- GPU: enable/disable GPU acceleration for the neural network\n"
+        "- Save video: export a video of the tracking result\n\n"
+        "Answer questions about FreeTrace clearly and concisely. "
+        "You can also answer general science questions — microscopy, biophysics, "
+        "diffusion, image processing, statistics, and related topics. "
+        "Keep answers very short and concise — 2-4 sentences maximum. "
+        "Avoid bullet points and lists unless explicitly asked. "
+        "Do not repeat the question. Go straight to the answer. "
+        "Note: AI responses may not always be accurate — users should verify important results independently."
+    )
+
+    def __init__(self, api_key: str, message: str, history: list):
+        super().__init__()
+        self.api_key = api_key
+        self.message = message
+        self.history = history  # list of {"role": ..., "parts": ...}
+
+    def run(self):
+        try:
+            from google import genai
+            client = genai.Client(api_key=self.api_key)
+
+            contents = list(self.history)
+            contents.append({"role": "user", "parts": [{"text": self.message}]})
+
+            response = client.models.generate_content_stream(
+                model="gemini-2.5-flash-lite",
+                contents=contents,
+                config=genai.types.GenerateContentConfig(
+                    system_instruction=self._SYSTEM_PROMPT,
+                    max_output_tokens=512,
+                ),
+            )
+            for chunk in response:
+                if chunk.text:
+                    self.reply_chunk.emit(chunk.text)
+            self.reply_done.emit()
+        except ImportError:
+            self.error.emit(
+                "google-genai package is not installed. "
+                "Install it with: pip install google-genai"
+            )
+        except Exception as e:
+            self.error.emit(self._classify_error(str(e)))
+
+    @staticmethod
+    def _classify_error(msg: str) -> str:
+        msg_lower = msg.lower()
+        if "api_key_invalid" in msg_lower or "api key not valid" in msg_lower:
+            return (
+                "Invalid API key. Please check your Gemini API key and try again.\n"
+                "You can get a free key at: https://aistudio.google.com/apikey"
+            )
+        if "permission_denied" in msg_lower or "403" in msg:
+            return (
+                "Access denied by Google. This may indicate a change in Google's "
+                "Gemini API policy. The free tier for Gemini in FreeTrace may no "
+                "longer be available. Please check: https://ai.google.dev/gemini-api/docs/pricing"
+            )
+        if "resource_exhausted" in msg_lower or "429" in msg or "quota" in msg_lower:
+            if "per minute" in msg_lower or "rpm" in msg_lower:
+                return (
+                    "Too many requests per minute (limit: 15 RPM). "
+                    "Please wait a moment and try again."
+                )
+            return (
+                "Rate limit reached. The free tier allows 15 requests/minute "
+                "and 1,000 requests/day. Please try again later."
+            )
+        if "not_found" in msg_lower or ("404" in msg and "model" in msg_lower):
+            return (
+                "The Gemini model used by FreeTrace is no longer available. "
+                "This may be due to a change in Google's API. "
+                "Please check for a FreeTrace update."
+            )
+        if any(k in msg_lower for k in ("timeout", "connection", "network", "dns", "resolve")):
+            return "Network error. Please check your internet connection and try again."
+        return f"Unexpected error: {msg}"
+    # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20 17:00
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 class FreeTraceGUI(QMainWindow):
@@ -1477,6 +1645,8 @@ class FreeTraceGUI(QMainWindow):
         self._last_applied_scale = None  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
         _generate_arrow_icons() # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
         self._update_banner = None  # placeholder for update notification widget
+        self._chat_worker = None  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20 17:00
+        self._chat_history = []   # Gemini conversation history
         self._setup_ui()
         self._apply_fonts()
         # Start background update check  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
@@ -1606,7 +1776,7 @@ class FreeTraceGUI(QMainWindow):
             if self._analysis_tabs.tabText(self._analysis_tabs.currentIndex()) == "Help":
                 QTimer.singleShot(0, self._rescale_help_image)
 
-    def _build_freetrace_tab(self):
+    def _build_freetrace_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20 17:00
         tab = QWidget()
         tab_layout = QHBoxLayout(tab)
         tab_layout.setContentsMargins(10, 10, 10, 10)
@@ -1617,8 +1787,643 @@ class FreeTraceGUI(QMainWindow):
 
         splitter.addWidget(self._build_left_panel())
         splitter.addWidget(self._build_right_panel())
-        splitter.setSizes([380, 670])
+        splitter.addWidget(self._build_chat_tab())
+        splitter.setSizes([330, 550, 350])
         return tab
+
+    # ---- AI Chat tab ---------------------------------------------------
+    # Predefined Q&A database (offline, no API needed)
+    _PREDEFINED_QA = [  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-21
+        {
+            "keywords": ["window size", "window_size", "sub-image", "subimage",
+                         "crop size", "roi size", "patch size", "box size", "spot size",
+                         "psf", "point spread function"],
+            "question": "What is the window size parameter?",
+            "answer": (
+                "Window size defines the side length (in pixels) of the square sub-image "
+                "extracted around each detected spot for Gaussian fitting during localization. "
+                "Default is 7. Increase it for larger PSFs (point spread functions); too small "
+                "a window size increases the estimation bias. Decrease it for dense samples "
+                "to avoid overlapping spots."
+            ),
+        },
+        {
+            "keywords": ["threshold", "intensity", "detection", "sensitivity",
+                         "brightness", "signal", "noise", "snr", "dim", "bright"],
+            "question": "What does the threshold parameter do?",
+            "answer": (
+                "Threshold is a multiplier applied to the frame-specific detection threshold "
+                "computed from the background statistics (mean and standard deviation). "
+                "Default is 1.0. Lower values (e.g. 0.5) increase detection sensitivity "
+                "and detect dimmer particles but may increase false positives; higher values "
+                "(e.g. 2.0) suppress weak detections and keep only bright spots."
+            ),
+        },
+        {
+            "keywords": ["min trajectory", "minimum trajectory", "min_traj", "trajectory length",
+                         "short trajectory", "minimum length", "min length", "too short",
+                         "minimum points", "few points", "cutoff"],
+            "question": "What is the minimum trajectory length?",
+            "answer": (
+                "Minimum trajectory length (cutoff) sets the minimum number of frames "
+                "a particle must be tracked to be kept as a valid trajectory. Default is 3. "
+                "Increase this for cleaner results; decrease it if particles are short-lived."
+            ),
+        },
+        {
+            "keywords": ["graph depth", "search depth", "linking depth", "frame gap",
+                         "blinking", "disappear", "reappear", "gap closing",
+                         "missing frames", "skip frames"],
+            "question": "What does graph depth control?",
+            "answer": (
+                "Graph depth controls how many frames ahead the tracking algorithm "
+                "searches when linking particle positions into trajectories. Default is 3 "
+                "(maximum 5). Higher values can recover trajectories through brief "
+                "disappearances (blinking) but the computation cost grows factorially "
+                "with graph depth in the worst case."
+            ),
+        },
+        {
+            "keywords": ["jump threshold", "jump_threshold", "maximum jump", "max jump",
+                         "displacement", "max displacement", "how far", "move between frames",
+                         "step size", "max distance", "maximum distance", "speed limit"],
+            "question": "What is the jump threshold?",
+            "answer": (
+                "Jump threshold sets the maximum allowed displacement (in pixels) "
+                "between consecutive frames for a particle to be linked into a trajectory. "
+                "Default is 0 (auto), which lets FreeTrace infer the value automatically "
+                "using a Gaussian Mixture Model (minimum 5 pixels). Set a fixed value for "
+                "fast-moving particles; lower it to avoid linking distinct particles that "
+                "happen to be close."
+            ),
+        },
+        {
+            "keywords": ["fbm", "fractional brownian", "hurst", "anomalous diffusion",
+                         "classification", "diffusion type", "subdiffusion", "superdiffusion",
+                         "confined", "directed", "normal diffusion", "exponent",
+                         "motion type", "diffusion mode"],
+            "question": "What is FBM mode?",
+            "answer": (
+                "FBM (fractional Brownian motion) mode enables trajectory reconstruction "
+                "that accounts for anomalous diffusion. When active, a neural network "
+                "estimates the Hurst exponent H for each trajectory: H = 0.5 means normal "
+                "diffusion, H < 0.5 indicates subdiffusion (anti-persistent motion), and "
+                "H > 0.5 indicates superdiffusion (persistent motion). Without FBM mode, "
+                "trajectories are reconstructed assuming classical Brownian motion."
+            ),
+        },
+        {
+            "keywords": ["onnx", "neural network", "model", "inference",
+                         "speed up", "faster", "slow", "performance"],
+            "question": "How does neural network inference work?",
+            "answer": (
+                "FreeTrace C++ uses ONNX Runtime for neural network inference when FBM "
+                "mode is enabled. The pre-converted ONNX models estimate the Hurst exponent "
+                "H and generalised diffusion coefficient K for each trajectory. No TensorFlow "
+                "or GPU is required — inference runs on CPU via ONNX Runtime."
+            ),
+        },
+        {
+            "keywords": ["localization", "gaussian", "spot detection", "fitting",
+                         "find particles", "detect spots", "detect particles",
+                         "position", "sub-pixel", "precision"],
+            "question": "How does localization work?",
+            "answer": (
+                "FreeTrace detects bright spots in each frame using intensity thresholding, "
+                "then fits a 2D Gaussian function to each spot to determine its sub-pixel "
+                "position."
+            ),
+        },
+        {
+            "keywords": ["tracking", "linking", "trajectory", "graph",
+                         "connect", "assignment", "matching", "link particles",
+                         "connect spots", "build trajectories"],
+            "question": "How does trajectory linking work?",
+            "answer": (
+                "FreeTrace uses a graph-based algorithm to link localized positions across "
+                "frames into trajectories. It builds a directed graph where edges connect "
+                "candidate particle positions within the jump threshold, then enumerates "
+                "paths and selects the lowest-cost trajectory using a Cauchy-distribution-based "
+                "cost function. This handles appearing/disappearing particles and temporary gaps."
+            ),
+        },
+        {
+            "keywords": ["input", "file format", "tiff", "tif", "video format",
+                         "nd2", "nikon", "open file", "load", "supported format",
+                         "image stack", "what files"],
+            "question": "What input formats are supported?",
+            "answer": (
+                "FreeTrace accepts TIFF image stacks (.tiff, .tif) and Nikon ND2 files (.nd2). "
+                "Each frame in the stack is processed sequentially for localization and tracking."
+            ),
+        },
+        {
+            "keywords": ["output", "results", "csv", "export", "save results",
+                         "output files", "what output", "data format",
+                         "download results", "where are results"],
+            "question": "What are the output files?",
+            "answer": (
+                "FreeTrace outputs CSV files containing trajectory data: particle positions "
+                "(x, y) per frame, trajectory IDs, and — if FBM mode is enabled — the "
+                "estimated Hurst exponent H and generalised diffusion coefficient K for "
+                "each trajectory."
+            ),
+        },
+        {  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-21
+            "keywords": ["pixel size", "pixel_size", "frame rate", "framerate",
+                         "micron", "micrometer", "physical units", "conversion",
+                         "camera", "um/pixel", "seconds per frame"],
+            "question": "What are the pixel size and frame rate settings?",
+            "answer": (
+                "Pixel size (μm/pixel) and frame rate (s/frame) are set in the Basic and "
+                "Advanced Stats tabs to convert raw pixel and frame data into physical units "
+                "(μm and seconds). Default is 1.0 for both. FreeTrace performs all localization "
+                "and tracking in pixel coordinates — unit conversion is applied only during "
+                "statistical analysis. These values are camera-dependent: verify your pixel "
+                "size and frame rate before analysing data."
+            ),
+        },
+        {
+            "keywords": ["jump auto", "auto infer", "jump 0", "automatic jump",
+                         "gmm", "gaussian mixture", "infer jump", "default jump",
+                         "jump threshold 0"],
+            "question": "What happens when jump threshold is set to 0?",
+            "answer": (
+                "When jump threshold is 0 (the default), FreeTrace automatically infers "
+                "the maximum jump distance using a Gaussian Mixture Model (GMM) fitted to "
+                "the inter-frame displacement distribution. The minimum auto-inferred value "
+                "is clamped to 5 pixels, to avoid overfitting on the high number of "
+                "membrane-bound or DNA-bound jump distances that tend to dominate the "
+                "short-displacement peak. Set a fixed value (in pixels) only if you want "
+                "to override the automatic estimate."
+            ),
+        },
+        {
+            "keywords": ["preview", "test", "quick check", "try settings",
+                         "before running", "check parameters", "sample frames"],
+            "question": "What does the Preview button do?",
+            "answer": (
+                "Preview runs localization on 50 frames from the middle of your video "
+                "using CPU only. It shows detected spots overlaid on the frames so you "
+                "can verify that your window size and threshold settings are appropriate "
+                "before running the full analysis."
+            ),
+        },
+        {
+            "keywords": ["gating", "scatter plot", "class tab", "classify",
+                         "h-k scatter", "hk scatter", "select trajectories",
+                         "boundary", "region", "export classification",
+                         "diffusion state", "population"],
+            "question": "What is the H-K scatter plot and gating?",
+            "answer": (
+                "The Class tab displays a scatter plot of Hurst exponent (H) vs. diffusion "
+                "coefficient (K) for every trajectory. You can draw freehand boundaries on "
+                "this plot to classify trajectories into different diffusion states (e.g., "
+                "confined, Brownian, directed). The Export Classification button saves, for "
+                "each gated region and each video, a _diffusion.csv (H and K per trajectory) "
+                "and a _traces.csv (full trajectory coordinates), plus a "
+                "classification_boundaries.json file to reload the gating later. Requires "
+                "both _traces.csv and _diffusion.csv."
+            ),
+        },
+        {
+            "keywords": ["diffusion coefficient", "K value", "generalised diffusion",
+                         "generalized diffusion", "magnitude", "how fast",
+                         "diffusion constant", "diffusivity"],
+            "question": "What is the diffusion coefficient K?",
+            "answer": (
+                "K is the generalised diffusion coefficient estimated by a neural network "
+                "for each trajectory. It quantifies the magnitude of motion — larger K means "
+                "faster diffusion. K is reported in pixel²/frame^(2H) for fractional Brownian "
+                "motion. For classical Brownian motion (H = 0.5), K reduces to D, the standard "
+                "diffusion coefficient, in pixel²/frame. The estimated K is not converted to "
+                "μm²/s during the analysis. K estimation is only available when FBM mode "
+                "is enabled."
+            ),
+        },
+        {
+            "keywords": ["hurst exponent", "hurst", "H value", "H exponent",
+                         "anomalous exponent", "alpha", "diffusion type",
+                         "subdiffusion", "superdiffusion", "brownian",
+                         "confined", "directed", "anti-persistent", "persistent"],
+            "question": "What is the Hurst exponent H?",
+            "answer": (
+                "The Hurst exponent H characterises the type of diffusion for each trajectory. "
+                "H = 0.5 indicates normal (Brownian) diffusion, H < 0.5 indicates subdiffusion "
+                "(confined or anti-persistent motion), and H > 0.5 indicates superdiffusion "
+                "(persistent motion). When FBM mode is enabled, the estimated H "
+                "for each trajectory is written to _diffusion.csv. Alternatively, you can "
+                "estimate the ensemble H for a homogeneous population using the Cauchy "
+                "fitting method in the Advanced Stats tab."
+            ),
+        },
+        {
+            "keywords": ["angle", "polar angle", "deflection", "turning angle",
+                         "direction", "isotropy", "anisotropy", "orientation"],
+            "question": "What are the angle and polar angle plots?",
+            "answer": (
+                "The angle plot shows the deflection angle (0°–180°) between consecutive "
+                "step pairs (both steps must be Δt = 1). The polar angle plot shows the "
+                "turning angle (0°–360°). For isotropic Brownian motion, both distributions "
+                "should be uniform. Deviations reveal directed motion or confinement."
+            ),
+        },
+        {
+            "keywords": ["ea-sd", "easd", "ensemble average", "squared displacement",
+                         "spreading", "msd basic", "displacement from origin"],
+            "question": "What is the EA-SD plot?",
+            "answer": (
+                "EA-SD (Ensemble-Averaged Squared Displacement) computes, at each time "
+                "point, the squared displacement from the trajectory origin, averaged over "
+                "all trajectories. It characterises how particles spread over time. A linear "
+                "EA-SD indicates Brownian diffusion; sub-linear indicates confinement; "
+                "super-linear indicates directed motion. Note: SD here stands for Squared "
+                "Displacement, not standard deviation."
+            ),
+        },
+        {
+            "keywords": ["ta-ea-sd", "taeasd", "tamsd", "msd", "time average",
+                         "mean squared displacement", "advanced msd",
+                         "time-averaged", "log-log"],
+            "question": "What is TA-EA-SD?",
+            "answer": (
+                "TA-EA-SD (Time-Averaged Ensemble-Averaged Squared Displacement) is also "
+                "known as the MSD (Mean Squared Displacement), where 'mean' refers to the "
+                "average over both time and trajectories. For each trajectory, the squared "
+                "displacement at lag τ is averaged over all valid time windows of that size "
+                "(time-average), then averaged across all trajectories (ensemble-average). "
+                "Unlike EA-SD, it exploits all overlapping windows rather than only the "
+                "displacement from the origin. Only windows where the actual frame gap "
+                "equals τ are included — gaps are never interpolated."
+            ),
+        },
+        {
+            "keywords": ["common normalisation", "common normalization", "normalize",
+                         "normalise", "compare datasets", "shared bins",
+                         "bin edges", "population ratio"],
+            "question": "What does common normalisation do?",
+            "answer": (
+                "When enabled, all loaded datasets share the same histogram bin edges and "
+                "the y-axis is normalised to the dataset with the most data points. This "
+                "preserves the relative population sizes between datasets, making it "
+                "meaningful to compare distributions side by side. When disabled, each "
+                "dataset uses its own independent binning."
+            ),
+        },
+    ]  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-21
+
+    def _build_chat_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20 18:00
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # Mode selector row
+        mode_row = QHBoxLayout()
+        mode_label = QLabel("Mode:")
+        mode_label.setStyleSheet("color:#ccc; font-size:12px;")
+        mode_row.addWidget(mode_label)
+
+        self._chat_mode = QComboBox()
+        self._chat_mode.addItems(["FreeTrace Q&A (offline)", "Gemini AI (online)"])
+        self._chat_mode.setStyleSheet(
+            "background:#2a2a2a; color:#ccc; border:1px solid #555; "
+            "border-radius:4px; padding:4px 8px; font-size:12px;"
+        )
+        self._chat_mode.currentIndexChanged.connect(self._on_chat_mode_changed)
+        mode_row.addWidget(self._chat_mode, 1)
+        layout.addLayout(mode_row)
+
+        # API key row (Gemini mode only)
+        self._gemini_key_widget = QWidget()
+        key_layout = QVBoxLayout(self._gemini_key_widget)
+        key_layout.setContentsMargins(0, 0, 0, 0)
+        key_layout.setSpacing(2)
+
+        key_row = QHBoxLayout()
+        key_label = QLabel("Gemini API Key:")
+        key_label.setStyleSheet("color:#ccc; font-size:12px;")
+        key_row.addWidget(key_label)
+
+        self._gemini_key_input = QLineEdit()
+        self._gemini_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self._gemini_key_input.setPlaceholderText("Paste your Gemini API key here")
+        self._gemini_key_input.setStyleSheet(
+            "background:#2a2a2a; color:#ccc; border:1px solid #555; "
+            "border-radius:4px; padding:4px 8px; font-size:12px;"
+        )
+        key_row.addWidget(self._gemini_key_input, 1)
+
+        get_key_btn = QPushButton("Get free key")
+        get_key_btn.setStyleSheet(
+            "background:#2e7d32; color:#fff; border:none; border-radius:4px; "
+            "padding:4px 12px; font-size:12px;"
+        )
+        get_key_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        get_key_btn.setToolTip(
+            "Free — no payment required. Usage beyond the daily limit is automatically stopped, never charged."
+        )
+        get_key_btn.clicked.connect(
+            lambda: _open_url("https://aistudio.google.com/apikey")
+        )
+        key_row.addWidget(get_key_btn)
+
+        del_key_btn = QPushButton("Delete key")
+        del_key_btn.setStyleSheet(
+            "background:#8b0000; color:#fff; border:none; border-radius:4px; "
+            "padding:4px 12px; font-size:12px;"
+        )
+        del_key_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        del_key_btn.setToolTip(
+            "Opens Google AI Studio. To delete your key, click the three-dot menu next to it and select Delete."
+        )
+        del_key_btn.clicked.connect(
+            lambda: _open_url("https://aistudio.google.com/apikey")
+        )
+        key_row.addWidget(del_key_btn)
+        key_layout.addLayout(key_row)
+
+        privacy_label = QLabel(
+            "Free tier: your prompts may be used by Google to improve their products."
+        )
+        privacy_label.setStyleSheet("color:#888; font-size:10px; font-style:italic;")
+        key_layout.addWidget(privacy_label)
+
+        self._gemini_key_widget.hide()  # hidden by default (Q&A mode)
+        layout.addWidget(self._gemini_key_widget)
+
+        # Chat display area
+        self._chat_display = QTextEdit()
+        self._chat_display.setReadOnly(True)
+        self._chat_display.setStyleSheet(
+            "background:#1a1a1a; color:#ccc; border:1px solid #333; "
+            "border-radius:4px; padding:8px; font-size:13px; "
+            "font-family:'Courier New', monospace;"
+        )
+        self._chat_display.setHtml(self._qa_welcome_html())
+        layout.addWidget(self._chat_display, 1)
+
+        # Input row
+        input_row = QHBoxLayout()
+        self._chat_input = QLineEdit()
+        self._chat_input.setPlaceholderText("Type your question...")
+        self._chat_input.setStyleSheet(
+            "background:#2a2a2a; color:#ccc; border:1px solid #555; "
+            "border-radius:4px; padding:6px 10px; font-size:13px;"
+        )
+        self._chat_input.returnPressed.connect(self._send_chat)
+        input_row.addWidget(self._chat_input, 1)
+
+        self._chat_send_btn = QPushButton("Send")
+        self._chat_send_btn.setStyleSheet(
+            "background:#3a3a3a; color:#ddd; border:1px solid #555; "
+            "border-radius:4px; padding:6px 16px; font-size:13px;"
+        )
+        self._chat_send_btn.clicked.connect(self._send_chat)
+        input_row.addWidget(self._chat_send_btn)
+
+        self._chat_clear_btn = QPushButton("Clear")
+        self._chat_clear_btn.setStyleSheet(
+            "background:#3a3a3a; color:#ddd; border:1px solid #555; "
+            "border-radius:4px; padding:6px 12px; font-size:13px;"
+        )
+        self._chat_clear_btn.clicked.connect(self._clear_chat)
+        input_row.addWidget(self._chat_clear_btn)
+
+        chat_help_btn = QPushButton("?")
+        chat_help_btn.setFixedWidth(32)
+        chat_help_btn.setStyleSheet(
+            "background:#3a3a3a; color:#7ec8e3; border:1px solid #555; "
+            "border-radius:4px; padding:6px; font-size:14px; font-weight:bold;"
+        )
+        chat_help_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        chat_help_btn.clicked.connect(self._show_chat_help)
+        input_row.addWidget(chat_help_btn)
+
+        layout.addLayout(input_row)
+        return widget
+
+    def _qa_welcome_html(self):
+        """Generate welcome message listing available Q&A topics."""
+        lines = [
+            "<p style='color:#7ec8e3; font-size:13px;'><b>FreeTrace Q&A</b></p>",
+            "<p style='color:#999; font-size:12px;'>Type a question or keyword. "
+            "Available topics:</p>",
+            "<ul style='color:#aaa; font-size:12px;'>",
+        ]
+        for qa in self._PREDEFINED_QA:
+            lines.append(f"<li>{qa['question']}</li>")
+        lines.append("</ul>")
+        lines.append(
+            "<p style='color:#888; font-size:11px; font-style:italic;'>"
+            "Switch to Gemini AI mode for open-ended questions.</p>"
+        )
+        return "".join(lines)
+
+    def _on_chat_mode_changed(self, index):
+        """Toggle between Q&A and Gemini mode."""
+        if index == 0:  # Q&A mode
+            self._gemini_key_widget.hide()
+            self._chat_display.setHtml(self._qa_welcome_html())
+        else:  # Gemini mode
+            self._gemini_key_widget.show()
+            self._chat_display.setHtml(
+                "<p style='color:#666; text-align:center; margin-top:40px;'>"
+                "Ask questions about FreeTrace, microscopy, biophysics, "
+                "or general science.</p>"
+            )
+        self._chat_history.clear()
+
+    def _search_qa(self, query: str):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-21
+        """Search predefined Q&A by keyword + fuzzy matching. Returns (question, answer) or None."""
+        from difflib import SequenceMatcher
+        query_lower = query.lower()
+        query_words = [w for w in query_lower.split() if len(w) > 2]
+        best_match = None
+        best_score = 0.0
+        for qa in self._PREDEFINED_QA:
+            score = 0.0
+            # Exact keyword match (strongest signal)
+            for kw in qa["keywords"]:
+                if kw in query_lower:
+                    score += 2.0
+            # Fuzzy keyword match (handles typos)
+            for word in query_words:
+                for kw in qa["keywords"]:
+                    for kw_part in kw.split():
+                        ratio = SequenceMatcher(None, word, kw_part).ratio()
+                        if ratio >= 0.75:
+                            score += ratio
+            # Word overlap with question text
+            q_words = qa["question"].lower().split()
+            for word in query_words:
+                if word in q_words:
+                    score += 0.5
+                else:
+                    for qw in q_words:
+                        if SequenceMatcher(None, word, qw).ratio() >= 0.8:
+                            score += 0.3
+                            break
+            if score > best_score:
+                best_score = score
+                best_match = qa
+        if best_score >= 0.75:
+            return best_match["question"], best_match["answer"]
+        return None
+
+    def _show_chat_help(self):
+        """Show information about the AI Chat feature and billing."""
+        if self._chat_mode.currentIndex() == 0:
+            QMessageBox.information(self, "FreeTrace Q&A — Info", (
+                "<b>FreeTrace Q&A (offline)</b><br><br>"
+                "This mode answers common questions about FreeTrace parameters "
+                "and features using predefined answers.<br><br>"
+                "No internet connection or API key is required. "
+                "No data is sent anywhere.<br><br>"
+                "For open-ended questions, switch to Gemini AI mode."
+            ))
+        else:
+            QMessageBox.information(self, "Gemini AI — Info", (
+                "<b>About Gemini AI</b><br><br>"
+                "This mode uses Google's Gemini API (Flash-Lite model) to answer "
+                "questions about FreeTrace, microscopy, biophysics, "
+                "and general science. Requires an internet connection.<br><br>"
+                "<b>Is it free?</b><br>"
+                "Yes. The Gemini API free tier requires no credit card and no billing "
+                "account. You will never be charged — if you exceed the daily limit "
+                "(1,000 requests/day), the API simply returns an error.<br><br>"
+                "<b>Can Google change this?</b><br>"
+                "Even if Google removes the free tier in the future, you cannot be "
+                "charged. Free-tier API keys have no payment method attached — "
+                "Google has no way to bill you. The worst case is that the chat "
+                "feature stops working.<br><br>"
+                "<b>Privacy</b><br>"
+                "Your prompts and responses are sent directly to Google's servers "
+                "via the Gemini API. Your microscopy images, videos, and tracking "
+                "results are never transferred — only the text you type in the chat. "
+                "On the free tier, Google may use your prompts and responses to "
+                "improve their products.<br><br>"
+                "<b>Accuracy</b><br>"
+                "AI responses may not always be accurate. Please verify important "
+                "results independently."
+            ))
+
+    def _send_chat(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20 18:00
+        """Send user message — routes to Q&A or Gemini based on mode."""
+        message = self._chat_input.text().strip()
+        if not message:
+            return
+
+        if self._chat_mode.currentIndex() == 0:
+            # Predefined Q&A mode
+            self._chat_display.append(
+                f"<p style='color:#7ec8e3;'><b>You:</b> {message}</p>"
+            )
+            self._chat_input.clear()
+            result = self._search_qa(message)
+            if result:
+                _, answer = result
+                html_answer = answer.replace("\n", "<br>")
+                self._chat_display.append(
+                    f"<p style='color:#ccc;'><b>AI:</b> {html_answer}</p>"
+                )
+            else:
+                self._chat_display.append(
+                    "<p style='color:#888;'><b>AI:</b> Sorry, I don't have a predefined "
+                    "answer for that question. Try different keywords, or switch to "
+                    "Gemini AI mode for open-ended questions.</p>"
+                )
+            self._chat_display.verticalScrollBar().setValue(
+                self._chat_display.verticalScrollBar().maximum()
+            )
+            return
+
+        # Gemini AI mode
+        api_key = self._gemini_key_input.text().strip()
+        if not api_key:
+            self._chat_display.append(
+                "<p style='color:#f0a500;'>Please enter your Gemini API key above.</p>"
+            )
+            return
+        if self._chat_worker is not None and self._chat_worker.isRunning():
+            return
+
+        self._chat_display.append(
+            f"<p style='color:#7ec8e3;'><b>You:</b> {message}</p>"
+        )
+        self._chat_input.clear()
+        self._chat_send_btn.setEnabled(False)
+
+        self._chat_display.append(
+            "<p style='color:#888;'><i>Thinking...</i></p>"
+        )
+        self._chat_ai_buffer = ""
+
+        self._chat_worker = GeminiChatWorker(api_key, message, self._chat_history)
+        self._chat_worker.reply_chunk.connect(self._on_chat_chunk)
+        self._chat_worker.reply_done.connect(self._on_chat_done)
+        self._chat_worker.error.connect(self._on_chat_error)
+        self._chat_worker.start()
+
+    def _on_chat_chunk(self, text: str):
+        """Accumulate streamed text chunks."""
+        self._chat_ai_buffer += text
+
+    def _on_chat_done(self):
+        """Display the complete AI response and update history."""
+        self._chat_send_btn.setEnabled(True)
+        cursor = self._chat_display.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.movePosition(cursor.MoveOperation.StartOfBlock, cursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        cursor.deletePreviousChar()
+        import re
+        converted = _latex_to_unicode(self._chat_ai_buffer)
+        html_text = converted.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        html_text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', html_text)  # **bold**
+        html_text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', html_text)      # *italic*
+        html_text = html_text.replace("\n", "<br>")
+        self._chat_display.append(
+            f"<p style='color:#ccc;'><b>AI:</b> {html_text}</p>"
+        )
+        self._chat_display.verticalScrollBar().setValue(
+            self._chat_display.verticalScrollBar().maximum()
+        )
+        self._chat_history.append(
+            {"role": "user", "parts": [{"text": self._chat_worker.message}]}
+        )
+        self._chat_history.append(
+            {"role": "model", "parts": [{"text": self._chat_ai_buffer}]}
+        )
+        if len(self._chat_history) > 40:
+            self._chat_history = self._chat_history[-40:]
+        self._chat_ai_buffer = ""
+
+    def _on_chat_error(self, error_msg: str):
+        """Display error in chat."""
+        self._chat_send_btn.setEnabled(True)
+        cursor = self._chat_display.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.movePosition(cursor.MoveOperation.StartOfBlock, cursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        cursor.deletePreviousChar()
+        self._chat_display.append(
+            f"<p style='color:#e57373;'>Error: {error_msg}</p>"
+        )
+        self._chat_ai_buffer = ""
+
+    def _clear_chat(self):
+        """Clear chat display and history."""
+        if self._chat_mode.currentIndex() == 0:
+            self._chat_display.setHtml(self._qa_welcome_html())
+        else:
+            self._chat_display.setHtml(
+                "<p style='color:#666; text-align:center; margin-top:40px;'>"
+                "Ask questions about FreeTrace, microscopy, biophysics, "
+                "or general science.</p>"
+            )
+        self._chat_history.clear()
+    # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20 18:00
 
     # ---- Analysis tab (sub-tabs: Class | Basic Stats | Adv Stats) --------
     def _build_analysis_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
