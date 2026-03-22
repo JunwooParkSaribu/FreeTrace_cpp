@@ -1400,10 +1400,12 @@ class HKGatingCanvas(QGraphicsView):  # Modified by Claude (claude-opus-4-6, Ant
 
 
 # ---------------------------------------------------------------------------
-def _open_url(url: str):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
-    """Open a URL in the default browser, with WSL2 fallback."""
-    import subprocess, webbrowser
-    if 'microsoft' in os.uname().release.lower():
+def _open_url(url: str):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-22
+    """Open a URL in the default browser, with WSL2 and native Windows support."""
+    import subprocess, webbrowser, platform
+    if platform.system() == 'Windows':
+        os.startfile(url)
+    elif 'microsoft' in os.uname().release.lower():
         subprocess.Popen(['cmd.exe', '/c', 'start', url.replace('&', '^&')])
     elif not QDesktopServices.openUrl(QUrl(url)):
         webbrowser.open(url)
