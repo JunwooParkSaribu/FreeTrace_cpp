@@ -1524,11 +1524,13 @@ class GeminiChatWorker(QThread):  # Modified by Claude (claude-opus-4-6, Anthrop
     error = pyqtSignal(str)         # error message
 
     _SYSTEM_PROMPT = (
-        "You are the FreeTrace AI Assistant, embedded in the FreeTrace GUI — "
+        "You are the FreeTrace AI Assistant, embedded in the FreeTrace GUI — "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
         "a single-molecule tracking software that uses fractional Brownian motion (fBm) inference. "
         "FreeTrace performs: (1) particle localization via Gaussian fitting, "
-        "(2) trajectory linking via graph-based optimization, "
-        "(3) anomalous diffusion classification via a neural network that estimates the Hurst exponent H.\n\n"
+        "(2) trajectory linking via graph-based optimization with a Cauchy-distribution cost function — "
+        "for fBm, the ratio of consecutive displacement increments follows a Cauchy distribution "
+        "parametrized by the Hurst exponent H, which FreeTrace uses to score trajectory links, "
+        "(3) anomalous diffusion classification via a neural network that estimates H.\n\n"  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
         "Key parameters users can set in the GUI:\n"
         "- Window size: size of the sub-image for localization (default 7)\n"
         "- Threshold: intensity threshold for spot detection (default 50)\n"
@@ -2072,7 +2074,22 @@ class FreeTraceGUI(QMainWindow):
                 "dataset uses its own independent binning."
             ),
         },
-    ]  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-21
+        {  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
+            "keywords": ["cauchy", "cauchy distribution", "cauchy fitting", "cauchy cost",
+                         "ratio distribution", "displacement ratio", "cost function",
+                         "linking cost", "trajectory cost"],
+            "question": "How does FreeTrace use the Cauchy distribution?",
+            "answer": (
+                "FreeTrace uses the Cauchy distribution in two ways. First, in the core tracking "
+                "algorithm: for fractional Brownian motion, the ratio of consecutive displacement "
+                "increments follows a Cauchy distribution parametrised by the Hurst exponent H. "
+                "FreeTrace evaluates this Cauchy log-likelihood as the cost function when scoring "
+                "candidate trajectory links in the graph-based optimisation. Second, in the "
+                "Advanced Stats tab: a Cauchy distribution is fitted to the 1D displacement ratio "
+                "histogram to estimate H per diffusion state as a post-analysis diagnostic."
+            ),
+        },
+    ]  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
 
     def _build_chat_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20 18:00
         widget = QWidget()
