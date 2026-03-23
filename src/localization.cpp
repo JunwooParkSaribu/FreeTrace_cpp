@@ -485,11 +485,17 @@ std::vector<float> read_image(const std::string& path, int& nb_frames, int& heig
 // CSV output
 // ============================================================
 
-void write_localization_csv(
+bool write_localization_csv( // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
     const std::string& output_path,
     const LocalizationResult& result
 ) {
-    std::ofstream ofs(output_path + "_loc.csv"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 11:00
+    std::string filepath = output_path + "_loc.csv";
+    std::ofstream ofs(filepath);
+    if (!ofs.is_open()) {
+        std::cerr << "ERROR: Cannot write localization file '" << filepath << "'. "
+                  << "Please check that the output drive is accessible and you have write permission." << std::endl;
+        return false;
+    }
     ofs << std::setprecision(15);  // Match Python's full float precision output
     ofs << "frame,x,y,z,xvar,yvar,rho,norm_cst,intensity,window_size\n";
     for (int frame = 0; frame < static_cast<int>(result.coords.size()); ++frame) {
@@ -506,7 +512,14 @@ void write_localization_csv(
                 << info[3] << "," << intensity << "," << ws << "\n";
         }
     }
-} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-12 11:00
+    ofs.flush();
+    if (!ofs.good()) {
+        std::cerr << "ERROR: Write failed for '" << filepath << "'. "
+                  << "The output drive may have run out of space or become inaccessible." << std::endl;
+        return false;
+    }
+    return true;
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
 
 // ============================================================
 // Background estimation
@@ -1664,7 +1677,12 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
          const std::string& ext_imgs_path,
          int batch_size) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 {
-    std::filesystem::create_directories(output_path); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+    try { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
+        std::filesystem::create_directories(output_path);
+    } catch (const std::filesystem::filesystem_error& e) {
+        std::cerr << "ERROR: Cannot create output directory '" << output_path << "': " << e.what() << std::endl;
+        return false;
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
     int nb_frames, height, width;
     auto images = read_image(input_video_path, nb_frames, height, width); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
     if (images.empty()) {
@@ -1806,13 +1824,15 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
     if (tif_pos != std::string::npos) loc_output = loc_output.substr(0, tif_pos);
     auto nd2_pos = loc_output.find(".nd2");
     if (nd2_pos != std::string::npos) loc_output = loc_output.substr(0, nd2_pos); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
-    write_localization_csv(loc_output, result);
-    make_loc_depth_image(loc_output, result, /*multiplier=*/4, /*winsize=*/window_size, /*resolution=*/2); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+    if (!write_localization_csv(loc_output, result)) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
+        return false;
+    }
+    make_loc_depth_image(loc_output, result, /*multiplier=*/4, /*winsize=*/window_size, /*resolution=*/2);
 
     if (verbose)
-        std::cout << "Written to " << loc_output << "_loc.csv and _loc_2d_density.png" << std::endl; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
+        std::cout << "Written to " << loc_output << "_loc.csv and _loc_2d_density.png" << std::endl;
 
-    return true;
+    return true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 
 // ============================================================ // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11

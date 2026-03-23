@@ -193,7 +193,12 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
             return 1;
         }
 
-        std::filesystem::create_directories(output);
+        try { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
+            std::filesystem::create_directories(output);
+        } catch (const std::filesystem::filesystem_error& e) {
+            std::cerr << "ERROR: Cannot create output directory '" << output << "': " << e.what() << std::endl;
+            return 1;
+        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
         std::cout << "FreeTrace - Batch Mode" << std::endl;
         std::cout << "  Input folder: " << input_folder << std::endl;
         std::cout << "  Output:       " << output << std::endl;
