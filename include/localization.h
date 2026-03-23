@@ -37,7 +37,7 @@ struct DetIndexWin : DetIndex {
 std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& height, int& width);
 std::vector<float> read_nd2(const std::string& path, int& nb_frames, int& height, int& width);
 std::vector<float> read_image(const std::string& path, int& nb_frames, int& height, int& width);
-void write_localization_csv(const std::string& output_path, const LocalizationResult& result); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+bool write_localization_csv(const std::string& output_path, const LocalizationResult& result); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
 
 // --- Background estimation ---
 struct BackgroundResult {
