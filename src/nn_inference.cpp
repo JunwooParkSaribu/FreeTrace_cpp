@@ -300,9 +300,11 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
         if (gpu_enabled) {
             try {
                 sessions_ok = load_sessions(models, env, models_dir, opts);
-            } catch (const Ort::Exception&) {
+            } catch (const Ort::Exception&) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-24
                 // CUDA EP registered but session creation failed (no GPU driver, etc.)
                 // Clean up any partial sessions and retry CPU-only
+                std::cout << "  GPU not available, loading models on CPU...\n"
+                          << "  Note: computation will be significantly slower due to neural network inference on CPU." << std::endl;
                 for (auto& [n, session] : models.alpha_sessions)
                     delete static_cast<Ort::Session*>(session);
                 models.alpha_sessions.clear();
