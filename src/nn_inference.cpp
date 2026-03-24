@@ -225,20 +225,15 @@ static int model_selection(const NNModels& models, int length) {
 
 #ifdef USE_ONNXRUNTIME
 
-bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
-    try {
-        auto* env = new Ort::Env(ORT_LOGGING_LEVEL_ERROR, "freetrace"); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15 00:00
-        models.env = env;
-
-        Ort::SessionOptions opts; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-        // Use multiple threads for CPU inference (critical for Mac without CUDA)
-        int num_threads = std::max(1, (int)std::thread::hardware_concurrency());
-        opts.SetIntraOpNumThreads(num_threads);
-        opts.SetInterOpNumThreads(num_threads);
-        opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-
-        bool gpu_enabled = false;
+// Helper: create session options with thread config // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-24
+static Ort::SessionOptions make_session_opts(int num_threads, bool try_cuda, bool& gpu_enabled) {
+    Ort::SessionOptions opts;
+    opts.SetIntraOpNumThreads(num_threads);
+    opts.SetInterOpNumThreads(num_threads);
+    opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    gpu_enabled = false;
 #if !defined(__APPLE__)
+    if (try_cuda) {
         try {
             OrtCUDAProviderOptions cuda_opts;
             cuda_opts.device_id = 0;
@@ -246,8 +241,49 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
             gpu_enabled = true;
         } catch (...) {
         }
-#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+    }
+#endif
+    return opts;
+}
 
+// Helper: load all ONNX sessions with the given options
+static bool load_sessions(NNModels& models, Ort::Env* env,
+                           const std::string& models_dir,
+                           Ort::SessionOptions& opts) {
+    Ort::AllocatorWithDefaultOptions alloc;
+
+    for (int n : models.reg_model_nums) {
+        std::string path = models_dir + "/reg_model_" + std::to_string(n) + ".onnx";
+#ifdef _WIN32
+        std::wstring wpath(path.begin(), path.end());
+        auto* session = new Ort::Session(*env, wpath.c_str(), opts);
+#else
+        auto* session = new Ort::Session(*env, path.c_str(), opts);
+#endif
+        models.alpha_sessions[n] = session;
+        models.alpha_input_names[n] = std::string(session->GetInputNameAllocated(0, alloc).get());
+        models.alpha_output_names[n] = std::string(session->GetOutputNameAllocated(0, alloc).get());
+    }
+
+    std::string k_path = models_dir + "/reg_k_model.onnx";
+#ifdef _WIN32
+    std::wstring wk_path(k_path.begin(), k_path.end());
+    auto* k_sess = new Ort::Session(*env, wk_path.c_str(), opts);
+#else
+    auto* k_sess = new Ort::Session(*env, k_path.c_str(), opts);
+#endif
+    models.k_session = k_sess;
+    models.k_input_name = std::string(k_sess->GetInputNameAllocated(0, alloc).get());
+    models.k_output_name = std::string(k_sess->GetOutputNameAllocated(0, alloc).get());
+    return true;
+}
+
+bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-24
+    try {
+        auto* env = new Ort::Env(ORT_LOGGING_LEVEL_ERROR, "freetrace");
+        models.env = env;
+
+        int num_threads = std::max(1, (int)std::thread::hardware_concurrency());
         models.reg_model_nums = {3, 5, 8};
         models.crits = {3, 5, 8, 8192};
 
@@ -256,39 +292,37 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
         models.mem_info = new Ort::MemoryInfo(
             Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
 
-        Ort::AllocatorWithDefaultOptions alloc;
+        // Try GPU first, fall back to CPU if session creation fails
+        bool gpu_enabled = false;
+        auto opts = make_session_opts(num_threads, true, gpu_enabled);
 
-        for (int n : models.reg_model_nums) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
-            std::string path = models_dir + "/reg_model_" + std::to_string(n) + ".onnx";
-#ifdef _WIN32
-            std::wstring wpath(path.begin(), path.end());
-            auto* session = new Ort::Session(*env, wpath.c_str(), opts);
-#else
-            auto* session = new Ort::Session(*env, path.c_str(), opts);
-#endif
-            models.alpha_sessions[n] = session;
-            // Cache input/output names
-            models.alpha_input_names[n] = std::string(session->GetInputNameAllocated(0, alloc).get());
-            models.alpha_output_names[n] = std::string(session->GetOutputNameAllocated(0, alloc).get());
+        bool sessions_ok = false;
+        if (gpu_enabled) {
+            try {
+                sessions_ok = load_sessions(models, env, models_dir, opts);
+            } catch (const Ort::Exception&) {
+                // CUDA EP registered but session creation failed (no GPU driver, etc.)
+                // Clean up any partial sessions and retry CPU-only
+                for (auto& [n, session] : models.alpha_sessions)
+                    delete static_cast<Ort::Session*>(session);
+                models.alpha_sessions.clear();
+                models.k_session = nullptr;
+                gpu_enabled = false;
+                opts = make_session_opts(num_threads, false, gpu_enabled);
+                sessions_ok = load_sessions(models, env, models_dir, opts);
+            }
+        } else {
+            sessions_ok = load_sessions(models, env, models_dir, opts);
         }
 
-        std::string k_path = models_dir + "/reg_k_model.onnx";
-#ifdef _WIN32
-        std::wstring wk_path(k_path.begin(), k_path.end());
-        auto* k_sess = new Ort::Session(*env, wk_path.c_str(), opts);
-#else
-        auto* k_sess = new Ort::Session(*env, k_path.c_str(), opts);
-#endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
-        models.k_session = k_sess;
-        models.k_input_name = std::string(k_sess->GetInputNameAllocated(0, alloc).get());
-        models.k_output_name = std::string(k_sess->GetOutputNameAllocated(0, alloc).get());
+        if (!sessions_ok) return false;
 
-        // Load direct k model weights (fast path, bypasses ONNX for k predictions) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+        // Load direct k model weights (fast path, bypasses ONNX for k predictions)
         if (load_k_direct(models.k_direct, models_dir)) {
             std::cout << "Loaded direct k model weights (fast path)" << std::endl;
         }
 
-        models.loaded = true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+        models.loaded = true;
 
 #ifdef USE_COREML
         // Try CoreML native inference for alpha models (GPU/ANE acceleration)
@@ -303,12 +337,12 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
             std::cout << "\n  NN inference: GPU (CUDA)\n" << std::endl;
         } else {
             std::cout << "\n  NN inference: CPU (" << num_threads << " threads)\n" << std::endl;
-        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
-        return true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
-    } catch (const Ort::Exception&) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+        }
+        return true;
+    } catch (const Ort::Exception&) {
         return false;
     }
-} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-24
 
 void free_nn_models(NNModels& models) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     for (auto& [n, session] : models.alpha_sessions) {
