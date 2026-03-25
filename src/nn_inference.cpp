@@ -300,11 +300,9 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
         if (gpu_enabled) {
             try {
                 sessions_ok = load_sessions(models, env, models_dir, opts);
-            } catch (...) {
+            } catch (...) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-25
                 // CUDA EP registered but session creation failed (no GPU driver, etc.)
                 // Clean up any partial sessions and retry CPU-only
-                std::cout << "  GPU not available, loading models on CPU..." << std::endl;
-                std::cout << "  Note: computation will be significantly slower due to neural network inference on CPU." << std::endl;
                 for (auto& [n, session] : models.alpha_sessions)
                     delete static_cast<Ort::Session*>(session);
                 models.alpha_sessions.clear();
@@ -314,15 +312,17 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
                 }
                 gpu_enabled = false;
                 opts = make_session_opts(num_threads, false, gpu_enabled);
-                std::cout << "  Loading NN models (this may take a moment on CPU)..." << std::flush;
+                std::cout << "\n  [WARNING] fBm mode is enabled, but no GPU is detected for neural network inference.\n"
+                          << "  Loading NN models on CPU — this may take a moment.\n"
+                          << "  Note: tracking will be significantly slower due to CPU-based neural network inference.\n" << std::endl;
                 sessions_ok = load_sessions(models, env, models_dir, opts);
-                std::cout << " done." << std::endl;
             }
         } else {
-            std::cout << "  Loading NN models on CPU..." << std::flush;
+            std::cout << "\n  [WARNING] fBm mode is enabled, but no GPU is detected for neural network inference.\n"
+                      << "  Loading NN models on CPU — this may take a moment.\n"
+                      << "  Note: tracking will be significantly slower due to CPU-based neural network inference.\n" << std::endl;
             sessions_ok = load_sessions(models, env, models_dir, opts);
-            std::cout << " done." << std::endl;
-        }
+        } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-25
 
         if (!sessions_ok) return false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-25
 
