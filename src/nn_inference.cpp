@@ -296,28 +296,35 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
         bool gpu_enabled = false;
         auto opts = make_session_opts(num_threads, true, gpu_enabled);
 
-        bool sessions_ok = false;
+        bool sessions_ok = false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-25
         if (gpu_enabled) {
             try {
                 sessions_ok = load_sessions(models, env, models_dir, opts);
-            } catch (const Ort::Exception&) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-24
+            } catch (...) {
                 // CUDA EP registered but session creation failed (no GPU driver, etc.)
                 // Clean up any partial sessions and retry CPU-only
-                std::cout << "  GPU not available, loading models on CPU...\n"
-                          << "  Note: computation will be significantly slower due to neural network inference on CPU." << std::endl;
+                std::cout << "  GPU not available, loading models on CPU..." << std::endl;
+                std::cout << "  Note: computation will be significantly slower due to neural network inference on CPU." << std::endl;
                 for (auto& [n, session] : models.alpha_sessions)
                     delete static_cast<Ort::Session*>(session);
                 models.alpha_sessions.clear();
-                models.k_session = nullptr;
+                if (models.k_session) {
+                    delete static_cast<Ort::Session*>(models.k_session);
+                    models.k_session = nullptr;
+                }
                 gpu_enabled = false;
                 opts = make_session_opts(num_threads, false, gpu_enabled);
+                std::cout << "  Loading NN models (this may take a moment on CPU)..." << std::flush;
                 sessions_ok = load_sessions(models, env, models_dir, opts);
+                std::cout << " done." << std::endl;
             }
         } else {
+            std::cout << "  Loading NN models on CPU..." << std::flush;
             sessions_ok = load_sessions(models, env, models_dir, opts);
+            std::cout << " done." << std::endl;
         }
 
-        if (!sessions_ok) return false;
+        if (!sessions_ok) return false; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-25
 
         // Load direct k model weights (fast path, bypasses ONNX for k predictions)
         if (load_k_direct(models.k_direct, models_dir)) {
@@ -341,10 +348,14 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
             std::cout << "\n  NN inference: CPU (" << num_threads << " threads)\n" << std::endl;
         }
         return true;
-    } catch (const Ort::Exception&) {
+    } catch (const std::exception& e) {
+        std::cerr << "  NN model loading failed: " << e.what() << std::endl;
+        return false;
+    } catch (...) {
+        std::cerr << "  NN model loading failed (unknown error)." << std::endl;
         return false;
     }
-} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-24
+} // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-25
 
 void free_nn_models(NNModels& models) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
     for (auto& [n, session] : models.alpha_sessions) {
