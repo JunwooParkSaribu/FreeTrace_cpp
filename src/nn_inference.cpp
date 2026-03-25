@@ -313,13 +313,13 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
                 gpu_enabled = false;
                 opts = make_session_opts(num_threads, false, gpu_enabled);
                 std::cout << "\n  [WARNING] fBm mode is enabled, but no GPU is detected for neural network inference.\n"
-                          << "  Loading NN models on CPU — this may take a moment.\n"
+                          << "  Loading NN models on CPU - this may take a moment.\n"
                           << "  Note: tracking will be significantly slower due to CPU-based neural network inference.\n" << std::endl;
                 sessions_ok = load_sessions(models, env, models_dir, opts);
             }
         } else {
             std::cout << "\n  [WARNING] fBm mode is enabled, but no GPU is detected for neural network inference.\n"
-                      << "  Loading NN models on CPU — this may take a moment.\n"
+                      << "  Loading NN models on CPU - this may take a moment.\n"
                       << "  Note: tracking will be significantly slower due to CPU-based neural network inference.\n" << std::endl;
             sessions_ok = load_sessions(models, env, models_dir, opts);
         } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-25
