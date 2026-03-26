@@ -1769,8 +1769,9 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
         int batch_end = std::min(batch_start + div_q, nb_frames);
         int batch_n = batch_end - batch_start;
 
-        if (verbose) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
-            std::cerr << "\rLocalizing frame " << batch_start << "-" << batch_end << " / " << nb_frames << std::flush;
+        // Progress output for GUI parsing  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        int loc_pct = static_cast<int>(100.0 * batch_end / nb_frames);
+        std::cerr << "PROGRESS:" << loc_pct << ":Localizing frame " << batch_start << "-" << batch_end << " / " << nb_frames << std::endl;
 
         LocalizationResult batch_result;
 
