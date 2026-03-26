@@ -280,76 +280,75 @@ static bool load_sessions(NNModels& models, Ort::Env* env,
 
 bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
     try {
+        auto* env = new Ort::Env(ORT_LOGGING_LEVEL_ERROR, "freetrace");
+        models.env = env;
+
+        int num_threads = std::max(1, (int)std::thread::hardware_concurrency());
         models.reg_model_nums = {3, 5, 8};
         models.crits = {3, 5, 8, 8192};
 
-        // Load direct k model weights (fast path, bypasses ONNX for k predictions)
-        bool has_k_direct = load_k_direct(models.k_direct, models_dir);
-        if (has_k_direct) {
-            std::cout << "Loaded direct k model weights (fast path)" << std::endl;
-        }
+        // Cache RunOptions and MemoryInfo (reused for every inference call)
+        models.run_options = new Ort::RunOptions();
+        models.mem_info = new Ort::MemoryInfo(
+            Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
 
-#ifdef USE_COREML
-        // macOS: CoreML only — no ONNX at all  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
-        if (!coreml_load_alpha_models(models_dir.c_str(),
-                                      models.reg_model_nums.data(),
-                                      (int)models.reg_model_nums.size())) {
-            return false;  // models not in this directory, caller tries next
-        }
-        models.use_coreml = true;
-        models.loaded = true;
-        std::cout << "\n  NN inference: CoreML (GPU / Apple Neural Engine)\n" << std::endl;
-#endif
-#ifndef USE_COREML
-        {
-            // Non-Apple: use ONNX Runtime
-            auto* env = new Ort::Env(ORT_LOGGING_LEVEL_ERROR, "freetrace");
-            models.env = env;
-            int num_threads = std::max(1, (int)std::thread::hardware_concurrency());
-            models.run_options = new Ort::RunOptions();
-            models.mem_info = new Ort::MemoryInfo(
-                Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
+        // Try GPU first, fall back to CPU if session creation fails
+        bool gpu_enabled = false;
+        auto opts = make_session_opts(num_threads, true, gpu_enabled);
 
-            bool gpu_enabled = false;
-            auto opts = make_session_opts(num_threads, true, gpu_enabled);
-
-            bool sessions_ok = false;
-            if (gpu_enabled) {
-                try {
-                    sessions_ok = load_sessions(models, env, models_dir, opts);
-                } catch (...) {
-                    // CUDA EP registered but session creation failed (no GPU driver, etc.)
-                    for (auto& [n, session] : models.alpha_sessions)
-                        delete static_cast<Ort::Session*>(session);
-                    models.alpha_sessions.clear();
-                    if (models.k_session) {
-                        delete static_cast<Ort::Session*>(models.k_session);
-                        models.k_session = nullptr;
-                    }
-                    gpu_enabled = false;
-                    opts = make_session_opts(num_threads, false, gpu_enabled);
-                    std::cout << "\n  [WARNING] fBm mode is enabled, but no GPU is detected for neural network inference.\n"
-                              << "  Loading NN models on CPU - this may take a moment.\n"
-                              << "  Note: tracking will be significantly slower due to CPU-based neural network inference.\n" << std::endl;
-                    sessions_ok = load_sessions(models, env, models_dir, opts);
+        bool sessions_ok = false;
+        if (gpu_enabled) {
+            try {
+                sessions_ok = load_sessions(models, env, models_dir, opts);
+            } catch (...) {
+                for (auto& [n, session] : models.alpha_sessions)
+                    delete static_cast<Ort::Session*>(session);
+                models.alpha_sessions.clear();
+                if (models.k_session) {
+                    delete static_cast<Ort::Session*>(models.k_session);
+                    models.k_session = nullptr;
                 }
-            } else {
+                gpu_enabled = false;
+                opts = make_session_opts(num_threads, false, gpu_enabled);
+#if !defined(__APPLE__)
                 std::cout << "\n  [WARNING] fBm mode is enabled, but no GPU is detected for neural network inference.\n"
                           << "  Loading NN models on CPU - this may take a moment.\n"
                           << "  Note: tracking will be significantly slower due to CPU-based neural network inference.\n" << std::endl;
+#endif
                 sessions_ok = load_sessions(models, env, models_dir, opts);
             }
+        } else {
+#if !defined(__APPLE__)
+            std::cout << "\n  [WARNING] fBm mode is enabled, but no GPU is detected for neural network inference.\n"
+                      << "  Loading NN models on CPU - this may take a moment.\n"
+                      << "  Note: tracking will be significantly slower due to CPU-based neural network inference.\n" << std::endl;
+#endif
+            sessions_ok = load_sessions(models, env, models_dir, opts);
+        }
 
-            if (!sessions_ok) return false;
-            models.loaded = true;
+        if (!sessions_ok) return false;
 
-            if (gpu_enabled) {
-                std::cout << "\n  NN inference: GPU (CUDA)\n" << std::endl;
-            } else {
-                std::cout << "\n  NN inference: CPU (" << num_threads << " threads)\n" << std::endl;
-            }
-        }  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
-#endif // !USE_COREML
+        // Load direct k model weights (fast path, bypasses ONNX for k predictions)
+        if (load_k_direct(models.k_direct, models_dir)) {
+            std::cout << "Loaded direct k model weights (fast path)" << std::endl;
+        }
+
+        models.loaded = true;
+
+#ifdef USE_COREML
+        // macOS: try CoreML for alpha (GPU/ANE acceleration), ONNX as fallback
+        if (coreml_load_alpha_models(models_dir.c_str(),
+                                     models.reg_model_nums.data(),
+                                     (int)models.reg_model_nums.size())) {
+            models.use_coreml = true;
+            std::cout << "\n  NN inference: CoreML (GPU / Apple Neural Engine)\n" << std::endl;
+        } else
+#endif
+        if (gpu_enabled) {
+            std::cout << "\n  NN inference: GPU (CUDA)\n" << std::endl;
+        } else {
+            std::cout << "\n  NN inference: CPU (" << num_threads << " threads)\n" << std::endl;
+        }
         return true;
     } catch (const std::exception& e) {
         std::cerr << "  NN model loading failed: " << e.what() << std::endl;
@@ -398,8 +397,7 @@ float predict_alpha_nn(const NNModels& models,
     int model_num = model_selection(models, n);
 
     auto it = models.alpha_sessions.find(model_num);  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
-    bool has_onnx_session = (it != models.alpha_sessions.end());
-    if (!has_onnx_session && !models.use_coreml) return 1.0f;
+    if (it == models.alpha_sessions.end()) return 1.0f;
 
     // Recoupe trajectory into sliding windows of size model_num
     // Use double for preprocessing, matching Python/NumPy float64
@@ -436,7 +434,7 @@ float predict_alpha_nn(const NNModels& models,
     }
 #endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
-    if (has_onnx_session) {  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    {
         auto* session = static_cast<Ort::Session*>(it->second);
         try {
             auto& mem_info = *static_cast<Ort::MemoryInfo*>(models.mem_info);
@@ -484,7 +482,7 @@ std::vector<float> predict_alpha_nn_batch(const NNModels& models, // Modified by
         if (xs_batch[idx].size() < 3) continue;
         int n = (int)xs_batch[idx].size();
         int model_num = model_selection(models, n);
-        if (!models.use_coreml && models.alpha_sessions.find(model_num) == models.alpha_sessions.end()) continue;  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        if (models.alpha_sessions.find(model_num) == models.alpha_sessions.end()) continue;
 
         // Recoupe into windows
         std::vector<std::vector<double>> windows_x, windows_y;
@@ -509,11 +507,10 @@ std::vector<float> predict_alpha_nn_batch(const NNModels& models, // Modified by
         }
     }
 
-    // Run one call per model_num (CoreML or ONNX)  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    // Run one call per model_num (CoreML or ONNX)
     for (auto& [model_num, infos] : groups) {
         auto it = models.alpha_sessions.find(model_num);
-        bool has_onnx = (it != models.alpha_sessions.end());
-        if (!has_onnx && !models.use_coreml) continue;
+        if (it == models.alpha_sessions.end()) continue;
         auto& data = group_input_data[model_num];
 
         int total_batch = 0;
@@ -529,7 +526,7 @@ std::vector<float> predict_alpha_nn_batch(const NNModels& models, // Modified by
                                             total_batch, model_num, pred_buf.data());
         }
 #endif
-        if (!predicted && has_onnx) {  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        if (!predicted) {
             auto* session = static_cast<Ort::Session*>(it->second);
             try {
                 auto& mem_info = *static_cast<Ort::MemoryInfo*>(models.mem_info);
@@ -621,8 +618,8 @@ std::vector<float> predict_k_nn_batch(const NNModels& models, // Modified by Cla
     std::vector<float> results(N, 0.5f);
     if (!models.loaded || N == 0) return results;
 
-    auto* session = static_cast<Ort::Session*>(models.k_session);  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
-    if (!session && !models.k_direct.loaded) return results;
+    auto* session = static_cast<Ort::Session*>(models.k_session);
+    if (!session) return results;
 
     // Compute all log_displacements
     std::vector<float> input_data;
