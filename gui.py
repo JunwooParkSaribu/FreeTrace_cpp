@@ -27,8 +27,8 @@ import seaborn as sns  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 20
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QProcess, QPointF, QRectF, QUrl  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
 from PyQt6.QtGui import (
     QPixmap, QFont, QColor, QPalette, QIcon, QPainter, QPolygon,
-    QPen, QBrush, QPainterPath, QDesktopServices,
-)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+    QPen, QBrush, QPainterPath, QDesktopServices, QTransform, QImage,
+)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 from PyQt6.QtCore import QPoint
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -43,7 +43,7 @@ from PyQt6.QtWidgets import (
 _BASE_W, _BASE_H = 1920, 1080
 
 # Current version — used for update check against GitHub releases  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
-_VERSION = "1.6.1.2"
+_VERSION = "1.6.2.0"
 _GITHUB_REPO = "JunwooParkSaribu/FreeTrace_cpp"
 
 # Generate arrow icon PNGs for spin box buttons (CSS border-triangles don't work in Qt) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
@@ -1399,6 +1399,1086 @@ class HKGatingCanvas(QGraphicsView):  # Modified by Claude (claude-opus-4-6, Ant
     # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
 
 
+# ---------------------------------------------------------------------------  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+# ImageJ/Fiji ROI file parser
+# ---------------------------------------------------------------------------
+def _parse_imagej_roi(data):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    """Parse a single ImageJ .roi binary blob into a shape dict.
+
+    Returns a dict with 'type' and coordinates in image pixel space,
+    or None if the ROI type is unsupported.
+    Supported: rect, oval, line, rotated rect, rotated ellipse.
+    """
+    import struct
+
+    if len(data) < 64 or data[0:4] != b'Iout':
+        return None
+
+    def gi16(off):
+        return struct.unpack_from('>h', data, off)[0]
+
+    def gu16(off):
+        return struct.unpack_from('>H', data, off)[0]
+
+    def gi32(off):
+        return struct.unpack_from('>i', data, off)[0]
+
+    def gf32(off):
+        return struct.unpack_from('>f', data, off)[0]
+
+    version = gu16(4)
+    roi_type = data[6]
+    top = gi16(8)
+    left = gi16(10)
+    bottom = gi16(12)
+    right = gi16(14)
+    subtype = gu16(48) if len(data) > 50 else 0
+    options = gu16(50) if len(data) > 52 else 0
+
+    # Sub-pixel bounding box (version >= 223 and SUB_PIXEL_RESOLUTION flag set)
+    sub_pixel = bool(options & 128) and version >= 223
+
+    # Read name from header2 if available
+    name = None
+    hdr2_off = gi32(60) if len(data) > 63 else 0
+    if hdr2_off > 0 and hdr2_off + 24 <= len(data):
+        name_off = gi32(hdr2_off + 16)
+        name_len = gi32(hdr2_off + 20)
+        if name_off > 0 and name_len > 0 and name_off + name_len * 2 <= len(data):
+            name = data[name_off:name_off + name_len * 2].decode('utf-16-be', errors='replace')
+
+    result = {'name': name}
+
+    if roi_type == 1:  # rect
+        if sub_pixel:
+            xd, yd = gf32(18), gf32(22)
+            wd, hd = gf32(26), gf32(30)
+            result.update({'type': 'rect', 'x1': xd, 'y1': yd,
+                           'x2': xd + wd, 'y2': yd + hd, 'angle': 0.0})
+        else:
+            result.update({'type': 'rect', 'x1': float(left), 'y1': float(top),
+                           'x2': float(right), 'y2': float(bottom), 'angle': 0.0})
+        return result
+
+    elif roi_type == 2:  # oval
+        if sub_pixel:
+            xd, yd = gf32(18), gf32(22)
+            wd, hd = gf32(26), gf32(30)
+            result.update({'type': 'ellipse',
+                           'cx': xd + wd / 2, 'cy': yd + hd / 2,
+                           'rx': wd / 2, 'ry': hd / 2, 'angle': 0.0})
+        else:
+            cx = (left + right) / 2.0
+            cy = (top + bottom) / 2.0
+            rx = (right - left) / 2.0
+            ry = (bottom - top) / 2.0
+            result.update({'type': 'ellipse', 'cx': cx, 'cy': cy,
+                           'rx': rx, 'ry': ry, 'angle': 0.0})
+        return result
+
+    elif roi_type == 3:  # line
+        x1, y1 = gf32(18), gf32(22)
+        x2, y2 = gf32(26), gf32(30)
+        result.update({'type': 'line', 'p1': [x1, y1], 'p2': [x2, y2]})
+        return result
+
+    elif roi_type == 7:  # freehand — check subtype
+        if subtype == 3:  # ELLIPSE
+            # X1,Y1,X2,Y2 = major axis endpoints; FLOAT_PARAM = aspect ratio
+            x1, y1 = gf32(18), gf32(22)
+            x2, y2 = gf32(26), gf32(30)
+            aspect = gf32(52) if len(data) > 55 else 1.0
+            # Major axis length and center
+            dx, dy = x2 - x1, y2 - y1
+            major = math.sqrt(dx * dx + dy * dy)
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            rx = major / 2  # semi-major
+            ry = rx * aspect  # semi-minor
+            angle = math.degrees(math.atan2(dy, dx))
+            result.update({'type': 'ellipse', 'cx': cx, 'cy': cy,
+                           'rx': rx, 'ry': ry, 'angle': angle})
+            return result
+
+        elif subtype == 5:  # ROTATED_RECT
+            # X1,Y1,X2,Y2 = one side; FLOAT_PARAM = width (perpendicular)
+            x1, y1 = gf32(18), gf32(22)
+            x2, y2 = gf32(26), gf32(30)
+            width = gf32(52) if len(data) > 55 else 10.0
+            dx, dy = x2 - x1, y2 - y1
+            side_len = math.sqrt(dx * dx + dy * dy)
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            angle = math.degrees(math.atan2(dy, dx))
+            # side_len = length along the defined side, width = perpendicular
+            result.update({'type': 'rect',
+                           'x1': cx - side_len / 2, 'y1': cy - width / 2,
+                           'x2': cx + side_len / 2, 'y2': cy + width / 2,
+                           'angle': angle})
+            return result
+
+    # Unsupported type (polygon, polyline, freehand, etc.)
+    return None
+
+
+def _load_imagej_rois(path):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    """Load ROI shapes from an ImageJ .roi or .zip file.
+
+    Returns (shapes_list, skipped_count) where shapes_list contains
+    dicts compatible with ROICanvas.set_shapes_data().
+    """
+    import zipfile
+
+    shapes = []
+    skipped = 0
+
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path, 'r') as zf:
+            for entry in zf.namelist():
+                if not entry.lower().endswith('.roi'):
+                    continue
+                roi_data = zf.read(entry)
+                parsed = _parse_imagej_roi(roi_data)
+                if parsed is not None:
+                    shapes.append(parsed)
+                else:
+                    skipped += 1
+    else:
+        with open(path, 'rb') as f:
+            roi_data = f.read()
+        parsed = _parse_imagej_roi(roi_data)
+        if parsed is not None:
+            shapes.append(parsed)
+        else:
+            skipped += 1
+
+    return shapes, skipped
+
+
+# ---------------------------------------------------------------------------
+# ROI Canvas — spatial trajectory plot with rectangle/ellipse/line ROIs
+# ---------------------------------------------------------------------------
+class ROICanvas(QGraphicsView):
+    """Interactive spatial trajectory plot with structured ROI drawing.
+
+    Supports four modes: Rectangle, Ellipse, Line (draw shapes),
+    and Select (move/resize existing shapes).
+    Line mode auto-extends endpoints to the plot edges.
+    Each shape boundary divides space via flood fill → roi0, roi1, ...
+    Right-click removes the last drawn shape.
+    Two classification modes: Mean Position (by trajectory centroid)
+    and Strict Containment (all points must be in same ROI).
+    """
+    roi_changed = pyqtSignal()
+    mode_requested = pyqtSignal(str)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    _MARGIN_LEFT = 60
+    _MARGIN_BOTTOM = 50
+    _MARGIN_TOP = 30
+    _MARGIN_RIGHT = 30
+    _PLOT_W = 500
+    _PLOT_H = 400
+
+    _ROI_COLORS = [
+        QColor(100, 180, 255, 200),   # blue
+        QColor(255, 120, 80, 200),    # orange
+        QColor(100, 220, 100, 200),   # green
+        QColor(200, 100, 255, 200),   # purple
+        QColor(255, 220, 60, 200),    # yellow
+        QColor(255, 100, 200, 200),   # pink
+        QColor(100, 220, 220, 200),   # cyan
+        QColor(220, 180, 100, 200),   # tan
+    ]
+
+    MODE_RECT = "Rectangle"
+    MODE_ELLIPSE = "Ellipse"
+    MODE_LINE = "Line"
+    MODE_SELECT = "Select"
+
+    CLASSIFY_MEAN = "Mean Position"
+    CLASSIFY_STRICT = "Strict Containment"
+
+    _HANDLE_SIZE = 8  # pixels, half-width of resize handles
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scene = QGraphicsScene(self)
+        self.setScene(self._scene)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setStyleSheet("background:#1a1a1a; border:none;")
+
+        # Trajectory data: per-trajectory point lists and mean positions
+        self._traj_indices = np.array([])
+        self._traj_points = []  # list of (xs, ys) arrays per trajectory
+        self._X = np.array([])  # mean x per trajectory
+        self._Y = np.array([])  # mean y per trajectory
+
+        self._x_min, self._x_max = 0.0, 1.0
+        self._y_min, self._y_max = 0.0, 1.0
+
+        # Drawing state
+        self._draw_mode = self.MODE_RECT
+        self._classify_mode = self.CLASSIFY_MEAN
+        self._drawing = False
+        self._drag_start = None
+        self._current_preview = None
+        self._shapes = []
+        self._traj_pixmap_item = None
+        self._roi_labels = None
+        self._handle_items = []  # graphics items for resize handles
+
+        # Select mode state
+        self._selected_shape_idx = -1
+        self._dragging_shape = False
+        self._dragging_handle = None  # (shape_idx, handle_id) or None
+        self._select_offset = QPointF(0, 0)
+
+        self._color_default = QColor(180, 180, 180, 100)
+        self._color_excluded = QColor(80, 80, 80, 60)
+
+    def set_draw_mode(self, mode: str):
+        self._draw_mode = mode
+        self._selected_shape_idx = -1
+        self._remove_handles()
+
+    def set_classify_mode(self, mode: str):
+        self._classify_mode = mode
+        if self._shapes:
+            self._classify_points()
+            self._render_traj_pixmap()
+            self.roi_changed.emit()
+
+    def set_data(self, traj_indices, traj_points, mean_x, mean_y):
+        """Set trajectory data for plotting.
+
+        Args:
+            traj_indices: array of trajectory IDs
+            traj_points: list of (xs, ys) tuples per trajectory
+            mean_x: mean x per trajectory
+            mean_y: mean y per trajectory
+        """
+        self._traj_indices = np.array(traj_indices)
+        self._traj_points = traj_points
+        self._X = np.array(mean_x, dtype=float)
+        self._Y = np.array(mean_y, dtype=float)
+
+        if len(self._X) > 0:
+            # Compute bounds from all trajectory points
+            all_x = np.concatenate([pts[0] for pts in traj_points]) if traj_points else self._X
+            all_y = np.concatenate([pts[1] for pts in traj_points]) if traj_points else self._Y
+            pad_x = max((all_x.max() - all_x.min()) * 0.05, 1.0)
+            pad_y = max((all_y.max() - all_y.min()) * 0.05, 1.0)
+            self._x_min = float(all_x.min() - pad_x)
+            self._x_max = float(all_x.max() + pad_x)
+            self._y_min = float(all_y.min() - pad_y)
+            self._y_max = float(all_y.max() + pad_y)
+        self._roi_labels = None
+        self._clear_shapes()
+        self._draw_plot()
+
+    # --- Coordinate conversions (data ↔ scene) ---
+    def _x_to_sx(self, xval):
+        return self._MARGIN_LEFT + (xval - self._x_min) / (self._x_max - self._x_min) * self._PLOT_W
+
+    def _y_to_sy(self, yval):
+        return self._MARGIN_TOP + (yval - self._y_min) / (self._y_max - self._y_min) * self._PLOT_H
+
+    def _sx_to_x(self, sx):
+        return self._x_min + (sx - self._MARGIN_LEFT) / self._PLOT_W * (self._x_max - self._x_min)
+
+    def _sy_to_y(self, sy):
+        return self._y_min + (sy - self._MARGIN_TOP) / self._PLOT_H * (self._y_max - self._y_min)
+
+    # --- Plot rendering ---
+    def _draw_plot(self):
+        self._scene.clear()
+        self._traj_pixmap_item = None
+        self._handle_items = []
+
+        total_w = self._MARGIN_LEFT + self._PLOT_W + self._MARGIN_RIGHT
+        total_h = self._MARGIN_TOP + self._PLOT_H + self._MARGIN_BOTTOM
+        self._scene.setSceneRect(0, 0, total_w, total_h)
+
+        pen_axis = QPen(QColor(150, 150, 150), 1.5)
+        pen_grid = QPen(QColor(60, 60, 60), 0.5, Qt.PenStyle.DashLine)
+        pen_text = QColor(180, 180, 180)
+
+        self._scene.addRect(
+            QRectF(self._MARGIN_LEFT, self._MARGIN_TOP, self._PLOT_W, self._PLOT_H),
+            QPen(Qt.PenStyle.NoPen), QBrush(QColor(30, 30, 30))
+        )
+
+        # Grid lines — X axis
+        x_range = self._x_max - self._x_min
+        x_step = self._nice_step(x_range, 8)
+        xv = math.ceil(self._x_min / x_step) * x_step
+        while xv <= self._x_max:
+            sx = self._x_to_sx(xv)
+            if self._MARGIN_LEFT <= sx <= self._MARGIN_LEFT + self._PLOT_W:
+                self._scene.addLine(sx, self._MARGIN_TOP, sx, self._MARGIN_TOP + self._PLOT_H, pen_grid)
+                txt = self._scene.addSimpleText(f"{xv:.0f}")
+                txt.setBrush(pen_text)
+                txt.setPos(sx - 12, self._MARGIN_TOP + self._PLOT_H + 5)
+            xv += x_step
+
+        # Grid lines — Y axis
+        y_range = self._y_max - self._y_min
+        y_step = self._nice_step(y_range, 8)
+        yv = math.ceil(self._y_min / y_step) * y_step
+        while yv <= self._y_max:
+            sy = self._y_to_sy(yv)
+            if self._MARGIN_TOP <= sy <= self._MARGIN_TOP + self._PLOT_H:
+                self._scene.addLine(self._MARGIN_LEFT, sy, self._MARGIN_LEFT + self._PLOT_W, sy, pen_grid)
+                txt = self._scene.addSimpleText(f"{yv:.0f}")
+                txt.setBrush(pen_text)
+                txt.setPos(self._MARGIN_LEFT - 45, sy - 8)
+            yv += y_step
+
+        self._scene.addLine(
+            self._MARGIN_LEFT, self._MARGIN_TOP + self._PLOT_H,
+            self._MARGIN_LEFT + self._PLOT_W, self._MARGIN_TOP + self._PLOT_H, pen_axis)
+        self._scene.addLine(
+            self._MARGIN_LEFT, self._MARGIN_TOP,
+            self._MARGIN_LEFT, self._MARGIN_TOP + self._PLOT_H, pen_axis)
+
+        x_label = self._scene.addSimpleText("X (pixels)")
+        x_label.setBrush(pen_text)
+        x_label.setPos(self._MARGIN_LEFT + self._PLOT_W / 2 - 30, self._MARGIN_TOP + self._PLOT_H + 28)
+        y_label = self._scene.addSimpleText("Y (pixels)")
+        y_label.setBrush(pen_text)
+        y_label.setPos(5, self._MARGIN_TOP + self._PLOT_H / 2 - 8)
+
+        self._render_traj_pixmap()
+
+        for shape in self._shapes:
+            shape['path_item'] = self._draw_shape_on_scene(shape)
+
+        self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    @staticmethod
+    def _nice_step(data_range, max_ticks):
+        raw = data_range / max(max_ticks, 1)
+        magnitude = 10 ** math.floor(math.log10(max(raw, 1e-12)))
+        residual = raw / magnitude
+        if residual <= 1.5:
+            return magnitude
+        elif residual <= 3.0:
+            return 2 * magnitude
+        elif residual <= 7.0:
+            return 5 * magnitude
+        else:
+            return 10 * magnitude
+
+    @staticmethod  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    def _rotate_point(px, py, cx, cy, angle_deg):
+        """Rotate point (px,py) around (cx,cy) by angle_deg degrees."""
+        rad = math.radians(angle_deg)
+        cos_a, sin_a = math.cos(rad), math.sin(rad)
+        dx, dy = px - cx, py - cy
+        return cx + cos_a * dx - sin_a * dy, cy + sin_a * dx + cos_a * dy
+
+    def _render_traj_pixmap(self):
+        """Render trajectories as connected lines onto a single QPixmap."""
+        if self._traj_pixmap_item and self._traj_pixmap_item.scene():
+            self._scene.removeItem(self._traj_pixmap_item)
+            self._traj_pixmap_item = None
+        rect = self._scene.sceneRect()
+        w, h = int(rect.width()), int(rect.height())
+        if w <= 0 or h <= 0:
+            return
+        pix = QPixmap(w, h)
+        pix.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        for i, (xs, ys) in enumerate(self._traj_points):
+            if self._roi_labels is not None:
+                lbl = int(self._roi_labels[i])
+                if lbl < 0:
+                    color = self._color_excluded
+                else:
+                    color = self._ROI_COLORS[lbl % len(self._ROI_COLORS)]
+            else:
+                color = self._color_default
+            pen = QPen(color, 0.5)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+
+            # Convert to scene coords and draw connected line
+            sxs = self._MARGIN_LEFT + (xs - self._x_min) / (self._x_max - self._x_min) * self._PLOT_W
+            sys_ = self._MARGIN_TOP + (ys - self._y_min) / (self._y_max - self._y_min) * self._PLOT_H
+            for j in range(len(sxs) - 1):
+                painter.drawLine(QPointF(sxs[j], sys_[j]), QPointF(sxs[j + 1], sys_[j + 1]))
+
+        painter.end()
+        self._traj_pixmap_item = self._scene.addPixmap(pix)
+        self._traj_pixmap_item.setZValue(1)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._scene.sceneRect().width() > 0:
+            self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    # --- Mouse interaction ---
+    def _clamp_to_plot(self, pos):
+        x = max(self._MARGIN_LEFT, min(pos.x(), self._MARGIN_LEFT + self._PLOT_W))
+        y = max(self._MARGIN_TOP, min(pos.y(), self._MARGIN_TOP + self._PLOT_H))
+        return QPointF(x, y)
+
+    def keyPressEvent(self, event):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        key = event.key()
+        # Delete selected shape
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            if 0 <= self._selected_shape_idx < len(self._shapes):
+                s = self._shapes.pop(self._selected_shape_idx)
+                if s['path_item'] and s['path_item'].scene():
+                    self._scene.removeItem(s['path_item'])
+                self._remove_handles()
+                self._selected_shape_idx = -1
+                self._classify_points()
+                self._render_traj_pixmap()
+                self.roi_changed.emit()
+                return
+        # Mode shortcuts
+        mode_map = {Qt.Key.Key_R: self.MODE_RECT, Qt.Key.Key_E: self.MODE_ELLIPSE,
+                    Qt.Key.Key_L: self.MODE_LINE, Qt.Key.Key_S: self.MODE_SELECT}
+        if key in mode_map:
+            self.mode_requested.emit(mode_map[key])
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        if event.button() == Qt.MouseButton.RightButton and len(self._shapes) > 0:
+            shape = self._shapes.pop()
+            if shape['path_item'] and shape['path_item'].scene():
+                self._scene.removeItem(shape['path_item'])
+            self._remove_handles()
+            self._selected_shape_idx = -1
+            self._classify_points()
+            self._render_traj_pixmap()
+            self.roi_changed.emit()
+            super().mousePressEvent(event)
+            return
+
+        if event.button() != Qt.MouseButton.LeftButton or len(self._X) == 0:
+            super().mousePressEvent(event)
+            return
+
+        pos = self._clamp_to_plot(self.mapToScene(event.pos()))
+
+        # Always check handles and shapes first, regardless of draw mode
+        handle_hit = self._hit_test_handle(pos)
+        if handle_hit is not None:
+            self._dragging_handle = handle_hit
+            self._drag_start = pos
+            super().mousePressEvent(event)
+            return
+
+        shape_idx = self._hit_test_shape(pos)
+        if shape_idx >= 0:
+            self._selected_shape_idx = shape_idx
+            self._dragging_shape = True
+            self._drag_start = pos
+            self._show_handles(shape_idx)
+            super().mousePressEvent(event)
+            return
+
+        # Clicked on empty space — deselect and start drawing (unless Select mode)
+        self._selected_shape_idx = -1
+        self._dragging_shape = False
+        self._remove_handles()
+        if self._draw_mode != self.MODE_SELECT:
+            self._drawing = True
+            self._drag_start = pos
+        super().mousePressEvent(event)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    def mouseMoveEvent(self, event):
+        pos = self._clamp_to_plot(self.mapToScene(event.pos()))
+
+        if self._dragging_handle is not None and self._drag_start is not None:
+            self._resize_shape(pos)
+        elif self._dragging_shape and self._drag_start is not None:
+            self._move_shape(pos)
+        elif self._drawing and self._drag_start is not None:
+            self._draw_preview(self._drag_start, pos)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mouseReleaseEvent(event)
+            return
+
+        if self._dragging_shape or self._dragging_handle is not None:
+            self._dragging_shape = False
+            self._dragging_handle = None
+            self._drag_start = None
+            self._sync_shape_data_coords()
+            self._classify_points()
+            self._render_traj_pixmap()
+            if self._selected_shape_idx >= 0:
+                self._show_handles(self._selected_shape_idx)
+            self.roi_changed.emit()
+        elif self._drawing:
+            self._drawing = False
+            if self._drag_start is not None:
+                end = self._clamp_to_plot(self.mapToScene(event.pos()))
+                if self._current_preview and self._current_preview.scene():
+                    self._scene.removeItem(self._current_preview)
+                    self._current_preview = None
+                dx = abs(end.x() - self._drag_start.x())
+                dy = abs(end.y() - self._drag_start.y())
+                if dx > 2 or dy > 2:
+                    shape = self._create_shape(self._drag_start, end)
+                    shape['path_item'] = self._draw_shape_on_scene(shape)
+                    self._shapes.append(shape)
+                    self._classify_points()
+                    self._render_traj_pixmap()
+                    self.roi_changed.emit()
+                self._drag_start = None
+        super().mouseReleaseEvent(event)
+
+    # --- Select mode: hit testing, move, resize ---
+    def _hit_test_shape(self, pos):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Return index of shape under pos, or -1."""
+        threshold = 8.0
+        rp = self._rotate_point
+        for i in range(len(self._shapes) - 1, -1, -1):
+            s = self._shapes[i]
+            if s['type'] == 'rect':
+                # Unrotate pos into rect's local frame
+                cx = (s['x1'] + s['x2']) / 2
+                cy = (s['y1'] + s['y2']) / 2
+                lx, ly = rp(pos.x(), pos.y(), cx, cy, -s.get('angle', 0.0))
+                r = QRectF(s['x1'] - threshold, s['y1'] - threshold,
+                           s['x2'] - s['x1'] + 2 * threshold, s['y2'] - s['y1'] + 2 * threshold)
+                if r.contains(QPointF(lx, ly)):
+                    return i
+            elif s['type'] == 'ellipse':
+                # Unrotate pos into ellipse's local frame
+                lx, ly = rp(pos.x(), pos.y(), s['cx'], s['cy'], -s.get('angle', 0.0))
+                dx = (lx - s['cx']) / max(s['rx'] + threshold, 1)
+                dy = (ly - s['cy']) / max(s['ry'] + threshold, 1)
+                if dx * dx + dy * dy <= 1.0:
+                    return i
+            elif s['type'] == 'line':
+                # Distance from point to line segment
+                lx, ly = s['p2'].x() - s['p1'].x(), s['p2'].y() - s['p1'].y()
+                l2 = lx * lx + ly * ly
+                if l2 < 1e-6:
+                    continue
+                t = max(0, min(1, ((pos.x() - s['p1'].x()) * lx + (pos.y() - s['p1'].y()) * ly) / l2))
+                proj_x = s['p1'].x() + t * lx
+                proj_y = s['p1'].y() + t * ly
+                dist = math.sqrt((pos.x() - proj_x) ** 2 + (pos.y() - proj_y) ** 2)
+                if dist <= threshold:
+                    return i
+        return -1
+
+    _ROT_HANDLE_OFFSET = 25  # pixels from shape edge to rotation handle
+
+    def _get_handles(self, shape_idx):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Return list of (handle_id, QPointF) for a shape."""
+        s = self._shapes[shape_idx]
+        rp = self._rotate_point
+        if s['type'] == 'rect':
+            cx = (s['x1'] + s['x2']) / 2
+            cy = (s['y1'] + s['y2']) / 2
+            hw = (s['x2'] - s['x1']) / 2
+            hh = (s['y2'] - s['y1']) / 2
+            angle = s.get('angle', 0.0)
+            corners = [('tl', -hw, -hh), ('tr', hw, -hh),
+                       ('bl', -hw, hh), ('br', hw, hh)]
+            handles = [(hid, QPointF(*rp(cx + lx, cy + ly, cx, cy, angle)))
+                       for hid, lx, ly in corners]
+            # Rotation handle above top-center
+            rot_x, rot_y = rp(cx, cy - hh - self._ROT_HANDLE_OFFSET, cx, cy, angle)
+            handles.append(('rot', QPointF(rot_x, rot_y)))
+            return handles
+        elif s['type'] == 'ellipse':
+            cx, cy = s['cx'], s['cy']
+            rx, ry = s['rx'], s['ry']
+            angle = s.get('angle', 0.0)
+            corners = [('tl', -rx, -ry), ('tr', rx, -ry),
+                       ('bl', -rx, ry), ('br', rx, ry)]
+            handles = [(hid, QPointF(*rp(cx + lx, cy + ly, cx, cy, angle)))
+                       for hid, lx, ly in corners]
+            rot_x, rot_y = rp(cx, cy - ry - self._ROT_HANDLE_OFFSET, cx, cy, angle)
+            handles.append(('rot', QPointF(rot_x, rot_y)))
+            return handles
+        elif s['type'] == 'line':
+            return [('p1', s['p1']), ('p2', s['p2'])]
+        return []  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    def _hit_test_handle(self, pos):
+        """Return (shape_idx, handle_id) if pos is on a handle, else None."""
+        if self._selected_shape_idx < 0:
+            return None
+        hs = self._HANDLE_SIZE + 2
+        for hid, hpos in self._get_handles(self._selected_shape_idx):
+            if abs(pos.x() - hpos.x()) <= hs and abs(pos.y() - hpos.y()) <= hs:
+                return (self._selected_shape_idx, hid)
+        return None
+
+    def _show_handles(self, shape_idx):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Draw resize handles and rotation handle for the selected shape."""
+        self._remove_handles()
+        hs = self._HANDLE_SIZE
+        s = self._shapes[shape_idx]
+        # Compute top-center (rotated) for the connecting line
+        top_center = None
+        if s['type'] == 'rect':
+            cx = (s['x1'] + s['x2']) / 2
+            cy = (s['y1'] + s['y2']) / 2
+            hh = (s['y2'] - s['y1']) / 2
+            top_center = QPointF(*self._rotate_point(cx, cy - hh, cx, cy, s.get('angle', 0.0)))
+        elif s['type'] == 'ellipse':
+            cx, cy, ry = s['cx'], s['cy'], s['ry']
+            top_center = QPointF(*self._rotate_point(cx, cy - ry, cx, cy, s.get('angle', 0.0)))
+
+        for hid, hpos in self._get_handles(shape_idx):
+            if hid == 'rot':
+                # Connecting line from top-center to rotation handle
+                if top_center is not None:
+                    line_item = self._scene.addLine(
+                        top_center.x(), top_center.y(), hpos.x(), hpos.y(),
+                        QPen(QColor(0, 220, 220, 140), 1.0, Qt.PenStyle.DashLine))
+                    line_item.setZValue(19)
+                    self._handle_items.append(line_item)
+                # Cyan circle for rotation handle
+                item = self._scene.addEllipse(
+                    QRectF(hpos.x() - hs / 2, hpos.y() - hs / 2, hs, hs),
+                    QPen(QColor(255, 255, 255, 220), 1.0),
+                    QBrush(QColor(0, 220, 220, 200)))
+            else:
+                # Yellow square for resize handles
+                item = self._scene.addRect(
+                    QRectF(hpos.x() - hs / 2, hpos.y() - hs / 2, hs, hs),
+                    QPen(QColor(255, 255, 255, 220), 1.0),
+                    QBrush(QColor(255, 255, 0, 180)))
+            item.setZValue(20)
+            self._handle_items.append(item)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    def _remove_handles(self):
+        for item in self._handle_items:
+            if item.scene():
+                self._scene.removeItem(item)
+        self._handle_items = []
+
+    def _move_shape(self, pos):
+        """Translate the selected shape by drag delta."""
+        if self._selected_shape_idx < 0 or self._drag_start is None:
+            return
+        dx = pos.x() - self._drag_start.x()
+        dy = pos.y() - self._drag_start.y()
+        self._drag_start = pos
+        s = self._shapes[self._selected_shape_idx]
+
+        if s['type'] == 'rect':
+            s['x1'] += dx; s['y1'] += dy; s['x2'] += dx; s['y2'] += dy
+        elif s['type'] == 'ellipse':
+            s['cx'] += dx; s['cy'] += dy
+        elif s['type'] == 'line':
+            s['p1'] = QPointF(s['p1'].x() + dx, s['p1'].y() + dy)
+            s['p2'] = QPointF(s['p2'].x() + dx, s['p2'].y() + dy)
+
+        # Redraw this shape
+        if s['path_item'] and s['path_item'].scene():
+            self._scene.removeItem(s['path_item'])
+        s['path_item'] = self._draw_shape_on_scene(s)
+        self._show_handles(self._selected_shape_idx)
+
+    def _resize_shape(self, pos):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Resize or rotate the selected shape by dragging a handle."""
+        if self._dragging_handle is None:
+            return
+        shape_idx, hid = self._dragging_handle
+        s = self._shapes[shape_idx]
+
+        if hid == 'rot':
+            # Rotation: compute angle from center to mouse
+            if s['type'] == 'rect':
+                cx = (s['x1'] + s['x2']) / 2
+                cy = (s['y1'] + s['y2']) / 2
+            else:  # ellipse
+                cx, cy = s['cx'], s['cy']
+            # atan2 with "up" as reference direction (0 degrees)
+            angle = math.degrees(math.atan2(pos.x() - cx, -(pos.y() - cy)))
+            # Shift key: snap to 15° increments  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+                angle = round(angle / 15.0) * 15.0
+            s['angle'] = angle
+        else:
+            pos = self._clamp_to_plot(pos)
+            if s['type'] == 'rect':
+                # Symmetric resize around center in local (unrotated) frame
+                cx = (s['x1'] + s['x2']) / 2
+                cy = (s['y1'] + s['y2']) / 2
+                lx, ly = self._rotate_point(pos.x(), pos.y(), cx, cy, -s.get('angle', 0.0))
+                hw = max(abs(lx - cx), 2.0)
+                hh = max(abs(ly - cy), 2.0)
+                s['x1'] = cx - hw; s['x2'] = cx + hw
+                s['y1'] = cy - hh; s['y2'] = cy + hh
+            elif s['type'] == 'ellipse':
+                # Symmetric resize around center in local frame
+                lx, ly = self._rotate_point(pos.x(), pos.y(), s['cx'], s['cy'],
+                                            -s.get('angle', 0.0))
+                s['rx'] = max(abs(lx - s['cx']), 2.0)
+                s['ry'] = max(abs(ly - s['cy']), 2.0)
+            elif s['type'] == 'line':
+                if hid == 'p1': s['p1'] = pos
+                elif hid == 'p2': s['p2'] = pos
+
+        if s['path_item'] and s['path_item'].scene():
+            self._scene.removeItem(s['path_item'])
+        s['path_item'] = self._draw_shape_on_scene(s)
+        self._show_handles(shape_idx)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    def _sync_shape_data_coords(self):
+        """Update data coordinate fields for all shapes from current scene coords."""
+        for s in self._shapes:
+            if s['type'] == 'line':
+                s['p1_data'] = [self._sx_to_x(s['p1'].x()), self._sy_to_y(s['p1'].y())]
+                s['p2_data'] = [self._sx_to_x(s['p2'].x()), self._sy_to_y(s['p2'].y())]
+            elif s['type'] == 'ellipse':
+                s['cx_data'] = self._sx_to_x(s['cx'])
+                s['cy_data'] = self._sy_to_y(s['cy'])
+                s['rx_data'] = s['rx'] / self._PLOT_W * (self._x_max - self._x_min)
+                s['ry_data'] = s['ry'] / self._PLOT_H * (self._y_max - self._y_min)
+            else:  # rect
+                s['x1_data'] = self._sx_to_x(s['x1'])
+                s['y1_data'] = self._sy_to_y(s['y1'])
+                s['x2_data'] = self._sx_to_x(s['x2'])
+                s['y2_data'] = self._sy_to_y(s['y2'])
+
+    # --- Shape creation and rendering ---
+    def _create_shape(self, start, end):
+        if self._draw_mode == self.MODE_LINE:
+            p1, p2 = self._extend_line_to_edges(start, end)
+            return {'type': 'line', 'p1': p1, 'p2': p2, 'path_item': None,
+                    'p1_data': [self._sx_to_x(p1.x()), self._sy_to_y(p1.y())],
+                    'p2_data': [self._sx_to_x(p2.x()), self._sy_to_y(p2.y())]}
+        elif self._draw_mode == self.MODE_ELLIPSE:
+            cx = (start.x() + end.x()) / 2
+            cy = (start.y() + end.y()) / 2
+            rx = abs(end.x() - start.x()) / 2
+            ry = abs(end.y() - start.y()) / 2
+            return {'type': 'ellipse', 'cx': cx, 'cy': cy, 'rx': rx, 'ry': ry,
+                    'angle': 0.0, 'path_item': None,  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+                    'cx_data': self._sx_to_x(cx), 'cy_data': self._sy_to_y(cy),
+                    'rx_data': rx / self._PLOT_W * (self._x_max - self._x_min),
+                    'ry_data': ry / self._PLOT_H * (self._y_max - self._y_min)}
+        else:  # Rectangle
+            x1, x2 = min(start.x(), end.x()), max(start.x(), end.x())
+            y1, y2 = min(start.y(), end.y()), max(start.y(), end.y())
+            return {'type': 'rect', 'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
+                    'angle': 0.0, 'path_item': None,  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+                    'x1_data': self._sx_to_x(x1), 'y1_data': self._sy_to_y(y1),
+                    'x2_data': self._sx_to_x(x2), 'y2_data': self._sy_to_y(y2)}
+
+    def _extend_line_to_edges(self, start, end):
+        pl = self._MARGIN_LEFT
+        pr = self._MARGIN_LEFT + self._PLOT_W
+        pt = self._MARGIN_TOP
+        pb = self._MARGIN_TOP + self._PLOT_H
+        dx = end.x() - start.x()
+        dy = end.y() - start.y()
+        length = math.sqrt(dx * dx + dy * dy)
+        if length < 1e-6:
+            return start, end
+        dx /= length
+        dy /= length
+
+        def _intersect_edge(px, py, dirx, diry):
+            candidates = []
+            if abs(dirx) > 1e-9:
+                for edge_x in (pl, pr):
+                    t = (edge_x - px) / dirx
+                    if t > 1e-6:
+                        yy = py + t * diry
+                        if pt - 0.5 <= yy <= pb + 0.5:
+                            candidates.append((t, QPointF(edge_x, max(pt, min(yy, pb)))))
+            if abs(diry) > 1e-9:
+                for edge_y in (pt, pb):
+                    t = (edge_y - py) / diry
+                    if t > 1e-6:
+                        xx = px + t * dirx
+                        if pl - 0.5 <= xx <= pr + 0.5:
+                            candidates.append((t, QPointF(max(pl, min(xx, pr)), edge_y)))
+            if candidates:
+                candidates.sort(key=lambda c: c[0])
+                return candidates[0][1]
+            return QPointF(px, py)
+
+        p1 = _intersect_edge(start.x(), start.y(), -dx, -dy)
+        p2 = _intersect_edge(end.x(), end.y(), dx, dy)
+        return p1, p2
+
+    def _draw_preview(self, start, end):
+        if self._current_preview and self._current_preview.scene():
+            self._scene.removeItem(self._current_preview)
+            self._current_preview = None
+        pen = QPen(QColor(255, 255, 0, 180), 2.0, Qt.PenStyle.DashLine)
+        if self._draw_mode == self.MODE_LINE:
+            p1, p2 = self._extend_line_to_edges(start, end)
+            self._current_preview = self._scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), pen)
+        elif self._draw_mode == self.MODE_ELLIPSE:
+            rx = abs(end.x() - start.x()) / 2
+            ry = abs(end.y() - start.y()) / 2
+            cx = (start.x() + end.x()) / 2
+            cy = (start.y() + end.y()) / 2
+            path = QPainterPath()
+            path.addEllipse(QPointF(cx, cy), rx, ry)
+            self._current_preview = self._scene.addPath(path, pen)
+        else:
+            x1, x2 = min(start.x(), end.x()), max(start.x(), end.x())
+            y1, y2 = min(start.y(), end.y()), max(start.y(), end.y())
+            self._current_preview = self._scene.addRect(QRectF(x1, y1, x2 - x1, y2 - y1), pen)
+        if self._current_preview:
+            self._current_preview.setZValue(10)
+
+    def _draw_shape_on_scene(self, shape):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        pen = QPen(QColor(255, 255, 0, 220), 2.0)
+        if shape['type'] == 'line':
+            item = self._scene.addLine(
+                shape['p1'].x(), shape['p1'].y(), shape['p2'].x(), shape['p2'].y(), pen)
+        elif shape['type'] == 'ellipse':
+            angle = shape.get('angle', 0.0)
+            path = QPainterPath()
+            path.addEllipse(QPointF(0, 0), shape['rx'], shape['ry'])
+            t = QTransform()
+            t.translate(shape['cx'], shape['cy'])
+            t.rotate(angle)
+            item = self._scene.addPath(t.map(path), pen)
+        else:  # rect
+            angle = shape.get('angle', 0.0)
+            cx = (shape['x1'] + shape['x2']) / 2
+            cy = (shape['y1'] + shape['y2']) / 2
+            hw = (shape['x2'] - shape['x1']) / 2
+            hh = (shape['y2'] - shape['y1']) / 2
+            path = QPainterPath()
+            path.addRect(QRectF(-hw, -hh, 2 * hw, 2 * hh))
+            t = QTransform()
+            t.translate(cx, cy)
+            t.rotate(angle)
+            item = self._scene.addPath(t.map(path), pen)
+        item.setZValue(5)
+        return item  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    # --- Classification (flood fill) ---
+    def _classify_points(self):
+        """Classify trajectories into ROIs using rasterized flood fill."""
+        from scipy.ndimage import label as ndimage_label, distance_transform_edt
+
+        if not self._shapes:
+            self._roi_labels = None
+            return
+
+        grid_w = int(self._PLOT_W)
+        grid_h = int(self._PLOT_H)
+        wall = np.zeros((grid_h, grid_w), dtype=bool)
+
+        for shape in self._shapes:
+            if shape['type'] == 'line':
+                self._rasterize_line(wall, shape['p1'], shape['p2'])
+            elif shape['type'] == 'ellipse':
+                self._rasterize_ellipse(wall, shape['cx'], shape['cy'],
+                                        shape['rx'], shape['ry'],
+                                        shape.get('angle', 0.0))  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            else:
+                self._rasterize_rect(wall, shape['x1'], shape['y1'],
+                                     shape['x2'], shape['y2'],
+                                     shape.get('angle', 0.0))  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+        grid, n_regions = ndimage_label(~wall)
+
+        # Precompute distance transform for wall-pixel fix
+        _, nearest_indices = distance_transform_edt(wall, return_distances=True, return_indices=True)
+        nr, nc = nearest_indices[0], nearest_indices[1]
+
+        def _label_points(xs, ys):
+            """Get grid labels for an array of data-space points."""
+            px = (xs - self._x_min) / (self._x_max - self._x_min) * self._PLOT_W
+            py = (ys - self._y_min) / (self._y_max - self._y_min) * self._PLOT_H
+            gx = np.clip(np.round(px).astype(int), 0, grid_w - 1)
+            gy = np.clip(np.round(py).astype(int), 0, grid_h - 1)
+            lbls = grid[gy, gx]
+            on_wall = lbls == 0
+            if np.any(on_wall):
+                lbls[on_wall] = grid[nr[gy[on_wall], gx[on_wall]], nc[gy[on_wall], gx[on_wall]]]
+            return np.maximum(0, lbls - 1)
+
+        if self._classify_mode == self.CLASSIFY_STRICT:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            # Strict: all points of trajectory must be in same region
+            self._roi_labels = np.full(len(self._X), -1, dtype=int)
+            for i, (xs, ys) in enumerate(self._traj_points):
+                if len(xs) == 0:
+                    continue
+                pt_labels = _label_points(np.array(xs), np.array(ys))
+                # Early-exit: check min==max instead of np.unique (faster)
+                lmin, lmax = int(pt_labels.min()), int(pt_labels.max())
+                if lmin == lmax:
+                    self._roi_labels[i] = lmin
+                # else: stays -1 (excluded)
+        else:
+            # Mean position mode
+            self._roi_labels = _label_points(self._X, self._Y).astype(int)
+
+        # Reorder by ascending mean X (only for assigned labels >= 0)
+        valid_mask = self._roi_labels >= 0
+        if np.any(valid_mask):
+            unique_labels = np.unique(self._roi_labels[valid_mask])
+            if len(unique_labels) > 1:
+                means = np.array([np.mean(self._X[(self._roi_labels == lbl) & valid_mask])
+                                  for lbl in unique_labels])
+                order = np.argsort(means)
+                remap = np.zeros(int(unique_labels.max()) + 1, dtype=int)
+                for new_lbl, idx in enumerate(order):
+                    remap[unique_labels[idx]] = new_lbl
+                assigned = self._roi_labels >= 0
+                self._roi_labels[assigned] = remap[self._roi_labels[assigned]]
+
+    def _rasterize_line(self, wall, p1, p2):
+        x0 = p1.x() - self._MARGIN_LEFT
+        y0 = p1.y() - self._MARGIN_TOP
+        x1 = p2.x() - self._MARGIN_LEFT
+        y1 = p2.y() - self._MARGIN_TOP
+        dx, dy = x1 - x0, y1 - y0
+        steps = max(int(max(abs(dx), abs(dy))), 1)
+        xs = np.round(np.linspace(x0, x1, steps + 1)).astype(int)
+        ys = np.round(np.linspace(y0, y1, steps + 1)).astype(int)
+        gh, gw = wall.shape
+        for di, dj in [(0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)]:
+            rs = np.clip(ys + di, 0, gh - 1)
+            cs = np.clip(xs + dj, 0, gw - 1)
+            wall[rs, cs] = True
+
+    def _rasterize_ellipse(self, wall, cx, cy, rx, ry, angle=0.0):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        cx0 = cx - self._MARGIN_LEFT
+        cy0 = cy - self._MARGIN_TOP
+        gh, gw = wall.shape
+        n_pts = max(int(2 * math.pi * max(rx, ry)), 200)
+        angles = np.linspace(0, 2 * math.pi, n_pts, endpoint=False)
+        local_xs = rx * np.cos(angles)
+        local_ys = ry * np.sin(angles)
+        # Apply rotation
+        rad = math.radians(angle)
+        cos_a, sin_a = math.cos(rad), math.sin(rad)
+        xs = np.round(cx0 + local_xs * cos_a - local_ys * sin_a).astype(int)
+        ys = np.round(cy0 + local_xs * sin_a + local_ys * cos_a).astype(int)
+        for di, dj in [(0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)]:
+            rs = np.clip(ys + di, 0, gh - 1)
+            cs = np.clip(xs + dj, 0, gw - 1)
+            wall[rs, cs] = True  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    def _rasterize_rect(self, wall, x1, y1, x2, y2, angle=0.0):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+        hw = (x2 - x1) / 2
+        hh = (y2 - y1) / 2
+        rp = self._rotate_point
+        # Compute rotated corners
+        c0 = QPointF(*rp(cx - hw, cy - hh, cx, cy, angle))
+        c1 = QPointF(*rp(cx + hw, cy - hh, cx, cy, angle))
+        c2 = QPointF(*rp(cx + hw, cy + hh, cx, cy, angle))
+        c3 = QPointF(*rp(cx - hw, cy + hh, cx, cy, angle))
+        for p1, p2 in [(c0, c1), (c1, c2), (c2, c3), (c3, c0)]:
+            self._rasterize_line(wall, p1, p2)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    # --- Public API ---
+    def _clear_shapes(self):
+        for shape in self._shapes:
+            if shape['path_item'] and shape['path_item'].scene():
+                self._scene.removeItem(shape['path_item'])
+        self._shapes = []
+        self._remove_handles()
+        self._selected_shape_idx = -1
+        if self._current_preview and self._current_preview.scene():
+            self._scene.removeItem(self._current_preview)
+            self._current_preview = None
+        self._roi_labels = None
+
+    def clear_roi(self):
+        self._clear_shapes()
+        self._render_traj_pixmap()
+        self.roi_changed.emit()
+
+    def get_roi_data(self):
+        result = {
+            'X': self._X,
+            'Y': self._Y,
+            'traj_indices': self._traj_indices,
+            'labels': self._roi_labels,
+        }
+        if self._roi_labels is not None:
+            valid = self._roi_labels >= 0
+            unique_labels = sorted(set(self._roi_labels[valid].tolist())) if np.any(valid) else []
+            result['n_rois'] = len(unique_labels)
+            result['rois'] = {
+                r: np.where(self._roi_labels == r)[0] for r in unique_labels
+            }
+            n_excluded = int(np.sum(self._roi_labels < 0))
+            result['n_excluded'] = n_excluded
+        else:
+            result['n_rois'] = 1
+            result['rois'] = {0: np.arange(len(self._X))}
+            result['n_excluded'] = 0
+        return result
+
+    def get_shapes_data(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        result = []
+        for shape in self._shapes:
+            if shape['type'] == 'line':
+                result.append({'type': 'line',
+                               'p1': shape['p1_data'], 'p2': shape['p2_data']})
+            elif shape['type'] == 'ellipse':
+                result.append({'type': 'ellipse',
+                               'cx': shape['cx_data'], 'cy': shape['cy_data'],
+                               'rx': shape['rx_data'], 'ry': shape['ry_data'],
+                               'angle': shape.get('angle', 0.0)})
+            else:
+                result.append({'type': 'rect',
+                               'x1': shape['x1_data'], 'y1': shape['y1_data'],
+                               'x2': shape['x2_data'], 'y2': shape['y2_data'],
+                               'angle': shape.get('angle', 0.0)})
+        return result  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    def set_shapes_data(self, shapes_data):
+        self._clear_shapes()
+        for sd in shapes_data:
+            if sd['type'] == 'line':
+                p1 = QPointF(self._x_to_sx(sd['p1'][0]), self._y_to_sy(sd['p1'][1]))
+                p2 = QPointF(self._x_to_sx(sd['p2'][0]), self._y_to_sy(sd['p2'][1]))
+                shape = {'type': 'line', 'p1': p1, 'p2': p2, 'path_item': None,
+                         'p1_data': sd['p1'], 'p2_data': sd['p2']}
+            elif sd['type'] == 'ellipse':
+                cx = self._x_to_sx(sd['cx'])
+                cy = self._y_to_sy(sd['cy'])
+                rx = sd['rx'] / (self._x_max - self._x_min) * self._PLOT_W
+                ry = sd['ry'] / (self._y_max - self._y_min) * self._PLOT_H
+                shape = {'type': 'ellipse', 'cx': cx, 'cy': cy, 'rx': rx, 'ry': ry,
+                         'angle': sd.get('angle', 0.0), 'path_item': None,  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+                         'cx_data': sd['cx'], 'cy_data': sd['cy'],
+                         'rx_data': sd['rx'], 'ry_data': sd['ry']}
+            else:
+                x1 = self._x_to_sx(sd['x1'])
+                y1 = self._y_to_sy(sd['y1'])
+                x2 = self._x_to_sx(sd['x2'])
+                y2 = self._y_to_sy(sd['y2'])
+                shape = {'type': 'rect', 'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
+                         'angle': sd.get('angle', 0.0), 'path_item': None,  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+                         'x1_data': sd['x1'], 'y1_data': sd['y1'],
+                         'x2_data': sd['x2'], 'y2_data': sd['y2']}
+            shape['path_item'] = self._draw_shape_on_scene(shape)
+            self._shapes.append(shape)
+        if self._shapes:
+            self._classify_points()
+            self._render_traj_pixmap()
+            self.roi_changed.emit()
+    # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+
 # ---------------------------------------------------------------------------
 def _open_url(url: str):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-22
     """Open a URL in the default browser, with WSL2 and native Windows support."""
@@ -1617,6 +2697,111 @@ class GeminiChatWorker(QThread):  # Modified by Claude (claude-opus-4-6, Anthrop
             return "Network error. Please check your internet connection and try again."
         return f"Unexpected error: {msg}"
     # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20 17:00
+
+
+# ---------------------------------------------------------------------------  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+# Vertical range slider — dual-handle slider for min/max selection
+# ---------------------------------------------------------------------------
+class VRangeSlider(QWidget):
+    """Vertical slider with two draggable handles (low and high)."""
+    range_changed = pyqtSignal(float, float)  # emits (low_frac, high_frac) in [0, 1]
+
+    _HANDLE_H = 8   # handle half-height in pixels
+    _TRACK_W = 6    # track width
+    _MARGIN = 12    # top/bottom margin for handles
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(30)
+        self.setMinimumHeight(100)
+        self._low = 0.0   # fraction [0, 1]
+        self._high = 1.0
+        self._dragging = None  # 'low', 'high', or None
+
+    def set_range(self, low, high):
+        self._low = max(0.0, min(1.0, low))
+        self._high = max(self._low, min(1.0, high))
+        self.update()
+
+    def low(self):
+        return self._low
+
+    def high(self):
+        return self._high
+
+    def _y_to_frac(self, y):
+        """Convert pixel y to fraction (top=1, bottom=0)."""
+        usable = self.height() - 2 * self._MARGIN
+        if usable <= 0:
+            return 0.5
+        return max(0.0, min(1.0, 1.0 - (y - self._MARGIN) / usable))
+
+    def _frac_to_y(self, frac):
+        """Convert fraction to pixel y."""
+        usable = self.height() - 2 * self._MARGIN
+        return self._MARGIN + (1.0 - frac) * usable
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = self.width()
+        cx = w // 2
+
+        # Track background
+        track_x = cx - self._TRACK_W // 2
+        y_top = self._MARGIN
+        y_bot = self.height() - self._MARGIN
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(60, 60, 60))
+        painter.drawRoundedRect(QRectF(track_x, y_top, self._TRACK_W, y_bot - y_top), 3, 3)
+
+        # Active range highlight
+        y_high = self._frac_to_y(self._high)
+        y_low = self._frac_to_y(self._low)
+        painter.setBrush(QColor(80, 160, 255, 160))
+        painter.drawRect(QRectF(track_x, y_high, self._TRACK_W, y_low - y_high))
+
+        # Handles
+        for frac, color in [(self._high, QColor(100, 200, 255)),
+                            (self._low, QColor(100, 200, 255))]:
+            y = self._frac_to_y(frac)
+            painter.setBrush(color)
+            painter.setPen(QPen(QColor(200, 200, 200), 1.0))
+            painter.drawRoundedRect(QRectF(2, y - self._HANDLE_H / 2,
+                                           w - 4, self._HANDLE_H), 3, 3)
+
+        painter.end()
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        y = event.pos().y()
+        y_low = self._frac_to_y(self._low)
+        y_high = self._frac_to_y(self._high)
+        # Pick closest handle
+        d_low = abs(y - y_low)
+        d_high = abs(y - y_high)
+        if d_low < d_high:
+            self._dragging = 'low'
+        else:
+            self._dragging = 'high'
+
+    def mouseMoveEvent(self, event):
+        if self._dragging is None:
+            return
+        frac = self._y_to_frac(event.pos().y())
+        if self._dragging == 'low':
+            self._low = min(frac, self._high)
+        else:
+            self._high = max(frac, self._low)
+        self.update()
+        self.range_changed.emit(self._low, self._high)
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging is not None:
+            self._dragging = None
+            self.range_changed.emit(self._low, self._high)
+    # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
 
 # ---------------------------------------------------------------------------
@@ -2089,7 +3274,64 @@ class FreeTraceGUI(QMainWindow):
                 "histogram to estimate H per diffusion state as a post-analysis diagnostic."
             ),
         },
-    ]  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
+        {  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            "keywords": ["roi", "region of interest", "spatial", "roi tab",
+                         "rectangle", "ellipse", "line", "draw shape",
+                         "classification", "strict containment", "mean position"],
+            "question": "What is the ROI tab and how does spatial ROI selection work?",
+            "answer": (
+                "The ROI tab lets you select trajectories by spatial region. Load a _traces.csv "
+                "(optionally with _diffusion.csv) and draw shapes (rectangle, ellipse, or line) "
+                "on the trajectory plot. Each shape boundary divides the space via flood fill into "
+                "regions labelled roi0, roi1, etc. Two classification modes: 'Mean Position' classifies "
+                "by trajectory centroid, 'Strict Containment' requires all points in the same region "
+                "(otherwise excluded). Shapes can be moved, resized, and rotated. Press R/E/L/S to "
+                "switch modes, Delete to remove a selected shape, hold Shift while rotating for 15° "
+                "snapping. If diffusion data is loaded, the stats table shows per-ROI mean H and K. "
+                "Export saves per-ROI _traces.csv and _diffusion.csv files."
+            ),
+        },
+        {
+            "keywords": ["imagej", "fiji", "roi file", ".roi", ".zip",
+                         "load roi", "import roi"],
+            "question": "Can I load ImageJ Fiji ROI files?",
+            "answer": (
+                "Yes. The 'Load ROI' button in the ROI tab accepts ImageJ/Fiji .roi files (single ROI) "
+                "and .zip files containing multiple ROIs (as exported by ImageJ's ROI Manager). "
+                "Supported ROI types: rectangle, oval, line, rotated ellipse (subtype ELLIPSE), and "
+                "rotated rectangle (subtype ROTATED_RECT). Unsupported types like polygon, freehand, "
+                "or polyline are skipped with a count shown in the info label. The coordinates are "
+                "in image pixel space, matching FreeTrace's trajectory coordinate system."
+            ),
+        },
+        {  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            "keywords": ["viz", "visualization", "visualisation", "colour", "color",
+                         "color map", "colormap", "colourmap", "trajectory color",
+                         "trajectory colour", "hurst color", "K color", "jet", "viridis"],
+            "question": "What does the Viz tab do?",
+            "answer": (
+                "The Viz tab renders all trajectories on a spatial plot coloured by a diffusion "
+                "property — either H (Hurst exponent) or log K (log₁₀ diffusion coefficient). "
+                "Load a _traces.csv + _diffusion.csv pair, then choose 'Color by' (H or log K) "
+                "and a colormap (Jet or Viridis). The min/max range defaults to the 2.5th–97.5th "
+                "percentile and can be adjusted with the spinboxes or the vertical range slider "
+                "on the left of the canvas. The colour bar on the right shows the value mapping."
+            ),
+        },
+        {
+            "keywords": ["viz save", "save viz", "save trajectory", "export viz",
+                         "save image", "save png", "high resolution", "hi-res",
+                         "transparent background", "transparent"],
+            "question": "How do I save the Viz trajectory map?",
+            "answer": (
+                "Click the 'Save' button in the Viz tab controls row. The image is exported as "
+                "a PNG with transparent background at high resolution (at least 2048 px on the "
+                "shorter side). The saved image contains only the coloured trajectories and the "
+                "colour bar with tick labels — no grid, axis lines, or axis labels are included, "
+                "so it can be overlaid on other images or used in presentations."
+            ),
+        },
+    ]  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
     def _build_chat_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20 18:00
         widget = QWidget()
@@ -2444,8 +3686,8 @@ class FreeTraceGUI(QMainWindow):
         self._chat_history.clear()
     # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20 18:00
 
-    # ---- Analysis tab (sub-tabs: Class | Basic Stats | Adv Stats) --------
-    def _build_analysis_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+    # ---- Analysis tab (sub-tabs: Class | ROI | Basic Stats | Adv Stats) ----
+    def _build_analysis_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2454,11 +3696,13 @@ class FreeTraceGUI(QMainWindow):
         # Sub-tab widget inside Analysis
         self._analysis_tabs = QTabWidget()
         self._analysis_tabs.setObjectName("analysisTabs")
-        self._analysis_tabs.addTab(self._build_help_tab(), "Help")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        self._analysis_tabs.addTab(self._build_help_tab(), "Help")
         self._analysis_tabs.addTab(self._build_class_tab(), "Class")
+        self._analysis_tabs.addTab(self._build_roi_tab(), "ROI")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
         self._analysis_tabs.addTab(self._build_basic_stats_tab(), "Basic Stats")
         self._analysis_tabs.addTab(self._build_adv_stats_tab(), "Adv Stats")
-        self._analysis_tabs.currentChanged.connect(self._on_analysis_tab_changed)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        self._analysis_tabs.addTab(self._build_viz_tab(), "Viz")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        self._analysis_tabs.currentChanged.connect(self._on_analysis_tab_changed)
         layout.addWidget(self._analysis_tabs)
 
         return widget
@@ -2526,6 +3770,15 @@ class FreeTraceGUI(QMainWindow):
             "<p><b>Class tab</b> — Requires both <code>_diffusion.csv</code> and "
             "<code>_traces.csv</code>. Select either file; the other is loaded automatically. "
             "Multiple datasets can be loaded at once.</p>"
+            "<p><b>ROI tab</b> — Requires <code>_traces.csv</code>; "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            "<code>_diffusion.csv</code> is optional. Draw rectangles, ellipses, or lines "
+            "on the spatial trajectory plot to define regions of interest (ROIs). "
+            "Shapes can be moved, resized, and rotated by clicking on them "
+            "(in any drawing mode or Select mode). Two classification modes: "
+            "<i>Mean Position</i> (classify by trajectory centroid) and "
+            "<i>Strict Containment</i> (all points must lie in the same ROI). "
+            "If diffusion data is available, the H-K scatter is colored by ROI. "
+            "Export filtered <code>_traces.csv</code> and <code>_diffusion.csv</code> per ROI.</p>"
             "<p><b>Basic Stats tab</b> — Requires <code>_traces.csv</code>; "
             "<code>_diffusion.csv</code> is optional. If only traces are available, "
             "all trajectory-based plots (jump distance, duration, EA-SD, angles) work normally. "
@@ -2550,6 +3803,49 @@ class FreeTraceGUI(QMainWindow):
             "<p><b>Gating</b> — Draw boundaries on the H-K scatter plot to select subsets of "
             "trajectories. Gated trajectories can be exported or further analysed.</p>"
             "<p><b>Load Boundary</b> — Import a previously saved gating boundary.</p>"
+            "<h3 style='color:#66ccff;'>ROI Tab</h3>"  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            "<p>The ROI tab allows spatial selection of trajectories by region of interest. "
+            "Trajectories are rendered as connected lines on the plot. Draw shapes to divide "
+            "the spatial domain into ROIs (roi0, roi1, ...). Four modes:</p>"
+            "<ul>"
+            "<li><b>Rectangle</b> — Click and drag to draw a rectangular ROI.</li>"
+            "<li><b>Ellipse</b> — Click and drag to draw an elliptical ROI.</li>"
+            "<li><b>Line</b> — Click and drag to draw a dividing line; endpoints auto-extend "
+            "to the plot edges, splitting the space in two.</li>"
+            "<li><b>Select</b> — Click on a shape to select it without drawing new shapes.</li>"
+            "</ul>"
+            "<p><b>Keyboard shortcuts:</b> Press <b>R</b>, <b>E</b>, <b>L</b>, or <b>S</b> "
+            "to switch to Rectangle, Ellipse, Line, or Select mode. "
+            "Press <b>Delete</b> or <b>Backspace</b> to remove the currently selected shape.</p>"
+            "<p><b>Selecting &amp; editing shapes:</b> Click on any existing shape (in any mode) "
+            "to select it. Yellow square handles appear at the corners for resizing, "
+            "and a cyan circle handle above the shape for rotating. Drag the shape body "
+            "to move it. Resize is symmetric around the shape centre.</p>"
+            "<p><b>Rotation:</b> Drag the cyan rotation handle to rotate rectangles and ellipses "
+            "around their centre. Hold <b>Shift</b> while rotating to snap to 15° increments. "
+            "The rotation angle is preserved when saving/loading ROI "
+            "boundaries. Lines do not support rotation (use their endpoint handles instead).</p>"
+            "<p>Right-click removes the last drawn shape. Multiple shapes further subdivide "
+            "the space.</p>"
+            "<p><b>Classification modes:</b></p>"
+            "<ul>"
+            "<li><b>Mean Position</b> — Each trajectory is classified by its centroid "
+            "(mean x, y). Fast and simple.</li>"
+            "<li><b>Strict Containment</b> — A trajectory is assigned to a ROI only if "
+            "<i>all</i> its points lie within the same region. Trajectories crossing "
+            "ROI boundaries are excluded (shown dimmed, labelled 'excluded' in stats).</li>"
+            "</ul>"
+            "<p>If <code>_diffusion.csv</code> is loaded, the right panel shows an "
+            "H-K scatter plot coloured by ROI assignment, and the stats table includes "
+            "per-ROI mean H and mean K values. Excluded trajectories appear dimmed.</p>"
+            "<p><b>Export ROI</b> — Saves per-ROI <code>_traces.csv</code> and "
+            "<code>_diffusion.csv</code> (if available), plus <code>roi_boundaries.json</code> "
+            "(including shape type, coordinates, and rotation angle).</p>"
+            "<p><b>Load ROI</b> — Import shapes from a FreeTrace <code>roi_boundaries.json</code>, "
+            "an ImageJ/Fiji <code>.roi</code> file (single ROI), or a <code>.zip</code> file "
+            "containing multiple ImageJ ROIs. Supported ImageJ ROI types: rectangle, oval, line, "
+            "rotated ellipse, and rotated rectangle. Unsupported types (polygon, freehand, etc.) "
+            "are skipped with a warning.</p>"
             "<h3 style='color:#66ccff;'>Basic Stats Tab</h3>"
             "<p><b>H &amp; K distributions</b> — Per-trajectory Hurst exponent and diffusion "
             "coefficient (requires <code>_diffusion.csv</code>). "
@@ -2693,6 +3989,25 @@ class FreeTraceGUI(QMainWindow):
             "against short trajectory lengths. When the NN H distribution "
             "shows a strong peak at H = 0.5 while the Cauchy Ĥ deviates from "
             "0.5, short-trajectory bias in the NN estimate is a likely cause.</p>"
+            "<h3 style='color:#66ccff;'>Viz Tab</h3>"  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            "<p>The Viz tab provides trajectory visualisation coloured by diffusion "
+            "properties. Load a FreeTrace output pair (<code>_traces.csv</code> + "
+            "<code>_diffusion.csv</code>) to render all trajectories on a spatial plot.</p>"
+            "<p><b>Color by</b> — Choose between <b>H</b> (Hurst exponent) or "
+            "<b>log K</b> (log₁₀ of the diffusion coefficient). Each trajectory "
+            "is drawn in a colour corresponding to its value.</p>"
+            "<p><b>Colormap</b> — Select from <b>Jet</b> (blue → red) or "
+            "<b>Viridis</b> (purple → yellow). The colour bar on the right of the "
+            "canvas shows the mapping.</p>"
+            "<p><b>Min / Max range</b> — Controls which value range is mapped to the "
+            "full colour scale. The vertical range slider on the left of the canvas "
+            "and the Min/Max spinboxes are synchronised. Default range: 2.5th–97.5th "
+            "percentile of the data. Values outside the range are clamped to the "
+            "endpoint colours.</p>"
+            "<p><b>Save</b> — Export the current view as a high-resolution PNG with "
+            "transparent background (≥ 2048 px). The saved image contains only the "
+            "coloured trajectories and the colour bar with tick labels — no grid, "
+            "axes, or axis labels.</p>"
             "<h3 style='color:#66ccff;'>Common Normalisation</h3>"
             "<p>When enabled, all datasets share the same bin edges and the y-axis is "
             "normalised to the dataset with the most data points. The largest dataset "
@@ -2749,12 +4064,12 @@ class FreeTraceGUI(QMainWindow):
         toolbar.addWidget(self._analysis_export_btn)
 
         toolbar.addStretch()
-
-        self._analysis_info_label = QLabel("Draw a boundary on the H-K plot to classify trajectories.")
-        self._analysis_info_label.setStyleSheet("color:#888;")
-        toolbar.addWidget(self._analysis_info_label)
-
         layout.addLayout(toolbar)
+
+        self._analysis_info_label = QLabel("Draw a boundary on the H-K plot to classify trajectories.")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        self._analysis_info_label.setStyleSheet("color:#888; padding-left:4px;")
+        self._analysis_info_label.setWordWrap(True)
+        layout.addWidget(self._analysis_info_label)
 
         # Vertical splitter: top = two canvases, bottom = stats
         main_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -2818,6 +4133,135 @@ class FreeTraceGUI(QMainWindow):
 
         return widget
 
+    # ---- ROI sub-tab (spatial region of interest) -------------------------  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    def _build_roi_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(4)
+
+        # Toolbar row
+        toolbar = QHBoxLayout()
+
+        self._roi_load_btn = QPushButton("Load Data")
+        self._roi_load_btn.clicked.connect(self._on_roi_load_data)
+        toolbar.addWidget(self._roi_load_btn)
+
+        # Shape mode selector
+        mode_label = QLabel("Shape:")
+        mode_label.setStyleSheet("color:#aaa;")
+        toolbar.addWidget(mode_label)
+        self._roi_mode_combo = QComboBox()
+        self._roi_mode_combo.addItems([ROICanvas.MODE_RECT, ROICanvas.MODE_ELLIPSE,
+                                       ROICanvas.MODE_LINE, ROICanvas.MODE_SELECT])  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        self._roi_mode_combo.currentTextChanged.connect(self._on_roi_mode_changed)
+        self._roi_mode_combo.setFixedWidth(110)
+        toolbar.addWidget(self._roi_mode_combo)
+
+        # Classification mode selector
+        classify_label = QLabel("Classify:")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        classify_label.setStyleSheet("color:#aaa;")
+        toolbar.addWidget(classify_label)
+        self._roi_classify_combo = QComboBox()
+        self._roi_classify_combo.addItems([ROICanvas.CLASSIFY_MEAN, ROICanvas.CLASSIFY_STRICT])
+        self._roi_classify_combo.currentTextChanged.connect(self._on_roi_classify_mode_changed)
+        self._roi_classify_combo.setFixedWidth(160)
+        toolbar.addWidget(self._roi_classify_combo)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+        self._roi_clear_btn = QPushButton("Clear ROI")
+        self._roi_clear_btn.clicked.connect(self._on_roi_clear)
+        toolbar.addWidget(self._roi_clear_btn)
+
+        self._roi_load_boundary_btn = QPushButton("Load ROI")
+        self._roi_load_boundary_btn.clicked.connect(self._on_roi_load_boundary)
+        toolbar.addWidget(self._roi_load_boundary_btn)
+
+        self._roi_export_btn = QPushButton("Export ROI")
+        self._roi_export_btn.clicked.connect(self._on_roi_export)
+        toolbar.addWidget(self._roi_export_btn)
+
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        self._roi_info_label = QLabel("Draw shapes on the trajectory plot to define spatial ROIs.")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        self._roi_info_label.setStyleSheet("color:#888; padding-left:4px;")
+        self._roi_info_label.setWordWrap(True)
+        layout.addWidget(self._roi_info_label)
+
+        # Vertical splitter: top = canvases, bottom = stats
+        main_splitter = QSplitter(Qt.Orientation.Vertical)
+
+        # Top: two canvases side by side (ROI scatter + H-K colored by ROI)
+        canvas_splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # ROI canvas (left) with title
+        roi_container = QWidget()
+        roi_layout = QVBoxLayout(roi_container)
+        roi_layout.setContentsMargins(0, 0, 0, 0)
+        roi_layout.setSpacing(2)
+        roi_title = QLabel("Trajectory Positions — Draw Shapes to Define ROIs")
+        roi_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        roi_title.setStyleSheet("color:#ccc; font-size:12px; font-weight:bold; padding:4px;")
+        roi_layout.addWidget(roi_title)
+        self._roi_canvas = ROICanvas()
+        self._roi_canvas.roi_changed.connect(self._on_roi_changed)
+        self._roi_canvas.mode_requested.connect(self._roi_mode_combo.setCurrentText)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        self._roi_canvas.setMinimumSize(300, 250)
+        roi_layout.addWidget(self._roi_canvas)
+        canvas_splitter.addWidget(roi_container)
+
+        # H-K scatter colored by ROI (right) — only visible when _diffusion.csv loaded
+        hk_roi_container = QWidget()
+        hk_roi_layout = QVBoxLayout(hk_roi_container)
+        hk_roi_layout.setContentsMargins(0, 0, 0, 0)
+        hk_roi_layout.setSpacing(2)
+        self._roi_hk_title = QLabel("H-K Scatter Colored by ROI")
+        self._roi_hk_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._roi_hk_title.setStyleSheet("color:#ccc; font-size:12px; font-weight:bold; padding:4px;")
+        hk_roi_layout.addWidget(self._roi_hk_title)
+        self._roi_hk_canvas = QGraphicsView()
+        self._roi_hk_canvas.setStyleSheet("background:#1a1a1a; border:none;")
+        self._roi_hk_canvas.setMinimumSize(300, 250)
+        self._roi_hk_scene = QGraphicsScene()
+        self._roi_hk_canvas.setScene(self._roi_hk_scene)
+        self._roi_hk_canvas.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._roi_hk_canvas.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._roi_hk_canvas.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        hk_roi_layout.addWidget(self._roi_hk_canvas)
+        canvas_splitter.addWidget(hk_roi_container)
+
+        canvas_splitter.setSizes([500, 500])
+        main_splitter.addWidget(canvas_splitter)
+
+        # Bottom: stats panel
+        stats_scroll = QScrollArea()
+        stats_scroll.setWidgetResizable(True)
+        stats_widget = QWidget()
+        self._roi_stats_layout = QVBoxLayout(stats_widget)
+        self._roi_stats_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        self._roi_stats_label = QLabel(
+            "No data loaded.\n\nClick 'Load Data' to load trajectory data, "
+            "then draw shapes to define ROIs.")
+        self._roi_stats_label.setWordWrap(True)
+        self._roi_stats_label.setStyleSheet("color:#aaa; font-size:13px; padding:8px;")
+        self._roi_stats_layout.addWidget(self._roi_stats_label)
+
+        stats_scroll.setWidget(stats_widget)
+        stats_scroll.setMinimumHeight(80)
+        main_splitter.addWidget(stats_scroll)
+
+        main_splitter.setSizes([500, 150])
+        main_splitter.setStretchFactor(0, 3)
+        main_splitter.setStretchFactor(1, 1)
+        layout.addWidget(main_splitter)
+
+        # ROI-specific data storage
+        self._roi_datasets = []  # list of dicts: video_name, traces_df, diffusion_df (optional)
+
+        return widget
+    # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
     # ---- Basic Stats sub-tab ---------------------------------------------
     def _build_basic_stats_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         widget = QWidget()
@@ -2877,6 +4321,11 @@ class FreeTraceGUI(QMainWindow):
         toolbar.addStretch()
         layout.addLayout(toolbar)
 
+        self._stats_info_label = QLabel("Click 'Load Data' to load trajectory data.")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        self._stats_info_label.setStyleSheet("color:#888; padding-left:4px;")
+        self._stats_info_label.setWordWrap(True)
+        layout.addWidget(self._stats_info_label)
+
         # Scroll area for plots
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -2918,11 +4367,18 @@ class FreeTraceGUI(QMainWindow):
             self._load_stats_data_from_file(p)
         self._stats_datasets.sort(key=lambda ds: ds['video_name'])
         n = len(self._stats_datasets)
-        if n > 0:
+        if n > 0:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
             has_diff = sum(1 for ds in self._stats_datasets if ds['diffusion_df'] is not None)
-            self._stats_status_label.setText(
-                f"Loaded {n} video(s) ({has_diff} with diffusion data)."
-            )
+            total_traj = sum(ds['traces_df']['traj_idx'].nunique() for ds in self._stats_datasets)
+            if n == 1:
+                fname = self._stats_datasets[0]['video_name']
+                self._stats_info_label.setText(
+                    f"Loaded {total_traj} trajectories from '{fname}'"
+                    f" ({has_diff} with diffusion data).")
+            else:
+                self._stats_info_label.setText(
+                    f"Loaded {total_traj} trajectories from {n} videos"
+                    f" ({has_diff} with diffusion data).")
 
     def _load_stats_data_from_file(self, selected_path):
         """Load data for Basic Stats — accepts _traces.csv (required), _diffusion.csv (optional)."""
@@ -3577,6 +5033,11 @@ class FreeTraceGUI(QMainWindow):
         toolbar.addStretch()
         layout.addLayout(toolbar)
 
+        self._adv_stats_info_label = QLabel("Click 'Load Data' to load trajectory data.")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        self._adv_stats_info_label.setStyleSheet("color:#888; padding-left:4px;")
+        self._adv_stats_info_label.setWordWrap(True)
+        layout.addWidget(self._adv_stats_info_label)
+
         # Scroll area for plots
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -3604,6 +5065,660 @@ class FreeTraceGUI(QMainWindow):
 
         return widget
 
+    # --- Viz Tab ---------------------------------------------------------------
+    _VIZ_COLORMAPS = {  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        "Jet": [
+            (0.00, (0, 0, 143)),
+            (0.12, (0, 0, 255)),
+            (0.37, (0, 255, 255)),
+            (0.50, (0, 255, 0)),
+            (0.63, (255, 255, 0)),
+            (0.87, (255, 0, 0)),
+            (1.00, (128, 0, 0)),
+        ],
+        "Viridis": [
+            (0.00, (68, 1, 84)),
+            (0.13, (72, 35, 116)),
+            (0.25, (64, 67, 135)),
+            (0.38, (52, 94, 141)),
+            (0.50, (33, 144, 140)),
+            (0.63, (42, 176, 110)),
+            (0.75, (121, 209, 81)),
+            (0.87, (189, 222, 38)),
+            (1.00, (253, 231, 37)),
+        ],
+    }
+
+    def _build_viz_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(4)
+
+        # Top toolbar: Load Data + Clear (shared across all Viz panels)
+        toolbar = QHBoxLayout()
+        self._viz_load_btn = QPushButton("Load Data")
+        self._viz_load_btn.clicked.connect(self._on_viz_load_data)
+        toolbar.addWidget(self._viz_load_btn)
+        self._viz_clear_btn = QPushButton("Clear")
+        self._viz_clear_btn.clicked.connect(self._on_viz_clear)
+        toolbar.addWidget(self._viz_clear_btn)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        self._viz_info_label = QLabel("Load _traces.csv + _diffusion.csv to visualise trajectories.")
+        self._viz_info_label.setStyleSheet("color:#888; padding-left:4px;")
+        self._viz_info_label.setWordWrap(True)
+        layout.addWidget(self._viz_info_label)
+
+        # Scrollable area for visualization panels
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background:#1e1e1e; border:none;")
+        scroll_widget = QWidget()
+        self._viz_panel_layout = QVBoxLayout(scroll_widget)
+        self._viz_panel_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._viz_panel_layout.setContentsMargins(0, 0, 0, 0)
+        self._viz_panel_layout.setSpacing(4)
+
+        # --- Panel 1: Trajectory Color Map ---
+        section = CollapsibleSection("Trajectory Color Map")
+        section.set_font_size(12)
+
+        # Controls row: Color by, Colormap, Min spin, Max spin
+        ctrl_row = QHBoxLayout()
+        ctrl_row.addWidget(QLabel("Color by:"))
+        self._viz_color_combo = QComboBox()
+        self._viz_color_combo.addItems(["H", "log K"])
+        self._viz_color_combo.currentTextChanged.connect(self._on_viz_color_changed)
+        self._viz_color_combo.setFixedWidth(80)
+        ctrl_row.addWidget(self._viz_color_combo)
+        ctrl_row.addWidget(QLabel("Colormap:"))
+        self._viz_cmap_combo = QComboBox()
+        self._viz_cmap_combo.addItems(list(self._VIZ_COLORMAPS.keys()))
+        self._viz_cmap_combo.currentTextChanged.connect(self._on_viz_cmap_changed)
+        self._viz_cmap_combo.setFixedWidth(90)
+        ctrl_row.addWidget(self._viz_cmap_combo)
+        ctrl_row.addSpacing(12)
+        ctrl_row.addWidget(QLabel("Min:"))
+        self._viz_min_spin = QDoubleSpinBox()
+        self._viz_min_spin.setRange(-20.0, 20.0)
+        self._viz_min_spin.setDecimals(2)
+        self._viz_min_spin.setSingleStep(0.05)
+        self._viz_min_spin.setValue(0.0)
+        self._viz_min_spin.setFixedWidth(75)
+        self._viz_min_spin.valueChanged.connect(self._on_viz_spin_changed)
+        ctrl_row.addWidget(self._viz_min_spin)
+        ctrl_row.addWidget(QLabel("Max:"))
+        self._viz_max_spin = QDoubleSpinBox()
+        self._viz_max_spin.setRange(-20.0, 20.0)
+        self._viz_max_spin.setDecimals(2)
+        self._viz_max_spin.setSingleStep(0.05)
+        self._viz_max_spin.setValue(1.0)
+        self._viz_max_spin.setFixedWidth(75)
+        self._viz_max_spin.valueChanged.connect(self._on_viz_spin_changed)
+        ctrl_row.addWidget(self._viz_max_spin)
+        self._viz_save_btn = QPushButton("Save")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        self._viz_save_btn.setFixedWidth(55)
+        self._viz_save_btn.clicked.connect(self._on_viz_save)
+        ctrl_row.addWidget(self._viz_save_btn)
+        ctrl_row.addStretch()
+        section.add_layout(ctrl_row)
+
+        # Canvas row: range slider (left) | canvas (center) | color bar (right)
+        canvas_row = QHBoxLayout()
+        self._viz_range_slider = VRangeSlider()
+        self._viz_range_slider.range_changed.connect(self._on_viz_range_slider_changed)
+        canvas_row.addWidget(self._viz_range_slider)
+        self._viz_scene = QGraphicsScene()
+        self._viz_canvas = QGraphicsView(self._viz_scene)
+        self._viz_canvas.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._viz_canvas.setStyleSheet("background:#1a1a1a; border:none;")
+        self._viz_canvas.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._viz_canvas.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._viz_canvas.setMinimumHeight(350)
+        canvas_row.addWidget(self._viz_canvas, 1)
+        self._viz_cbar_scene = QGraphicsScene()
+        self._viz_cbar_view = QGraphicsView(self._viz_cbar_scene)
+        self._viz_cbar_view.setStyleSheet("background:#1a1a1a; border:none;")
+        self._viz_cbar_view.setFixedWidth(80)
+        self._viz_cbar_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._viz_cbar_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        canvas_row.addWidget(self._viz_cbar_view)
+        section.add_layout(canvas_row)
+
+        self._viz_panel_layout.addWidget(section)
+
+        # (Future visualization panels go here)
+
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll, 1)
+
+        # State
+        self._viz_traces_df = None
+        self._viz_diffusion_df = None
+        self._viz_traj_points = []  # list of (xs, ys) per trajectory
+        self._viz_traj_values = np.array([])  # H or log K per trajectory
+        self._viz_pixmap_item = None
+        self._viz_data_min = 0.0  # data range for slider mapping
+        self._viz_data_max = 1.0
+        # Cached geometry for fast re-render  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        self._viz_screen_segs = []   # list of (sxs, sys) per trajectory (screen coords)
+        self._viz_bounds = None      # (x_min, x_max, y_min, y_max, ML, MT, PW, PH, total_w, total_h)
+        self._viz_lut_cache = {}     # colormap name → (256, 3) uint8 numpy array
+
+        return widget
+    # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    def _viz_build_lut(self, cmap_name):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Build a 256-entry RGB lookup table for a colormap (cached)."""
+        if cmap_name in self._viz_lut_cache:
+            return self._viz_lut_cache[cmap_name]
+        stops = self._VIZ_COLORMAPS.get(cmap_name, self._VIZ_COLORMAPS["Jet"])
+        lut = np.zeros((256, 3), dtype=np.uint8)
+        for idx in range(256):
+            t = idx / 255.0
+            for i in range(len(stops) - 1):
+                t0, c0 = stops[i]
+                t1, c1 = stops[i + 1]
+                if t <= t1:
+                    f = (t - t0) / max(t1 - t0, 1e-12)
+                    lut[idx] = [int(c0[0] + f * (c1[0] - c0[0])),
+                                int(c0[1] + f * (c1[1] - c0[1])),
+                                int(c0[2] + f * (c1[2] - c0[2]))]
+                    break
+            else:
+                lut[idx] = stops[-1][1]
+        self._viz_lut_cache[cmap_name] = lut
+        return lut
+
+    def _viz_precompute_geometry(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Precompute spatial bounds and screen coordinates for all trajectories."""
+        if not self._viz_traj_points:
+            self._viz_bounds = None
+            self._viz_screen_segs = []
+            return
+        all_x = np.concatenate([pts[0] for pts in self._viz_traj_points])
+        all_y = np.concatenate([pts[1] for pts in self._viz_traj_points])
+        pad_x = max((all_x.max() - all_x.min()) * 0.05, 1.0)
+        pad_y = max((all_y.max() - all_y.min()) * 0.05, 1.0)
+        x_min, x_max = float(all_x.min() - pad_x), float(all_x.max() + pad_x)
+        y_min, y_max = float(all_y.min() - pad_y), float(all_y.max() + pad_y)
+        ML, MT, PW, PH = 60, 30, 500, 400
+        MR, MB = 30, 50
+        total_w = ML + PW + MR
+        total_h = MT + PH + MB
+        self._viz_bounds = (x_min, x_max, y_min, y_max, ML, MT, PW, PH, total_w, total_h)
+        segs = []
+        for xs, ys in self._viz_traj_points:
+            sxs = ML + (xs - x_min) / (x_max - x_min) * PW
+            sys_ = MT + (ys - y_min) / (y_max - y_min) * PH
+            segs.append((sxs.astype(np.float32), sys_.astype(np.float32)))
+        self._viz_screen_segs = segs
+
+    def _on_viz_load_data(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Load single dataset for Viz tab — requires both traces and diffusion."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select FreeTrace output CSV", "",
+            "CSV files (*_traces.csv *_diffusion.csv);;All files (*)")
+        if not path:
+            return
+        try:
+            if '_traces.csv' in path:
+                traces_path = path
+                diffusion_path = path.replace('_traces.csv', '_diffusion.csv')
+            elif '_diffusion.csv' in path:
+                diffusion_path = path
+                traces_path = path.replace('_diffusion.csv', '_traces.csv')
+            else:
+                QMessageBox.warning(self, "Invalid file",
+                                    "Select a _traces.csv or _diffusion.csv file.")
+                return
+
+            if not os.path.exists(traces_path):
+                QMessageBox.warning(self, "File not found", f"Traces file not found:\n{traces_path}")
+                return
+            if not os.path.exists(diffusion_path):
+                QMessageBox.warning(self, "File not found",
+                                    f"Diffusion file not found:\n{diffusion_path}\n"
+                                    "Both _traces.csv and _diffusion.csv are required for Viz.")
+                return
+
+            tdf = pd.read_csv(traces_path)
+            ddf = pd.read_csv(diffusion_path)
+            if not {'traj_idx', 'frame', 'x', 'y'}.issubset(tdf.columns):
+                QMessageBox.warning(self, "Invalid traces", "Missing required columns.")
+                return
+            if not {'traj_idx', 'H', 'K'}.issubset(ddf.columns):
+                QMessageBox.warning(self, "Invalid diffusion", "Missing H/K columns.")
+                return
+
+            self._viz_traces_df = tdf
+            self._viz_diffusion_df = ddf
+
+            # Build per-trajectory point arrays and H/K values
+            traj_points = []
+            grouped = tdf.groupby('traj_idx')
+            traj_ids = sorted(grouped.groups.keys())
+            h_vals, k_vals = [], []
+            ddf_indexed = ddf.set_index('traj_idx')
+            for tid in traj_ids:
+                grp = grouped.get_group(tid)
+                traj_points.append((grp['x'].values, grp['y'].values))
+                if tid in ddf_indexed.index:
+                    row = ddf_indexed.loc[tid]
+                    h_vals.append(float(row['H']) if np.isscalar(row['H']) else float(row['H'].iloc[0]))
+                    k_vals.append(float(row['K']) if np.isscalar(row['K']) else float(row['K'].iloc[0]))
+                else:
+                    h_vals.append(np.nan)
+                    k_vals.append(np.nan)
+
+            self._viz_traj_points = traj_points
+            self._viz_H = np.array(h_vals)
+            self._viz_K = np.array(k_vals)
+
+            fname = os.path.basename(traces_path).replace('_traces.csv', '')
+            n_traj = len(traj_ids)
+            self._viz_info_label.setText(f"Loaded {n_traj} trajectories from '{fname}'.")
+
+            # Precompute screen coordinates and draw full scene
+            self._viz_precompute_geometry()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            self._viz_set_default_range()
+            self._viz_render_full()
+        except Exception as e:
+            QMessageBox.critical(self, "Error loading data", str(e))
+    # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    def _viz_set_default_range(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Set min/max spinboxes and range slider to data range."""
+        vals = self._viz_get_values()
+        valid = vals[~np.isnan(vals)]
+        if len(valid) == 0:
+            return
+        dmin = float(np.floor(valid.min() * 20) / 20)
+        dmax = float(np.ceil(valid.max() * 20) / 20)
+        self._viz_data_min = dmin
+        self._viz_data_max = dmax
+        # Default display range: 2.5–97.5 percentile
+        q_low = float(np.percentile(valid, 2.5))
+        q_high = float(np.percentile(valid, 97.5))
+        rng = dmax - dmin
+        low_frac = (q_low - dmin) / rng if rng > 1e-12 else 0.0
+        high_frac = (q_high - dmin) / rng if rng > 1e-12 else 1.0
+        # Block signals during bulk update
+        self._viz_min_spin.blockSignals(True)
+        self._viz_max_spin.blockSignals(True)
+        self._viz_min_spin.setValue(q_low)
+        self._viz_max_spin.setValue(q_high)
+        self._viz_min_spin.blockSignals(False)
+        self._viz_max_spin.blockSignals(False)
+        self._viz_range_slider.blockSignals(True)
+        self._viz_range_slider.set_range(low_frac, high_frac)
+        self._viz_range_slider.blockSignals(False)
+
+    def _on_viz_spin_changed(self, _val):
+        """Spinbox changed → sync range slider and re-render."""
+        if not hasattr(self, '_viz_H') or len(self._viz_H) == 0:
+            return
+        rng = self._viz_data_max - self._viz_data_min
+        if rng > 1e-12:
+            low_frac = (self._viz_min_spin.value() - self._viz_data_min) / rng
+            high_frac = (self._viz_max_spin.value() - self._viz_data_min) / rng
+            self._viz_range_slider.blockSignals(True)
+            self._viz_range_slider.set_range(low_frac, high_frac)
+            self._viz_range_slider.blockSignals(False)
+        self._viz_render_dynamic()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    def _on_viz_range_slider_changed(self, low_frac, high_frac):
+        """Range slider dragged → sync spinboxes and re-render."""
+        rng = self._viz_data_max - self._viz_data_min
+        vmin = self._viz_data_min + low_frac * rng
+        vmax = self._viz_data_min + high_frac * rng
+        self._viz_min_spin.blockSignals(True)
+        self._viz_max_spin.blockSignals(True)
+        self._viz_min_spin.setValue(vmin)
+        self._viz_max_spin.setValue(vmax)
+        self._viz_min_spin.blockSignals(False)
+        self._viz_max_spin.blockSignals(False)
+        self._viz_render_dynamic()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    def _viz_get_values(self):
+        """Return per-trajectory values based on current color mode."""
+        mode = self._viz_color_combo.currentText()
+        if mode == "H":
+            return self._viz_H if hasattr(self, '_viz_H') else np.array([])
+        else:  # log K
+            k = self._viz_K if hasattr(self, '_viz_K') else np.array([])
+            if len(k) == 0:
+                return k
+            return np.log10(np.clip(k, 1e-20, None))
+
+    def _on_viz_color_changed(self, _text):
+        if not hasattr(self, '_viz_H') or len(self._viz_H) == 0:
+            return
+        self._viz_set_default_range()
+        self._viz_render_full()
+
+    def _on_viz_cmap_changed(self, _text):
+        if not hasattr(self, '_viz_H') or len(self._viz_H) == 0:
+            return
+        self._viz_render_dynamic()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+
+    def _on_viz_clear(self):
+        self._viz_scene.clear()
+        self._viz_cbar_scene.clear()
+        self._viz_traj_points = []
+        self._viz_screen_segs = []  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        self._viz_bounds = None
+        self._viz_H = np.array([])
+        self._viz_K = np.array([])
+        self._viz_traces_df = None
+        self._viz_diffusion_df = None
+        self._viz_pixmap_item = None
+        self._viz_info_label.setText("Load _traces.csv + _diffusion.csv to visualise trajectories coloured by H or K.")
+
+    def _on_viz_save(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Save the trajectory color map as a high-resolution PNG with transparent background."""
+        if not self._viz_bounds or not self._viz_screen_segs:
+            QMessageBox.information(self, "Nothing to save", "Load data first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Trajectory Map", "", "PNG images (*.png)")
+        if not path:
+            return
+        if not path.lower().endswith('.png'):
+            path += '.png'
+
+        vals = self._viz_get_values()
+        vmin = self._viz_min_spin.value()
+        vmax = self._viz_max_spin.value()
+        x_min, x_max, y_min, y_max, ML, MT, PW, PH, total_w, total_h = self._viz_bounds
+
+        # Layout: trajectories on left, gap, colorbar + ticks on right
+        scale = math.ceil(2048 / PH)  # plot area height ≥ 2048
+        sPW, sPH = PW * scale, PH * scale
+        cbar_gap = int(20 * scale)
+        cbar_w = int(20 * scale)
+        tick_w = int(60 * scale)  # space for tick labels
+        title_h = int(20 * scale)
+        out_w = sPW + cbar_gap + cbar_w + tick_w
+        out_h = title_h + sPH
+
+        cmap_name = self._viz_cmap_combo.currentText()
+        lut = self._viz_build_lut(cmap_name)
+
+        img = QImage(out_w, out_h, QImage.Format.Format_ARGB32)
+        img.fill(QColor(0, 0, 0, 0))  # transparent
+        painter = QPainter(img)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Trajectories — map data coords directly to [0, sPW] x [title_h, title_h+sPH]
+        val_range = max(vmax - vmin, 1e-12)
+        t_arr = np.clip((vals - vmin) / val_range, 0.0, 1.0)
+        idx_arr = np.clip((t_arr * 255).astype(int), 0, 255)
+        nan_mask = np.isnan(vals)
+        x_data_range = max(x_max - x_min, 1e-12)
+        y_data_range = max(y_max - y_min, 1e-12)
+
+        for i, (sxs_orig, sys_orig) in enumerate(self._viz_screen_segs):
+            if nan_mask[i] if i < len(nan_mask) else True:
+                color = QColor(80, 80, 80, 60)
+            else:
+                r, g, b = int(lut[idx_arr[i], 0]), int(lut[idx_arr[i], 1]), int(lut[idx_arr[i], 2])
+                color = QColor(r, g, b, 200)
+            pen = QPen(color, max(1.0, 0.5 * scale))
+            painter.setPen(pen)
+            n = len(sxs_orig)
+            if n < 2:
+                continue
+            # Re-map from scene coords (ML-based) to export coords (0-based)
+            exs = (sxs_orig - ML) / PW * sPW
+            eys = (sys_orig - MT) / PH * sPH + title_h
+            tpath = QPainterPath()
+            tpath.moveTo(float(exs[0]), float(eys[0]))
+            for j in range(1, n):
+                tpath.lineTo(float(exs[j]), float(eys[j]))
+            painter.drawPath(tpath)
+
+        # Colorbar
+        cbar_x = sPW + cbar_gap
+        cbar_y = title_h
+        row_indices = np.clip(((1.0 - np.arange(sPH) / max(sPH - 1, 1)) * 255).astype(int), 0, 255)
+        rgb = lut[row_indices]
+        row_argb = np.zeros((sPH, 4), dtype=np.uint8)
+        row_argb[:, 0] = rgb[:, 2]
+        row_argb[:, 1] = rgb[:, 1]
+        row_argb[:, 2] = rgb[:, 0]
+        row_argb[:, 3] = 255
+        img_data = np.tile(row_argb, (1, cbar_w)).reshape(sPH, cbar_w, 4)
+        cbar_img = QImage(img_data.tobytes(), cbar_w, sPH, cbar_w * 4, QImage.Format.Format_ARGB32)
+        painter.drawImage(cbar_x, cbar_y, cbar_img.copy())
+
+        # Colorbar border
+        painter.setPen(QPen(QColor(180, 180, 180), max(1, scale)))
+        painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+        painter.drawRect(cbar_x, cbar_y, cbar_w, sPH)
+
+        # Colorbar ticks
+        pen_text = QColor(180, 180, 180)
+        font = painter.font()
+        font.setPixelSize(max(12, int(12 * scale)))
+        painter.setFont(font)
+        painter.setPen(QPen(pen_text, 1))
+        n_ticks = 5
+        for ti in range(n_ticks + 1):
+            frac = ti / n_ticks
+            ty = cbar_y + int(sPH * (1.0 - frac))
+            val = vmin + (vmax - vmin) * frac
+            painter.drawLine(QPointF(cbar_x + cbar_w, ty),
+                             QPointF(cbar_x + cbar_w + 3 * scale, ty))
+            painter.drawText(QPointF(cbar_x + cbar_w + 5 * scale, ty + 4 * scale), f"{val:.2f}")
+
+        # Colorbar title
+        bold_font = painter.font()
+        bold_font.setBold(True)
+        painter.setFont(bold_font)
+        mode = self._viz_color_combo.currentText()
+        painter.drawText(QPointF(cbar_x, cbar_y - 5 * scale), mode)
+
+        painter.end()
+        img.save(path)
+        self._viz_info_label.setText(f"Saved {out_w}×{out_h} px → {os.path.basename(path)}")
+    # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    def _viz_value_to_color(self, val, vmin, vmax):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Map a scalar value to a color using the selected colormap."""
+        if np.isnan(val):
+            return QColor(80, 80, 80, 60)
+        t = max(0.0, min(1.0, (val - vmin) / max(vmax - vmin, 1e-12)))
+        cmap_name = self._viz_cmap_combo.currentText()
+        stops = self._VIZ_COLORMAPS.get(cmap_name, self._VIZ_COLORMAPS["Jet"])
+        for i in range(len(stops) - 1):
+            t0, c0 = stops[i]
+            t1, c1 = stops[i + 1]
+            if t <= t1:
+                f = (t - t0) / max(t1 - t0, 1e-12)
+                r = int(c0[0] + f * (c1[0] - c0[0]))
+                g = int(c0[1] + f * (c1[1] - c0[1]))
+                b = int(c0[2] + f * (c1[2] - c0[2]))
+                return QColor(r, g, b, 200)
+        last = stops[-1][1]
+        return QColor(last[0], last[1], last[2], 200)
+
+    def _viz_render_full(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Full render: static scene (grid/axes) + dynamic overlay (trajectories/colorbar)."""
+        self._viz_render_static()
+        self._viz_render_dynamic()
+
+    def _viz_render_static(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Render static scene elements: background, grid, axes, labels."""
+        self._viz_scene.clear()
+        self._viz_pixmap_item = None
+        if not self._viz_bounds:
+            return
+        x_min, x_max, y_min, y_max, ML, MT, PW, PH, total_w, total_h = self._viz_bounds
+        self._viz_scene.setSceneRect(0, 0, total_w, total_h)
+
+        pen_grid = QPen(QColor(60, 60, 60), 0.5, Qt.PenStyle.DashLine)
+        pen_axis = QPen(QColor(150, 150, 150), 1.5)
+        pen_text = QColor(180, 180, 180)
+
+        self._viz_scene.addRect(QRectF(ML, MT, PW, PH),
+                                QPen(Qt.PenStyle.NoPen), QBrush(QColor(30, 30, 30)))
+
+        x_range = x_max - x_min
+        x_step = ROICanvas._nice_step(x_range, 8)
+        xv = math.ceil(x_min / x_step) * x_step
+        while xv <= x_max:
+            sx = ML + (xv - x_min) / (x_max - x_min) * PW
+            if ML <= sx <= ML + PW:
+                self._viz_scene.addLine(sx, MT, sx, MT + PH, pen_grid)
+                t = self._viz_scene.addSimpleText(f"{xv:.0f}")
+                t.setBrush(pen_text)
+                t.setPos(sx - 12, MT + PH + 5)
+            xv += x_step
+
+        y_range = y_max - y_min
+        y_step = ROICanvas._nice_step(y_range, 8)
+        yv = math.ceil(y_min / y_step) * y_step
+        while yv <= y_max:
+            sy = MT + (yv - y_min) / (y_max - y_min) * PH
+            if MT <= sy <= MT + PH:
+                self._viz_scene.addLine(ML, sy, ML + PW, sy, pen_grid)
+                t = self._viz_scene.addSimpleText(f"{yv:.0f}")
+                t.setBrush(pen_text)
+                t.setPos(ML - 45, sy - 8)
+            yv += y_step
+
+        self._viz_scene.addLine(ML, MT + PH, ML + PW, MT + PH, pen_axis)
+        self._viz_scene.addLine(ML, MT, ML, MT + PH, pen_axis)
+
+        xl = self._viz_scene.addSimpleText("X (pixels)")
+        xl.setBrush(pen_text)
+        xl.setPos(ML + PW / 2 - 30, MT + PH + 28)
+        yl = self._viz_scene.addSimpleText("Y (pixels)")
+        yl.setBrush(pen_text)
+        yl.setPos(5, MT + PH / 2 - 8)
+
+    def _viz_render_dynamic(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Render only trajectories (pixmap) + colorbar. Uses cached screen coords + LUT."""
+        if not self._viz_bounds or not self._viz_screen_segs:
+            return
+        # Remove old trajectory pixmap if present
+        if self._viz_pixmap_item is not None:
+            self._viz_scene.removeItem(self._viz_pixmap_item)
+            self._viz_pixmap_item = None
+
+        vals = self._viz_get_values()
+        vmin = self._viz_min_spin.value()
+        vmax = self._viz_max_spin.value()
+        x_min, x_max, y_min, y_max, ML, MT, PW, PH, total_w, total_h = self._viz_bounds
+
+        # Build LUT for current colormap
+        cmap_name = self._viz_cmap_combo.currentText()
+        lut = self._viz_build_lut(cmap_name)
+
+        # Vectorised: map values → LUT indices
+        val_range = max(vmax - vmin, 1e-12)
+        t_arr = np.clip((vals - vmin) / val_range, 0.0, 1.0)
+        idx_arr = np.clip((t_arr * 255).astype(int), 0, 255)
+        nan_mask = np.isnan(vals)
+
+        pix = QPixmap(total_w, total_h)
+        pix.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        for i, (sxs, sys_) in enumerate(self._viz_screen_segs):
+            if nan_mask[i] if i < len(nan_mask) else True:
+                color = QColor(80, 80, 80, 60)
+            else:
+                r, g, b = int(lut[idx_arr[i], 0]), int(lut[idx_arr[i], 1]), int(lut[idx_arr[i], 2])
+                color = QColor(r, g, b, 200)
+            pen = QPen(color, 0.5)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            n = len(sxs)
+            if n < 2:
+                continue
+            path = QPainterPath()
+            path.moveTo(float(sxs[0]), float(sys_[0]))
+            for j in range(1, n):
+                path.lineTo(float(sxs[j]), float(sys_[j]))
+            painter.drawPath(path)
+
+        painter.end()
+        self._viz_pixmap_item = self._viz_scene.addPixmap(pix)
+        self._viz_pixmap_item.setZValue(1)
+
+        self._viz_canvas.fitInView(self._viz_scene.sceneRect(),
+                                   Qt.AspectRatioMode.KeepAspectRatio)
+
+        self._viz_render_colorbar(vmin, vmax)
+    # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    def _viz_render_colorbar(self, vmin, vmax):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Render a vertical color bar with tick labels."""
+        self._viz_cbar_scene.clear()
+        bar_w, bar_h = 20, 300
+        margin_top, margin_left = 30, 10
+        total_w = margin_left + bar_w + 50
+        total_h = margin_top + bar_h + 30
+        self._viz_cbar_scene.setSceneRect(0, 0, total_w, total_h)
+
+        # Draw gradient using LUT — numpy→QImage, no Python pixel loop
+        cmap_name = self._viz_cmap_combo.currentText()
+        lut = self._viz_build_lut(cmap_name)
+        row_indices = np.clip(((1.0 - np.arange(bar_h) / max(bar_h - 1, 1)) * 255).astype(int), 0, 255)
+        rgb = lut[row_indices]  # (bar_h, 3)
+        # Build ARGB32 row data: each pixel = 0xFF_RR_GG_BB (little-endian: BB GG RR FF)
+        row_argb = np.zeros((bar_h, 4), dtype=np.uint8)
+        row_argb[:, 0] = rgb[:, 2]  # B
+        row_argb[:, 1] = rgb[:, 1]  # G
+        row_argb[:, 2] = rgb[:, 0]  # R
+        row_argb[:, 3] = 255        # A
+        # Tile across bar width
+        img_data = np.tile(row_argb, (1, bar_w)).reshape(bar_h, bar_w, 4)
+        img_bytes = img_data.tobytes()
+        img = QImage(img_bytes, bar_w, bar_h, bar_w * 4, QImage.Format.Format_ARGB32)
+        pix = QPixmap.fromImage(img.copy())  # copy() detaches from buffer
+        pix_item = self._viz_cbar_scene.addPixmap(pix)
+        pix_item.setPos(margin_left, margin_top)
+
+        # Border
+        self._viz_cbar_scene.addRect(QRectF(margin_left, margin_top, bar_w, bar_h),
+                                     QPen(QColor(150, 150, 150), 1.0))
+
+        # Tick labels
+        pen_text = QColor(180, 180, 180)
+        n_ticks = 5
+        for i in range(n_ticks + 1):
+            frac = i / n_ticks
+            y = margin_top + bar_h * (1.0 - frac)
+            val = vmin + (vmax - vmin) * frac
+            label = f"{val:.2f}"
+            t = self._viz_cbar_scene.addSimpleText(label)
+            t.setBrush(pen_text)
+            t.setPos(margin_left + bar_w + 4, y - 6)
+            # Tick mark
+            self._viz_cbar_scene.addLine(margin_left + bar_w, y,
+                                         margin_left + bar_w + 3, y,
+                                         QPen(QColor(150, 150, 150), 1.0))
+
+        # Title
+        mode = self._viz_color_combo.currentText()
+        title = self._viz_cbar_scene.addSimpleText(mode)
+        title.setBrush(QColor(200, 200, 200))
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
+        title.setPos(margin_left, 5)
+
+        self._viz_cbar_view.fitInView(self._viz_cbar_scene.sceneRect(),
+                                      Qt.AspectRatioMode.KeepAspectRatio)
+    # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
     def _on_adv_stats_load_data(self):
         """Load data for Advanced Stats — only _traces.csv needed."""
         paths, _ = QFileDialog.getOpenFileNames(
@@ -3618,8 +5733,15 @@ class FreeTraceGUI(QMainWindow):
             self._load_adv_stats_data_from_file(p)
         self._adv_stats_datasets.sort(key=lambda ds: ds['video_name'])
         n = len(self._adv_stats_datasets)
-        if n > 0:
-            self._adv_stats_status_label.setText(f"Loaded {n} video(s).")
+        if n > 0:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            total_traj = sum(ds['traces_df']['traj_idx'].nunique() for ds in self._adv_stats_datasets)
+            if n == 1:
+                fname = self._adv_stats_datasets[0]['video_name']
+                self._adv_stats_info_label.setText(
+                    f"Loaded {total_traj} trajectories from '{fname}'.")
+            else:
+                self._adv_stats_info_label.setText(
+                    f"Loaded {total_traj} trajectories from {n} videos.")
 
     def _load_adv_stats_data_from_file(self, selected_path):
         """Load traces CSV for Advanced Stats."""
@@ -4468,7 +6590,6 @@ class FreeTraceGUI(QMainWindow):
         h, w = img.shape
 
         img8 = (np.clip(img, 0, 1) * 255).astype(np.uint8)
-        from PyQt6.QtGui import QImage
         qimg = QImage(img8.data, w, h, w, QImage.Format.Format_Grayscale8)
         pixmap = QPixmap.fromImage(qimg.copy())
 
@@ -4604,10 +6725,13 @@ class FreeTraceGUI(QMainWindow):
 
         total = len(combined_H)
         n_vids = len(self._loaded_datasets)
-        self._analysis_info_label.setText(
-            f"Loaded {total} trajectories from {n_vids} video(s). "
-            f"Draw a boundary to classify."
-        )
+        if n_vids == 1:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            fname = self._loaded_datasets[0]['video_name']
+            self._analysis_info_label.setText(
+                f"Loaded {total} trajectories from '{fname}'. Draw a boundary to classify.")
+        else:
+            self._analysis_info_label.setText(
+                f"Loaded {total} trajectories from {n_vids} videos. Draw a boundary to classify.")
         self._update_stats_display()
         self._draw_trajectories()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
 
@@ -4873,6 +6997,442 @@ class FreeTraceGUI(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Export error", str(e))
         # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+
+    # ------------------------------------------------------------------  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    # ROI tab slots
+    # ------------------------------------------------------------------
+    def _on_roi_mode_changed(self, mode_text):
+        self._roi_canvas.set_draw_mode(mode_text)
+
+    def _on_roi_classify_mode_changed(self, mode_text):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        self._roi_canvas.set_classify_mode(mode_text)
+
+    def _on_roi_load_data(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Load a single dataset (traces required, diffusion optional) for ROI tab."""
+        start_dir = self._output_dir or ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select FreeTrace output CSV (_traces.csv or _diffusion.csv)",
+            start_dir,
+            "FreeTrace CSV (*_traces.csv *_diffusion.csv);;All CSV (*.csv);;All files (*)"
+        )
+        if not path:
+            return
+        self._roi_datasets = []
+        self._roi_load_single(path)
+
+    def _roi_load_single(self, selected_path):
+        """Load a single video's data for ROI tab."""
+        try:
+            if '_traces.csv' in selected_path:
+                traces_path = selected_path
+                diffusion_path = selected_path.replace('_traces.csv', '_diffusion.csv')
+            elif '_diffusion.csv' in selected_path:
+                diffusion_path = selected_path
+                traces_path = selected_path.replace('_diffusion.csv', '_traces.csv')
+            else:
+                QMessageBox.warning(self, "Unrecognized file",
+                                    "Please select a file ending with _traces.csv or _diffusion.csv")
+                return
+
+            # Skip duplicates
+            for ds in self._roi_datasets:
+                if ds['traces_path'] == traces_path:
+                    return
+
+            if not os.path.exists(traces_path):
+                QMessageBox.warning(self, "File not found",
+                                    f"Traces file not found:\n{traces_path}")
+                return
+
+            traces_df = pd.read_csv(traces_path)
+            required = {'traj_idx', 'frame', 'x', 'y'}
+            if not required.issubset(traces_df.columns):
+                missing = required - set(traces_df.columns)
+                QMessageBox.warning(self, "Invalid traces file",
+                                    f"Missing columns: {', '.join(sorted(missing))}")
+                return
+
+            # Diffusion is optional
+            diffusion_df = None
+            if os.path.exists(diffusion_path):
+                df_diff = pd.read_csv(diffusion_path)
+                if {'traj_idx', 'H', 'K'}.issubset(df_diff.columns):
+                    diffusion_df = df_diff
+
+            fname = os.path.basename(traces_path)
+            video_name = fname.replace('_traces.csv', '')
+
+            self._roi_datasets.append({
+                'video_name': video_name,
+                'traces_path': traces_path,
+                'diffusion_path': diffusion_path if diffusion_df is not None else None,
+                'traces_df': traces_df,
+                'diffusion_df': diffusion_df,
+            })
+
+            self._rebuild_roi_canvas()
+        except Exception as e:
+            QMessageBox.critical(self, "Error loading ROI data", str(e))
+
+    def _rebuild_roi_canvas(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Combine all loaded ROI datasets and update the ROI canvas."""
+        if not self._roi_datasets:
+            return
+
+        # Build per-trajectory point lists and mean positions across all datasets
+        all_mean_x, all_mean_y = [], []
+        all_traj_points = []  # list of (xs, ys) per trajectory
+        for ds in self._roi_datasets:
+            tdf = ds['traces_df']
+            for _, grp in tdf.groupby('traj_idx'):
+                xs = grp['x'].values.astype(float)
+                ys = grp['y'].values.astype(float)
+                all_traj_points.append((xs, ys))
+                all_mean_x.append(float(xs.mean()))
+                all_mean_y.append(float(ys.mean()))
+
+        combined_idx = np.arange(len(all_mean_x))
+        combined_mean_x = np.array(all_mean_x)
+        combined_mean_y = np.array(all_mean_y)
+
+        self._roi_canvas.set_data(combined_idx, all_traj_points,
+                                  combined_mean_x, combined_mean_y)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+        total = len(combined_mean_x)
+        n_vids = len(self._roi_datasets)
+        has_diff = any(ds['diffusion_df'] is not None for ds in self._roi_datasets)
+        hk_str = " (with H-K data)" if has_diff else ""
+        if n_vids == 1:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            fname = self._roi_datasets[0]['video_name']
+            self._roi_info_label.setText(
+                f"Loaded {total} trajectories from '{fname}'{hk_str}. Draw shapes to define ROIs.")
+        else:
+            self._roi_info_label.setText(
+                f"Loaded {total} trajectories from {n_vids} videos{hk_str}. Draw shapes to define ROIs.")
+        self._update_roi_stats()
+
+    def _on_roi_clear(self):
+        self._roi_canvas.clear_roi()
+
+    def _on_roi_changed(self):
+        """Called when ROI boundaries change — update stats and H-K scatter."""
+        self._update_roi_stats()
+        self._update_roi_hk_scatter()
+
+    def _update_roi_stats(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Update the ROI stats panel with trajectory counts per ROI."""
+        data = self._roi_canvas.get_roi_data()
+        labels = data['labels']
+
+        if not self._roi_datasets:
+            self._roi_stats_label.setText("No data loaded.")
+            return
+
+        total = len(data['X'])
+        if labels is None:
+            self._roi_stats_label.setText(
+                f"<b>{total}</b> trajectories loaded. Draw shapes to define ROIs.")
+            return
+
+        # Collect H, K arrays for per-ROI mean (if diffusion data available)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        all_H, all_K = [], []
+        has_diff = False
+        for ds in self._roi_datasets:
+            if ds['diffusion_df'] is not None:
+                has_diff = True
+                tdf = ds['traces_df']
+                ddf = ds['diffusion_df']
+                means = tdf.groupby('traj_idx')[['x', 'y']].mean()
+                merged = means.join(ddf.set_index('traj_idx')[['H', 'K']], how='left')
+                all_H.append(merged['H'].values)
+                all_K.append(merged['K'].values)
+            else:
+                n_traj = ds['traces_df']['traj_idx'].nunique()
+                all_H.append(np.full(n_traj, np.nan))
+                all_K.append(np.full(n_traj, np.nan))
+        H_arr = np.concatenate(all_H) if all_H else np.array([])
+        K_arr = np.concatenate(all_K) if all_K else np.array([])
+
+        # Separate assigned (>=0) from excluded (<0)
+        n_excluded = data.get('n_excluded', 0)
+        assigned = labels[labels >= 0]
+        unique = sorted(set(assigned.tolist())) if len(assigned) > 0 else []
+        rows = ""
+        colors = ROICanvas._ROI_COLORS
+        for roi_id in unique:
+            mask = labels == roi_id
+            count = int(np.sum(mask))
+            pct = count / total * 100 if total > 0 else 0
+            c = colors[roi_id % len(colors)]
+            cstr = f"rgb({c.red()},{c.green()},{c.blue()})"
+            # Per-ROI mean H, K
+            hk_cols = ""
+            if has_diff and len(H_arr) == len(labels):
+                h_vals = H_arr[mask]
+                k_vals = K_arr[mask]
+                h_valid = h_vals[~np.isnan(h_vals)]
+                k_valid = k_vals[~np.isnan(k_vals)]
+                mean_h = f"{np.mean(h_valid):.3f}" if len(h_valid) > 0 else "—"
+                mean_k = f"{np.mean(k_valid):.2e}" if len(k_valid) > 0 else "—"
+                hk_cols = (f"<td style='padding:4px 12px;'>{mean_h}</td>"
+                           f"<td style='padding:4px 12px;'>{mean_k}</td>")
+            rows += (f"<tr><td style='color:{cstr}; padding:4px 12px; font-weight:bold;'>"
+                     f"roi{roi_id}</td>"
+                     f"<td style='padding:4px 12px;'>{count}</td>"
+                     f"<td style='padding:4px 12px;'>{pct:.1f}%</td>{hk_cols}</tr>")
+
+        # Show excluded row if any
+        excluded_html = ""
+        if n_excluded > 0:
+            pct_excl = n_excluded / total * 100 if total > 0 else 0
+            hk_excl = ""
+            if has_diff and len(H_arr) == len(labels):
+                hk_excl = "<td style='padding:4px 12px;'>—</td><td style='padding:4px 12px;'>—</td>"
+            rows += (f"<tr><td style='color:#666; padding:4px 12px; font-style:italic;'>"
+                     f"excluded</td>"
+                     f"<td style='padding:4px 12px;'>{n_excluded}</td>"
+                     f"<td style='padding:4px 12px;'>{pct_excl:.1f}%</td>{hk_excl}</tr>")
+            excluded_html = f" ({n_excluded} excluded — cross ROI boundaries)"
+
+        hk_header = ""
+        if has_diff:
+            hk_header = ("<th style='padding:4px 12px;'>Mean H</th>"
+                         "<th style='padding:4px 12px;'>Mean K</th>")
+        html = (f"<p><b>{total}</b> trajectories, <b>{len(unique)}</b> ROI(s){excluded_html}</p>"
+                "<table style='border-collapse:collapse;'>"
+                f"<tr style='color:#888;'><th style='padding:4px 12px;'>ROI</th>"
+                f"<th style='padding:4px 12px;'>Count</th>"
+                f"<th style='padding:4px 12px;'>%</th>{hk_header}</tr>"
+                f"{rows}</table>")
+        self._roi_stats_label.setText(html)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    def _update_roi_hk_scatter(self):
+        """Render H-K scatter colored by ROI labels (if diffusion data available)."""
+        self._roi_hk_scene.clear()
+
+        data = self._roi_canvas.get_roi_data()
+        labels = data['labels']
+
+        # Collect H, K values aligned with ROI canvas order
+        all_H, all_K = [], []
+        has_diff = False
+        for ds in self._roi_datasets:
+            if ds['diffusion_df'] is not None:
+                has_diff = True
+                tdf = ds['traces_df']
+                ddf = ds['diffusion_df']
+                # Mean positions per traj (same order as ROI canvas)
+                means = tdf.groupby('traj_idx')[['x', 'y']].mean()
+                # Align diffusion H, K with trajectory order
+                merged = means.join(ddf.set_index('traj_idx')[['H', 'K']], how='left')
+                all_H.append(merged['H'].values)
+                all_K.append(merged['K'].values)
+            else:
+                # No diffusion data for this dataset — fill NaN
+                n_traj = ds['traces_df']['traj_idx'].nunique()
+                all_H.append(np.full(n_traj, np.nan))
+                all_K.append(np.full(n_traj, np.nan))
+
+        if not has_diff:
+            self._roi_hk_title.setText("H-K Scatter Colored by ROI (no diffusion data)")
+            return
+
+        self._roi_hk_title.setText("H-K Scatter Colored by ROI")
+        H = np.concatenate(all_H)
+        K = np.concatenate(all_K)
+        valid = ~(np.isnan(H) | np.isnan(K))
+
+        if not np.any(valid):
+            return
+
+        safe_K = np.clip(K, 1e-10, None)
+        log_K = np.log10(safe_K)
+
+        # Plot dimensions (mirror HKGatingCanvas layout)
+        ML, MT, PW, PH = 60, 30, 500, 400
+        MR, MB = 30, 50
+        total_w = ML + PW + MR
+        total_h = MT + PH + MB
+        self._roi_hk_scene.setSceneRect(0, 0, total_w, total_h)
+
+        h_min, h_max = 0.0, 1.0
+        logk_min = float(np.floor(np.nanmin(log_K[valid]) - 0.5))
+        logk_max = float(np.ceil(np.nanmax(log_K[valid]) + 0.5))
+
+        def h_to_x(h): return ML + (h - h_min) / (h_max - h_min) * PW
+        def lk_to_y(lk): return MT + (1.0 - (lk - logk_min) / (logk_max - logk_min)) * PH
+
+        # Background & grid
+        pen_grid = QPen(QColor(60, 60, 60), 0.5, Qt.PenStyle.DashLine)
+        pen_axis = QPen(QColor(150, 150, 150), 1.5)
+        pen_text = QColor(180, 180, 180)
+
+        self._roi_hk_scene.addRect(QRectF(ML, MT, PW, PH),
+                                   QPen(Qt.PenStyle.NoPen), QBrush(QColor(30, 30, 30)))
+
+        for hv in np.arange(0.0, 1.01, 0.1):
+            x = h_to_x(hv)
+            self._roi_hk_scene.addLine(x, MT, x, MT + PH, pen_grid)
+            t = self._roi_hk_scene.addSimpleText(f"{hv:.1f}")
+            t.setBrush(pen_text)
+            t.setPos(x - 10, MT + PH + 5)
+
+        for lkv in range(int(logk_min), int(logk_max) + 1):
+            y = lk_to_y(lkv)
+            self._roi_hk_scene.addLine(ML, y, ML + PW, y, pen_grid)
+            t = self._roi_hk_scene.addSimpleText(f"1e{lkv}")
+            t.setBrush(pen_text)
+            t.setPos(ML - 45, y - 8)
+
+        self._roi_hk_scene.addLine(ML, MT + PH, ML + PW, MT + PH, pen_axis)
+        self._roi_hk_scene.addLine(ML, MT, ML, MT + PH, pen_axis)
+
+        xl = self._roi_hk_scene.addSimpleText("H (Hurst exponent)")
+        xl.setBrush(pen_text)
+        xl.setPos(ML + PW / 2 - 60, MT + PH + 28)
+        yl = self._roi_hk_scene.addSimpleText("K")
+        yl.setBrush(pen_text)
+        yl.setPos(5, MT + PH / 2 - 8)
+
+        # Render dots as pixmap
+        pix = QPixmap(total_w, total_h)
+        pix.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        colors = ROICanvas._ROI_COLORS
+        default_color = QColor(180, 180, 180, 160)
+        dot_r = 3.0
+
+        for i in range(len(H)):
+            if not valid[i]:
+                continue
+            x = h_to_x(H[i])
+            y = lk_to_y(log_K[i])
+            if x < ML or x > ML + PW or y < MT or y > MT + PH:
+                continue
+            if labels is not None:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+                lbl = int(labels[i])
+                if lbl < 0:
+                    c = QColor(80, 80, 80, 60)  # excluded
+                else:
+                    c = colors[lbl % len(colors)]
+            else:
+                c = default_color
+            painter.setBrush(QBrush(c))
+            painter.drawEllipse(QPointF(x, y), dot_r, dot_r)
+
+        painter.end()
+        pix_item = self._roi_hk_scene.addPixmap(pix)
+        pix_item.setZValue(1)
+
+        self._roi_hk_canvas.fitInView(self._roi_hk_scene.sceneRect(),
+                                      Qt.AspectRatioMode.KeepAspectRatio)
+
+    def _on_roi_load_boundary(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        """Load ROI shapes from a JSON, ImageJ .roi, or .zip file."""
+        start_dir = self._output_dir or ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select ROI boundary file",
+            start_dir,
+            "All ROI files (*.json *.roi *.zip);;ROI JSON (*.json);;ImageJ ROI (*.roi);;ImageJ ROI ZIP (*.zip);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            ext = os.path.splitext(path)[1].lower()
+            if ext == '.roi' or ext == '.zip':
+                shapes, skipped = _load_imagej_rois(path)
+                if not shapes:
+                    QMessageBox.warning(self, "No shapes",
+                                        "No supported ROI shapes found in file."
+                                        + (f"\n({skipped} unsupported ROI(s) skipped)" if skipped else ""))
+                    return
+                msg = f"Loaded {len(shapes)} ROI shape(s)"
+                if skipped > 0:
+                    msg += f" ({skipped} unsupported skipped)"
+                self._roi_info_label.setText(msg)
+                self._roi_canvas.set_shapes_data(shapes)
+            else:
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                shapes = data.get('shapes', [])
+                if not shapes:
+                    QMessageBox.warning(self, "No shapes", "No ROI shape data found in file.")
+                    return
+                self._roi_canvas.set_shapes_data(shapes)
+        except Exception as e:
+            QMessageBox.critical(self, "Error loading ROI", str(e))
+    # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+
+    def _on_roi_export(self):
+        """Export trajectories per ROI to CSV files."""
+        data = self._roi_canvas.get_roi_data()
+        if data['labels'] is None:
+            QMessageBox.information(self, "No ROI",
+                                    "Draw shapes first to define ROIs.")
+            return
+
+        save_dir = QFileDialog.getExistingDirectory(self, "Select export folder",
+                                                     self._output_dir or "")
+        if not save_dir:
+            return
+
+        try:
+            labels = data['labels']
+            offset = 0
+            exported_files = []
+
+            for ds in self._roi_datasets:
+                tdf = ds['traces_df']
+                means = tdf.groupby('traj_idx')[['x', 'y']].mean()
+                n = len(means)
+                ds_labels = labels[offset:offset + n]
+                vname = ds['video_name']
+                traj_ids_ordered = means.index.values
+
+                unique_rois = sorted(set(ds_labels.tolist()))
+                for roi_id in unique_rois:
+                    if roi_id < 0:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+                        suffix = "roi_excluded"
+                    else:
+                        suffix = f"roi_{roi_id}"
+                    mask = ds_labels == roi_id
+                    roi_traj_ids = set(traj_ids_ordered[mask].tolist())
+
+                    # Export traces
+                    traj_sub = tdf[tdf['traj_idx'].isin(roi_traj_ids)]
+                    traj_sub.to_csv(
+                        os.path.join(save_dir, f"{vname}_{suffix}_traces.csv"),
+                        index=False
+                    )
+
+                    # Export diffusion if available
+                    if ds['diffusion_df'] is not None:
+                        diff_sub = ds['diffusion_df'][
+                            ds['diffusion_df']['traj_idx'].isin(roi_traj_ids)]
+                        diff_sub.to_csv(
+                            os.path.join(save_dir, f"{vname}_{suffix}_diffusion.csv"),
+                            index=False
+                        )
+
+                    exported_files.append(f"{vname}_{suffix}")
+
+                offset += n
+
+            # Save shape information
+            shapes_data = self._roi_canvas.get_shapes_data()
+            shapes_path = os.path.join(save_dir, "roi_boundaries.json")
+            with open(shapes_path, 'w') as f:
+                json.dump({'shapes': shapes_data}, f, indent=2)
+
+            QMessageBox.information(self, "Export complete",
+                                    f"Exported {len(exported_files)} ROI files "
+                                    f"from {len(self._roi_datasets)} video(s) to:\n{save_dir}\n\n"
+                                    f"Shapes saved to: roi_boundaries.json")
+        except Exception as e:
+            QMessageBox.critical(self, "Export error", str(e))
+    # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
     def _auto_load_analysis(self, output_dir: str):
         """Auto-load H-K data into Analysis tab after a FreeTrace run."""
