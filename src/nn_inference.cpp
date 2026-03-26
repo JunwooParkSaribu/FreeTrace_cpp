@@ -679,38 +679,175 @@ std::vector<float> predict_k_nn_batch(const NNModels& models, // Modified by Cla
     return results; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
-#else // No ONNX Runtime
+#else // No ONNX Runtime  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
-bool load_nn_models(NNModels& /*models*/, const std::string& /*models_dir*/) {
+bool load_nn_models(NNModels& models, const std::string& models_dir) {
+#ifdef USE_COREML
+    try {
+        models.reg_model_nums = {3, 5, 8};
+        models.crits = {3, 5, 8, 8192};
+        load_k_direct(models.k_direct, models_dir);
+        if (!coreml_load_alpha_models(models_dir.c_str(),
+                                      models.reg_model_nums.data(),
+                                      (int)models.reg_model_nums.size())) {
+            return false;
+        }
+        models.use_coreml = true;
+        models.loaded = true;
+        std::cout << "\n  NN inference: CoreML (GPU / Apple Neural Engine)\n" << std::endl;
+        return true;
+    } catch (...) {
+        return false;
+    }
+#else
+    (void)models; (void)models_dir;
     return false;
+#endif
 }
 
-void free_nn_models(NNModels& /*models*/) {}
+void free_nn_models(NNModels& models) {
+#ifdef USE_COREML
+    coreml_free_models();
+#endif
+    models.loaded = false;
+}
 
-float predict_alpha_nn(const NNModels& /*models*/,
-                       const std::vector<float>& /*xs*/,
-                       const std::vector<float>& /*ys*/) {
+float predict_alpha_nn(const NNModels& models,
+                       const std::vector<float>& xs,
+                       const std::vector<float>& ys) {
+#ifdef USE_COREML
+    if (!models.loaded || xs.size() < 3) return 1.0f;
+    int n = (int)xs.size();
+    int model_num = model_selection(models, n);
+
+    std::vector<std::vector<double>> windows_x, windows_y;
+    for (int i = 0; i + model_num <= n; i++) {
+        windows_x.push_back(std::vector<double>(xs.begin() + i, xs.begin() + i + model_num));
+        windows_y.push_back(std::vector<double>(ys.begin() + i, ys.begin() + i + model_num));
+    }
+    if (windows_x.empty()) return 1.0f;
+
+    int batch_size = 2 * (int)windows_x.size();
+    std::vector<float> input_data(batch_size * model_num * 1 * 3);
+    for (int w = 0; w < (int)windows_x.size(); w++) {
+        std::vector<float> x_sig, y_sig;
+        cvt_2_signal(windows_x[w], windows_y[w], x_sig, y_sig);
+        int offset_x = (2 * w) * model_num * 3;
+        for (int i = 0; i < model_num * 3; i++) input_data[offset_x + i] = x_sig[i];
+        int offset_y = (2 * w + 1) * model_num * 3;
+        for (int i = 0; i < model_num * 3; i++) input_data[offset_y + i] = y_sig[i];
+    }
+
+    std::vector<float> pred_data(batch_size);
+    if (coreml_predict_alpha(model_num, input_data.data(), batch_size, model_num, pred_data.data())) {
+        std::vector<double> preds(batch_size);
+        for (int i = 0; i < batch_size; i++) preds[i] = (double)pred_data[i];
+        if (preds.size() <= 4) return (float)vec_mean_d(preds);
+        return (float)iqr_mean_d(preds);
+    }
+#else
+    (void)models; (void)xs; (void)ys;
+#endif
     return 1.0f;
 }
 
-float predict_k_nn(const NNModels& /*models*/,
-                   const std::vector<float>& /*xs*/,
-                   const std::vector<float>& /*ys*/) {
+float predict_k_nn(const NNModels& models,
+                   const std::vector<float>& xs,
+                   const std::vector<float>& ys) {
+    if (!models.loaded || xs.size() < 2) return 0.5f;
+    std::vector<double> xd(xs.begin(), xs.end()), yd(ys.begin(), ys.end());
+    auto disps = displacement_d(xd, yd);
+    if (disps.empty()) return 0.5f;
+    double log_disp;
+    if ((int)xs.size() < 10) log_disp = std::log10(vec_mean_d(disps));
+    else log_disp = std::log10(iqr_mean_d(disps));
+    if (std::isnan(log_disp) || std::isinf(log_disp)) return 0.5f;
+    if (models.k_direct.loaded) {
+        float k = k_direct_predict(models.k_direct, (float)log_disp);
+        return std::isnan(k) ? 1.0f : k;
+    }
     return 0.5f;
 }
 
-std::vector<float> predict_alpha_nn_batch(const NNModels& /*models*/,
+std::vector<float> predict_alpha_nn_batch(const NNModels& models,
                                           const std::vector<std::vector<float>>& xs_batch,
-                                          const std::vector<std::vector<float>>& /*ys_batch*/) {
-    return std::vector<float>(xs_batch.size(), 1.0f);
+                                          const std::vector<std::vector<float>>& ys_batch) {
+    int N = (int)xs_batch.size();
+    std::vector<float> results(N, 1.0f);
+#ifdef USE_COREML
+    if (!models.loaded || N == 0) return results;
+
+    std::map<int, std::vector<std::pair<int,int>>> groups; // model_num -> [(orig_idx, num_windows)]
+    std::map<int, std::vector<float>> group_data;
+
+    for (int idx = 0; idx < N; idx++) {
+        if (xs_batch[idx].size() < 3) continue;
+        int n = (int)xs_batch[idx].size();
+        int model_num = model_selection(models, n);
+        std::vector<std::vector<double>> wx, wy;
+        for (int i = 0; i + model_num <= n; i++) {
+            wx.push_back(std::vector<double>(xs_batch[idx].begin() + i, xs_batch[idx].begin() + i + model_num));
+            wy.push_back(std::vector<double>(ys_batch[idx].begin() + i, ys_batch[idx].begin() + i + model_num));
+        }
+        if (wx.empty()) continue;
+        int bsz = 2 * (int)wx.size();
+        groups[model_num].push_back({idx, bsz});
+        auto& data = group_data[model_num];
+        for (int w = 0; w < (int)wx.size(); w++) {
+            std::vector<float> x_sig, y_sig;
+            cvt_2_signal(wx[w], wy[w], x_sig, y_sig);
+            data.insert(data.end(), x_sig.begin(), x_sig.end());
+            data.insert(data.end(), y_sig.begin(), y_sig.end());
+        }
+    }
+
+    for (auto& [model_num, infos] : groups) {
+        auto& data = group_data[model_num];
+        int total_batch = 0;
+        for (auto& [idx, nw] : infos) total_batch += nw;
+        if (total_batch == 0) continue;
+        std::vector<float> pred_buf(total_batch);
+        if (coreml_predict_alpha(model_num, data.data(), total_batch, model_num, pred_buf.data())) {
+            int offset = 0;
+            for (auto& [orig_idx, nw] : infos) {
+                std::vector<double> preds(nw);
+                for (int i = 0; i < nw; i++) preds[i] = (double)pred_buf[offset + i];
+                offset += nw;
+                if (preds.size() <= 4) results[orig_idx] = (float)vec_mean_d(preds);
+                else results[orig_idx] = (float)iqr_mean_d(preds);
+            }
+        }
+    }
+#else
+    (void)models; (void)ys_batch;
+#endif
+    return results;
 }
 
-std::vector<float> predict_k_nn_batch(const NNModels& /*models*/,
+std::vector<float> predict_k_nn_batch(const NNModels& models,
                                       const std::vector<std::vector<float>>& xs_batch,
-                                      const std::vector<std::vector<float>>& /*ys_batch*/) {
-    return std::vector<float>(xs_batch.size(), 0.5f);
+                                      const std::vector<std::vector<float>>& ys_batch) {
+    int N = (int)xs_batch.size();
+    std::vector<float> results(N, 0.5f);
+    if (!models.loaded || N == 0) return results;
+    for (int i = 0; i < N; i++) {
+        if (xs_batch[i].size() < 2) continue;
+        std::vector<double> xd(xs_batch[i].begin(), xs_batch[i].end());
+        std::vector<double> yd(ys_batch[i].begin(), ys_batch[i].end());
+        auto disps = displacement_d(xd, yd);
+        if (disps.empty()) continue;
+        double log_disp;
+        if ((int)xs_batch[i].size() < 10) log_disp = std::log10(vec_mean_d(disps));
+        else log_disp = std::log10(iqr_mean_d(disps));
+        if (std::isnan(log_disp) || std::isinf(log_disp)) continue;
+        if (models.k_direct.loaded) {
+            float k = k_direct_predict(models.k_direct, (float)log_disp);
+            results[i] = std::isnan(k) ? 1.0f : k;
+        }
+    }
+    return results;
 }
 
-#endif // USE_ONNXRUNTIME
+#endif // USE_ONNXRUNTIME  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
 } // namespace freetrace // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
