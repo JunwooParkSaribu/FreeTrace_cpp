@@ -4205,7 +4205,7 @@ class FreeTraceGUI(QMainWindow):
             "<p><b>Color by</b> — Choose between <b>H</b> (Hurst exponent) or "
             "<b>log K</b> (log₁₀ of the diffusion coefficient). Each trajectory "
             "is drawn in a colour corresponding to its value.</p>"
-            "<p><b>Colormap</b> — Select from <b>Jet</b> (blue → red) or "
+            "<p><b>Colormap</b> — Select from <b>Jet</b> (red → blue) or "
             "<b>Viridis</b> (purple → yellow). The colour bar on the right of the "
             "canvas shows the mapping.</p>"
             "<p><b>Min / Max range</b> — Controls which value range is mapped to the "
@@ -5277,14 +5277,14 @@ class FreeTraceGUI(QMainWindow):
 
     # --- Viz Tab ---------------------------------------------------------------
     _VIZ_COLORMAPS = {  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
-        "Jet": [
-            (0.00, (0, 0, 143)),
-            (0.12, (0, 0, 255)),
-            (0.37, (0, 255, 255)),
+        "Jet": [  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
+            (0.00, (128, 0, 0)),
+            (0.13, (255, 0, 0)),
+            (0.37, (255, 255, 0)),
             (0.50, (0, 255, 0)),
-            (0.63, (255, 255, 0)),
-            (0.87, (255, 0, 0)),
-            (1.00, (128, 0, 0)),
+            (0.63, (0, 255, 255)),
+            (0.88, (0, 0, 255)),
+            (1.00, (0, 0, 143)),
         ],
         "Viridis": [
             (0.00, (68, 1, 84)),
@@ -5368,11 +5368,19 @@ class FreeTraceGUI(QMainWindow):
         self._viz_max_spin.setFixedWidth(75)
         self._viz_max_spin.valueChanged.connect(self._on_viz_spin_changed)
         ctrl_row.addWidget(self._viz_max_spin)
-        self._viz_save_btn = QPushButton("Save")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        ctrl_row.addSpacing(12)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
+        ctrl_row.addWidget(QLabel("Min len:"))
+        self._viz_minlen_spin = QSpinBox()
+        self._viz_minlen_spin.setRange(1, 9999)
+        self._viz_minlen_spin.setValue(1)
+        self._viz_minlen_spin.setFixedWidth(65)
+        self._viz_minlen_spin.valueChanged.connect(self._on_viz_minlen_changed)
+        ctrl_row.addWidget(self._viz_minlen_spin)
+        self._viz_save_btn = QPushButton("Save")
         self._viz_save_btn.setFixedWidth(55)
         self._viz_save_btn.clicked.connect(self._on_viz_save)
         ctrl_row.addWidget(self._viz_save_btn)
-        ctrl_row.addStretch()
+        ctrl_row.addStretch()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
         section.add_layout(ctrl_row)
 
         # Canvas row: range slider (left) | canvas (center) | color bar (right)
@@ -5592,16 +5600,23 @@ class FreeTraceGUI(QMainWindow):
         self._viz_max_spin.blockSignals(False)
         self._viz_render_dynamic()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
-    def _viz_get_values(self):
-        """Return per-trajectory values based on current color mode."""
+    def _viz_get_values(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
+        """Return per-trajectory values based on current color mode, with length filter applied."""
         mode = self._viz_color_combo.currentText()
         if mode == "H":
-            return self._viz_H if hasattr(self, '_viz_H') else np.array([])
+            vals = self._viz_H.copy() if hasattr(self, '_viz_H') else np.array([])
         else:  # log K
             k = self._viz_K if hasattr(self, '_viz_K') else np.array([])
             if len(k) == 0:
                 return k
-            return np.log10(np.clip(k, 1e-20, None))
+            vals = np.log10(np.clip(k, 1e-20, None))
+        # Apply min length filter: set short trajectories to NaN
+        min_len = self._viz_minlen_spin.value() if hasattr(self, '_viz_minlen_spin') else 1
+        if min_len > 1 and hasattr(self, '_viz_traj_points') and len(vals) == len(self._viz_traj_points):
+            for i, (xs, _ys) in enumerate(self._viz_traj_points):
+                if len(xs) < min_len:
+                    vals[i] = np.nan
+        return vals  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
 
     def _on_viz_color_changed(self, _text):
         if not hasattr(self, '_viz_H') or len(self._viz_H) == 0:
@@ -5614,6 +5629,11 @@ class FreeTraceGUI(QMainWindow):
             return
         self._viz_render_dynamic()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
+    def _on_viz_minlen_changed(self, _val):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
+        if not hasattr(self, '_viz_H') or len(self._viz_H) == 0:
+            return
+        self._viz_set_default_range()
+        self._viz_render_full()
 
     def _on_viz_clear(self):
         self._viz_scene.clear()
@@ -5843,7 +5863,10 @@ class FreeTraceGUI(QMainWindow):
         painter = QPainter(pix)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
+        min_len = self._viz_minlen_spin.value() if hasattr(self, '_viz_minlen_spin') else 1  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
         for i, (sxs, sys_) in enumerate(self._viz_screen_segs):
+            if len(sxs) < min_len:
+                continue
             if nan_mask[i] if i < len(nan_mask) else True:
                 color = QColor(80, 80, 80, 60)
             else:
