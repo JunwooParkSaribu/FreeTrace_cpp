@@ -621,8 +621,8 @@ std::vector<float> predict_k_nn_batch(const NNModels& models, // Modified by Cla
     std::vector<float> results(N, 0.5f);
     if (!models.loaded || N == 0) return results;
 
-    auto* session = static_cast<Ort::Session*>(models.k_session);
-    if (!session) return results;
+    auto* session = static_cast<Ort::Session*>(models.k_session);  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    if (!session && !models.k_direct.loaded) return results;
 
     // Compute all log_displacements
     std::vector<float> input_data;
