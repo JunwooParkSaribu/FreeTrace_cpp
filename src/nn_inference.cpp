@@ -292,11 +292,16 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
         models.mem_info = new Ort::MemoryInfo(
             Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
 
-        // Try GPU first, fall back to CPU if session creation fails
+        // Try GPU first, fall back to CPU if session creation fails // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
         bool gpu_enabled = false;
         auto opts = make_session_opts(num_threads, true, gpu_enabled);
 
         bool sessions_ok = false;
+#if defined(__APPLE__)
+        // On macOS, ONNX sessions are optional — CoreML is the primary backend.
+        // If .onnx files are missing, silently skip and fall through to CoreML.
+        try {
+#endif
         if (gpu_enabled) {
             try {
                 sessions_ok = load_sessions(models, env, models_dir, opts);
@@ -325,8 +330,20 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
 #endif
             sessions_ok = load_sessions(models, env, models_dir, opts);
         }
+#if defined(__APPLE__)
+        } catch (...) {
+            // .onnx files not found — expected on macOS, CoreML will handle inference
+            sessions_ok = false;
+        }
+#endif
 
-        if (!sessions_ok) return false;
+        if (!sessions_ok) {
+#if defined(__APPLE__)
+            // On macOS, continue without ONNX — CoreML + direct-k is sufficient
+#else
+            return false;
+#endif
+        }
 
         // Load direct k model weights (fast path, bypasses ONNX for k predictions)
         if (load_k_direct(models.k_direct, models_dir)) {
@@ -335,13 +352,17 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
 
         models.loaded = true;
 
-#ifdef USE_COREML
+#ifdef USE_COREML // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
         // macOS: try CoreML for alpha (GPU/ANE acceleration), ONNX as fallback
         if (coreml_load_alpha_models(models_dir.c_str(),
                                      models.reg_model_nums.data(),
                                      (int)models.reg_model_nums.size())) {
             models.use_coreml = true;
             std::cout << "\n  NN inference: CoreML (GPU / Apple Neural Engine)\n" << std::endl;
+        } else if (!sessions_ok) {
+            // macOS: neither CoreML nor ONNX sessions available — cannot do inference
+            models.loaded = false;
+            return false;
         } else
 #endif
         if (gpu_enabled) {
@@ -349,7 +370,7 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
         } else {
             std::cout << "\n  NN inference: CPU (" << num_threads << " threads)\n" << std::endl;
         }
-        return true;
+        return true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
     } catch (const std::exception& e) {
         std::cerr << "  NN model loading failed: " << e.what() << std::endl;
         return false;
