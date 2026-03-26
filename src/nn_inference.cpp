@@ -278,53 +278,38 @@ static bool load_sessions(NNModels& models, Ort::Env* env,
     return true;
 }
 
-bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-24
+bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
     try {
-        auto* env = new Ort::Env(ORT_LOGGING_LEVEL_ERROR, "freetrace");
-        models.env = env;
-
-        int num_threads = std::max(1, (int)std::thread::hardware_concurrency());
         models.reg_model_nums = {3, 5, 8};
         models.crits = {3, 5, 8, 8192};
 
-        // Cache RunOptions and MemoryInfo (reused for every inference call)
-        models.run_options = new Ort::RunOptions();
-        models.mem_info = new Ort::MemoryInfo(
-            Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
-
-        // Load direct k model weights (fast path, bypasses ONNX for k predictions)  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        // Load direct k model weights (fast path, bypasses ONNX for k predictions)
         bool has_k_direct = load_k_direct(models.k_direct, models_dir);
         if (has_k_direct) {
             std::cout << "Loaded direct k model weights (fast path)" << std::endl;
         }
 
 #ifdef USE_COREML
-        // macOS: use CoreML for alpha + direct weights for k — no ONNX needed
-        if (coreml_load_alpha_models(models_dir.c_str(),
-                                     models.reg_model_nums.data(),
-                                     (int)models.reg_model_nums.size())) {
-            models.use_coreml = true;
-            if (!has_k_direct) {
-                // Need ONNX only for k model if direct weights not available
-                bool gpu_enabled = false;
-                auto opts = make_session_opts(num_threads, false, gpu_enabled);
-                std::string k_path = models_dir + "/reg_k_model.onnx";
-                try {
-                    auto* k_sess = new Ort::Session(*env, k_path.c_str(), opts);
-                    models.k_session = k_sess;
-                    Ort::AllocatorWithDefaultOptions alloc;
-                    models.k_input_name = std::string(k_sess->GetInputNameAllocated(0, alloc).get());
-                    models.k_output_name = std::string(k_sess->GetOutputNameAllocated(0, alloc).get());
-                } catch (...) {
-                    std::cerr << "  Warning: k model ONNX not found, using default K values." << std::endl;
-                }
-            }
-            models.loaded = true;
-            std::cout << "\n  NN inference: CoreML (GPU / Apple Neural Engine)\n" << std::endl;
-        } else
+        // macOS: CoreML only — no ONNX at all  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        if (!coreml_load_alpha_models(models_dir.c_str(),
+                                      models.reg_model_nums.data(),
+                                      (int)models.reg_model_nums.size())) {
+            return false;  // models not in this directory, caller tries next
+        }
+        models.use_coreml = true;
+        models.loaded = true;
+        std::cout << "\n  NN inference: CoreML (GPU / Apple Neural Engine)\n" << std::endl;
 #endif
+#ifndef USE_COREML
         {
-            // Non-Apple or CoreML not available: use ONNX Runtime
+            // Non-Apple: use ONNX Runtime
+            auto* env = new Ort::Env(ORT_LOGGING_LEVEL_ERROR, "freetrace");
+            models.env = env;
+            int num_threads = std::max(1, (int)std::thread::hardware_concurrency());
+            models.run_options = new Ort::RunOptions();
+            models.mem_info = new Ort::MemoryInfo(
+                Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
+
             bool gpu_enabled = false;
             auto opts = make_session_opts(num_threads, true, gpu_enabled);
 
@@ -364,6 +349,7 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
                 std::cout << "\n  NN inference: CPU (" << num_threads << " threads)\n" << std::endl;
             }
         }  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+#endif // !USE_COREML
         return true;
     } catch (const std::exception& e) {
         std::cerr << "  NN model loading failed: " << e.what() << std::endl;
