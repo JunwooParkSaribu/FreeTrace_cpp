@@ -12,6 +12,7 @@ import os
 import signal
 import sys
 import subprocess
+import time
 import shutil
 
 import numpy as np
@@ -106,6 +107,88 @@ def _find_freetrace_binary(): # Modified by Claude (claude-opus-4-6, Anthropic A
     return None # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
 
+# ---------------------------------------------------------------------------  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+# Cross-platform orphan process prevention
+# ---------------------------------------------------------------------------
+def _make_preexec_fn():
+    """Return a preexec_fn that ensures the child dies when the parent exits (Linux/macOS)."""
+    if sys.platform == "linux":
+        import ctypes
+        try:
+            _libc = ctypes.CDLL("libc.so.6", use_errno=True)
+            def _fn():
+                _libc.prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+            return _fn
+        except OSError:
+            return None
+    elif sys.platform == "darwin":
+        # macOS: no prctl equivalent. preexec_fn threads are killed by exec(),
+        # so child-side watching is not viable. Return None and rely on
+        # parent-side cleanup (atexit, closeEvent, SIGINT handler).
+        return None  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    return None
+
+
+def _attach_job_object(proc):
+    """Windows: assign process to a Job Object that kills children on parent exit."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        # Create a job object
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return
+
+        # Configure: kill all processes in job when last handle closes
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [("_" + str(i), ctypes.c_uint64) for i in range(6)]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        kernel32.SetInformationJobObject(
+            job, 9,  # JobObjectExtendedLimitInformation
+            ctypes.byref(info), ctypes.sizeof(info)
+        )
+
+        # Assign process to job
+        handle = kernel32.OpenProcess(0x1FFFFF, False, proc.pid)  # PROCESS_ALL_ACCESS
+        if handle:
+            kernel32.AssignProcessToJobObject(job, handle)
+            kernel32.CloseHandle(handle)
+        # Keep job handle alive (prevent GC) by attaching to process object
+        proc._job_handle = job
+    except Exception:
+        pass  # Best-effort; atexit is the fallback
+
+
 # ---------------------------------------------------------------------------
 # Worker thread — runs FreeTrace C++ binary without blocking the UI
 # ---------------------------------------------------------------------------
@@ -122,6 +205,8 @@ class FreeTraceWorker(QThread):
         self.batch = batch
         self._process = None
         self._cancel = False
+        self._batch_file_idx = 0   # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        self._batch_total_files = 1  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
         self._batch_summary = ""  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
     def cancel(self): # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
@@ -142,7 +227,10 @@ class FreeTraceWorker(QThread):
 
     def run(self):
         try:
-            cmd = [self.binary] + self.args
+            cmd = [self.binary] + self.args  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            # Wrap with stdbuf to force line-buffered stdout (prevents output buffering in pipes)
+            if sys.platform != "win32" and shutil.which("stdbuf"):
+                cmd = ["stdbuf", "-oL"] + cmd
             self.log.emit(f"$ {' '.join(cmd)}")
             self.log.emit("")
             self.progress.emit(5, "Running...")
@@ -169,8 +257,12 @@ class FreeTraceWorker(QThread):
                 )
             else:
                 popen_kwargs["start_new_session"] = True
+                pfn = _make_preexec_fn()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+                if pfn:
+                    popen_kwargs["preexec_fn"] = pfn
 
             self._process = subprocess.Popen(cmd, **popen_kwargs)
+            _attach_job_object(self._process)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
             # Register atexit handler so subprocess is killed even on unexpected exit
             def _cleanup_process(proc=self._process):
@@ -186,7 +278,8 @@ class FreeTraceWorker(QThread):
 
             seen_warnings = set()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-17
             self._error_lines = []  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
-            for line in self._process.stdout:
+            self._current_stage = "loc"  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            for line in iter(self._process.stdout.readline, ''):
                 line = line.rstrip("\n")
                 # Show each libtiff warning only once per run
                 if line.startswith("TIFFReadDirectory: Warning"):
@@ -194,26 +287,68 @@ class FreeTraceWorker(QThread):
                         seen_warnings.add(line)
                         self.log.emit(line)
                     continue
-                self.log.emit(line)
-                # Collect error/failure lines for the error dialog
-                line_lower = line.lower()
-                if any(kw in line_lower for kw in ("error", "failed", "cannot", "exception", "err:")):
-                    self._error_lines.append(line)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+                # Don't show raw PROGRESS protocol lines in the log  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+                if not line.startswith("PROGRESS:") and not line.startswith("PROGRESS_BATCH:"):
+                    self.log.emit(line)
+                    # Collect error/failure lines for the error dialog
+                    line_lower = line.lower()
+                    if any(kw in line_lower for kw in ("error", "failed", "cannot", "exception", "err:")):
+                        self._error_lines.append(line)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
 
-                # Parse progress from output # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
+                # Parse progress from output  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+                # Batch file header: PROGRESS_BATCH:<idx>:<total>:<filename>
+                if line.startswith("PROGRESS_BATCH:"):
+                    bparts = line.split(":", 3)
+                    if len(bparts) == 4:
+                        try:
+                            self._batch_file_idx = int(bparts[1])
+                            self._batch_total_files = max(int(bparts[2]), 1)
+                        except ValueError:
+                            pass
+                        self._current_stage = "loc"
+                        fname = bparts[3]
+                        batch_base = int(self._batch_file_idx * 100 / self._batch_total_files)
+                        self.progress.emit(min(batch_base, 99),
+                                           f"[{self._batch_file_idx+1}/{self._batch_total_files}] {fname}")
+                    continue
+
+                # Stage banners → set current stage
                 if "Localization" in line and "===" in line:
-                    self.progress.emit(10, "Localization")
+                    self._current_stage = "loc"
                 elif "Tracking" in line and "===" in line:
-                    self.progress.emit(50, "Tracking")
+                    self._current_stage = "trk"
                 elif "Starting trajectory inference" in line:
-                    self.progress.emit(55, "Trajectory reconstruction")
-                elif "Estimating H for" in line:
-                    self.progress.emit(80, "Estimating H for trajectories")
-                elif "Estimating K" in line:
-                    self.progress.emit(85, "Estimating K for trajectories")
+                    self._current_stage = "trk"
+
+                # PROGRESS:<pct>:<label> lines from C++ binary
+                if line.startswith("PROGRESS:"):
+                    parts = line.split(":", 2)
+                    if len(parts) == 3:
+                        try:
+                            sub_pct = int(parts[1])
+                            label = parts[2]
+                        except ValueError:
+                            sub_pct, label = 0, ""
+                        # Map sub_pct into per-file stage range (0–100%)
+                        if "Localizing" in label:
+                            file_pct = int(sub_pct * 0.40)        # 0–40%
+                        elif "Tracking frame" in label:
+                            file_pct = 40 + int(sub_pct * 0.30)   # 40–70%
+                        elif "Estimating H" in label:
+                            file_pct = 70 + int(sub_pct * 0.20)   # 70–90%
+                        elif "Estimating K" in label:
+                            file_pct = 92
+                        else:
+                            file_pct = sub_pct
+                        # Map per-file pct into global batch range
+                        n = self._batch_total_files
+                        idx = self._batch_file_idx
+                        overall = int((idx * 100 + file_pct) / n)
+                        batch_prefix = f"[{idx+1}/{n}] " if n > 1 else ""
+                        self.progress.emit(min(overall, 99), f"{batch_prefix}{label}")
                 elif "Batch complete" in line:
-                    self._batch_summary = line  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
-                    self.progress.emit(95, "Finishing")
+                    self._batch_summary = line
+                    self.progress.emit(95, "Finishing")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
                 if self._cancel:
                     break
@@ -325,7 +460,12 @@ class PreviewWorker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic 
                 popen_kw["creationflags"] = (
                     subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
                 )
+            else:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+                pfn = _make_preexec_fn()
+                if pfn:
+                    popen_kw["preexec_fn"] = pfn
             proc = subprocess.Popen(cmd, **popen_kw)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+            _attach_job_object(proc)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
             for line in proc.stdout:
                 line = line.rstrip("\n")
                 if not line.startswith("TIFFReadDirectory: Warning"):
@@ -941,12 +1081,12 @@ class HKGatingCanvas(QGraphicsView):  # Modified by Claude (claude-opus-4-6, Ant
     """
     gating_changed = pyqtSignal()
 
-    _MARGIN_LEFT = 60
-    _MARGIN_BOTTOM = 50
-    _MARGIN_TOP = 30
-    _MARGIN_RIGHT = 30
-    _PLOT_W = 500
-    _PLOT_H = 400
+    _MARGIN_LEFT = 120  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    _MARGIN_BOTTOM = 100
+    _MARGIN_TOP = 60
+    _MARGIN_RIGHT = 60
+    _PLOT_W = 1000
+    _PLOT_H = 800  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
     # Color palette for multiple regions
     _REGION_COLORS = [
@@ -1030,6 +1170,8 @@ class HKGatingCanvas(QGraphicsView):  # Modified by Claude (claude-opus-4-6, Ant
         pen_axis = QPen(QColor(150, 150, 150), 1.5)
         pen_grid = QPen(QColor(60, 60, 60), 0.5, Qt.PenStyle.DashLine)
         pen_text = QColor(180, 180, 180)
+        scene_font = QFont()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        scene_font.setPointSize(18)  # scaled for 1000x800 scene
 
         self._scene.addRect(
             QRectF(self._MARGIN_LEFT, self._MARGIN_TOP, self._PLOT_W, self._PLOT_H),
@@ -1039,16 +1181,16 @@ class HKGatingCanvas(QGraphicsView):  # Modified by Claude (claude-opus-4-6, Ant
         for h_val in np.arange(0.0, 1.01, 0.1):
             x = self._h_to_x(h_val)
             self._scene.addLine(x, self._MARGIN_TOP, x, self._MARGIN_TOP + self._PLOT_H, pen_grid)
-            txt = self._scene.addSimpleText(f"{h_val:.1f}")
+            txt = self._scene.addSimpleText(f"{h_val:.1f}", scene_font)
             txt.setBrush(pen_text)
-            txt.setPos(x - 10, self._MARGIN_TOP + self._PLOT_H + 5)
+            txt.setPos(x - 18, self._MARGIN_TOP + self._PLOT_H + 8)
 
         for logk_val in range(int(self._logk_min), int(self._logk_max) + 1):
             y = self._logk_to_y(logk_val)
             self._scene.addLine(self._MARGIN_LEFT, y, self._MARGIN_LEFT + self._PLOT_W, y, pen_grid)
-            txt = self._scene.addSimpleText(f"1e{logk_val}")
+            txt = self._scene.addSimpleText(f"1e{logk_val}", scene_font)
             txt.setBrush(pen_text)
-            txt.setPos(self._MARGIN_LEFT - 45, y - 8)
+            txt.setPos(self._MARGIN_LEFT - 80, y - 12)
 
         self._scene.addLine(
             self._MARGIN_LEFT, self._MARGIN_TOP + self._PLOT_H,
@@ -1059,13 +1201,13 @@ class HKGatingCanvas(QGraphicsView):  # Modified by Claude (claude-opus-4-6, Ant
             self._MARGIN_LEFT, self._MARGIN_TOP + self._PLOT_H, pen_axis
         )
 
-        x_label = self._scene.addSimpleText("H (Hurst exponent)")
+        x_label = self._scene.addSimpleText("H (Hurst exponent)", scene_font)
         x_label.setBrush(pen_text)
-        x_label.setPos(self._MARGIN_LEFT + self._PLOT_W / 2 - 60, self._MARGIN_TOP + self._PLOT_H + 28)
+        x_label.setPos(self._MARGIN_LEFT + self._PLOT_W / 2 - 100, self._MARGIN_TOP + self._PLOT_H + 45)
 
-        y_label = self._scene.addSimpleText("K")
+        y_label = self._scene.addSimpleText("K", scene_font)
         y_label.setBrush(pen_text)
-        y_label.setPos(5, self._MARGIN_TOP + self._PLOT_H / 2 - 8)
+        y_label.setPos(8, self._MARGIN_TOP + self._PLOT_H / 2 - 12)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
         self._dot_coords = []  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
         for i in range(len(self._H)):
@@ -1098,7 +1240,7 @@ class HKGatingCanvas(QGraphicsView):  # Modified by Claude (claude-opus-4-6, Ant
         painter = QPainter(pix)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        dot_r = 3.0
+        dot_r = 5.0  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
         for i, coord in enumerate(self._dot_coords):
             if coord is None:
                 continue
@@ -1113,7 +1255,7 @@ class HKGatingCanvas(QGraphicsView):  # Modified by Claude (claude-opus-4-6, Ant
         painter.end()
         self._dot_pixmap_item = self._scene.addPixmap(pix)
         self._dot_pixmap_item.setZValue(1)  # above background, below boundaries
-        # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+        # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1570,12 +1712,12 @@ class ROICanvas(QGraphicsView):
     roi_changed = pyqtSignal()
     mode_requested = pyqtSignal(str)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
-    _MARGIN_LEFT = 60
-    _MARGIN_BOTTOM = 50
-    _MARGIN_TOP = 30
-    _MARGIN_RIGHT = 30
-    _PLOT_W = 500
-    _PLOT_H = 400
+    _MARGIN_LEFT = 120  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    _MARGIN_BOTTOM = 100
+    _MARGIN_TOP = 60
+    _MARGIN_RIGHT = 60
+    _PLOT_W = 1000
+    _PLOT_H = 800  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
     _ROI_COLORS = [
         QColor(100, 180, 255, 200),   # blue
@@ -1596,7 +1738,7 @@ class ROICanvas(QGraphicsView):
     CLASSIFY_MEAN = "Mean Position"
     CLASSIFY_STRICT = "Strict Containment"
 
-    _HANDLE_SIZE = 8  # pixels, half-width of resize handles
+    _HANDLE_SIZE = 14  # pixels, half-width of resize handles  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1703,6 +1845,8 @@ class ROICanvas(QGraphicsView):
         pen_axis = QPen(QColor(150, 150, 150), 1.5)
         pen_grid = QPen(QColor(60, 60, 60), 0.5, Qt.PenStyle.DashLine)
         pen_text = QColor(180, 180, 180)
+        scene_font = QFont()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        scene_font.setPointSize(18)  # scaled for 1000x800 scene
 
         self._scene.addRect(
             QRectF(self._MARGIN_LEFT, self._MARGIN_TOP, self._PLOT_W, self._PLOT_H),
@@ -1717,9 +1861,9 @@ class ROICanvas(QGraphicsView):
             sx = self._x_to_sx(xv)
             if self._MARGIN_LEFT <= sx <= self._MARGIN_LEFT + self._PLOT_W:
                 self._scene.addLine(sx, self._MARGIN_TOP, sx, self._MARGIN_TOP + self._PLOT_H, pen_grid)
-                txt = self._scene.addSimpleText(f"{xv:.0f}")
+                txt = self._scene.addSimpleText(f"{xv:.0f}", scene_font)
                 txt.setBrush(pen_text)
-                txt.setPos(sx - 12, self._MARGIN_TOP + self._PLOT_H + 5)
+                txt.setPos(sx - 20, self._MARGIN_TOP + self._PLOT_H + 8)
             xv += x_step
 
         # Grid lines — Y axis
@@ -1730,9 +1874,9 @@ class ROICanvas(QGraphicsView):
             sy = self._y_to_sy(yv)
             if self._MARGIN_TOP <= sy <= self._MARGIN_TOP + self._PLOT_H:
                 self._scene.addLine(self._MARGIN_LEFT, sy, self._MARGIN_LEFT + self._PLOT_W, sy, pen_grid)
-                txt = self._scene.addSimpleText(f"{yv:.0f}")
+                txt = self._scene.addSimpleText(f"{yv:.0f}", scene_font)
                 txt.setBrush(pen_text)
-                txt.setPos(self._MARGIN_LEFT - 45, sy - 8)
+                txt.setPos(self._MARGIN_LEFT - 80, sy - 12)
             yv += y_step
 
         self._scene.addLine(
@@ -1742,12 +1886,12 @@ class ROICanvas(QGraphicsView):
             self._MARGIN_LEFT, self._MARGIN_TOP,
             self._MARGIN_LEFT, self._MARGIN_TOP + self._PLOT_H, pen_axis)
 
-        x_label = self._scene.addSimpleText("X (pixels)")
+        x_label = self._scene.addSimpleText("X (pixels)", scene_font)
         x_label.setBrush(pen_text)
-        x_label.setPos(self._MARGIN_LEFT + self._PLOT_W / 2 - 30, self._MARGIN_TOP + self._PLOT_H + 28)
-        y_label = self._scene.addSimpleText("Y (pixels)")
+        x_label.setPos(self._MARGIN_LEFT + self._PLOT_W / 2 - 55, self._MARGIN_TOP + self._PLOT_H + 45)
+        y_label = self._scene.addSimpleText("Y (pixels)", scene_font)
         y_label.setBrush(pen_text)
-        y_label.setPos(5, self._MARGIN_TOP + self._PLOT_H / 2 - 8)
+        y_label.setPos(8, self._MARGIN_TOP + self._PLOT_H / 2 - 12)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
         self._render_traj_pixmap()
 
@@ -1801,7 +1945,7 @@ class ROICanvas(QGraphicsView):
                     color = self._ROI_COLORS[lbl % len(self._ROI_COLORS)]
             else:
                 color = self._color_default
-            pen = QPen(color, 0.5)
+            pen = QPen(color, 1.0)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
             pen.setCosmetic(True)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -1976,7 +2120,7 @@ class ROICanvas(QGraphicsView):
                     return i
         return -1
 
-    _ROT_HANDLE_OFFSET = 25  # pixels from shape edge to rotation handle
+    _ROT_HANDLE_OFFSET = 45  # scene pixels from shape edge to rotation handle  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
     def _get_handles(self, shape_idx):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
         """Return list of (handle_id, QPointF) for a shape."""
@@ -3331,6 +3475,54 @@ class FreeTraceGUI(QMainWindow):
                 "so it can be overlaid on other images or used in presentations."
             ),
         },
+        {  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            "keywords": ["progress", "progress bar", "elapsed", "eta", "time remaining",
+                         "time left", "how long", "estimated time"],
+            "question": "What does the progress bar show during execution?",
+            "answer": (
+                "During execution, the progress bar shows the current stage and completion "
+                "percentage. The stages are: Localization (0–40%), Tracking (40–70%), "
+                "H estimation (70–90%), and K estimation (90–95%). An elapsed timer is shown "
+                "to the right of the bar, along with an estimated time remaining (ETA) based "
+                "on the recent progress rate. The ETA adapts to each stage's speed — it will "
+                "increase when entering slow stages like H estimation."
+            ),
+        },
+        {
+            "keywords": ["batch", "batch mode", "folder", "multiple files", "batch progress"],
+            "question": "How does batch mode work?",
+            "answer": (
+                "Select 'Batch (folder)' mode and choose a folder containing TIFF/ND2 files. "
+                "FreeTrace processes each file sequentially. The progress bar shows overall "
+                "progress across all files — e.g., with 5 files, each file contributes 20% "
+                "to the total. The current file name and index (e.g., [3/5]) are shown in the "
+                "progress label and window title. If some files fail, a summary and error log "
+                "are shown at the end."
+            ),
+        },
+        {
+            "keywords": ["cancel", "stop", "abort", "kill", "terminate", "running"],
+            "question": "Can I stop FreeTrace while it is running?",
+            "answer": (
+                "Yes. Click the 'Stop' button during execution to cancel. The C++ process "
+                "is terminated gracefully (SIGTERM). If you close the GUI window while "
+                "FreeTrace is running, the child process is also terminated automatically. "
+                "On Linux and macOS, orphan prevention ensures the C++ process is killed "
+                "even if the GUI crashes unexpectedly."
+            ),
+        },
+        {
+            "keywords": ["auto run", "auto statistics", "automatic", "load data",
+                         "run statistics", "preprocessing"],
+            "question": "Do I need to manually click 'Run Statistics' after loading data?",
+            "answer": (
+                "No. Both the Basic Stats and Advanced Stats tabs automatically run their "
+                "preprocessing as soon as data is loaded. You do not need to click 'Run "
+                "Statistics' or 'Run Advanced Stats' — the results appear automatically "
+                "after loading. You can still re-run manually if you change parameters "
+                "like pixel size or frame rate."
+            ),
+        },
     ]  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
     def _build_chat_tab(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20 18:00
@@ -3989,7 +4181,24 @@ class FreeTraceGUI(QMainWindow):
             "against short trajectory lengths. When the NN H distribution "
             "shows a strong peak at H = 0.5 while the Cauchy Ĥ deviates from "
             "0.5, short-trajectory bias in the NN estimate is a likely cause.</p>"
-            "<h3 style='color:#66ccff;'>Viz Tab</h3>"  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            "<h3 style='color:#66ccff;'>Running FreeTrace</h3>"  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            "<p><b>Progress bar</b> — Shows real-time progress during execution. "
+            "The four stages are mapped to percentage ranges: Localization (0–40%), "
+            "Tracking (40–70%), H estimation (70–90%), and K estimation (90–95%). "
+            "The progress bar also displays the current stage label. "
+            "An elapsed timer and estimated time remaining (ETA) are shown to the right.</p>"
+            "<p><b>ETA</b> — The estimated time remaining adapts to the current processing "
+            "speed. It uses the rate of recent progress updates rather than a simple average, "
+            "so it adjusts when entering slower stages like H estimation.</p>"
+            "<p><b>Batch mode</b> — In batch mode, the progress bar maps each file's "
+            "internal progress into a global percentage. The window title shows the "
+            "current file index (e.g., [3/5]). If some files fail, an error log is "
+            "written and a summary dialog is shown at the end.</p>"
+            "<p><b>Stop / Cancel</b> — Click 'Stop' to cancel execution. The child "
+            "process is terminated. Closing the GUI window also terminates any running "
+            "process. On Linux and macOS, orphan prevention ensures the C++ process "
+            "is killed even if the GUI exits unexpectedly.</p>"
+            "<h3 style='color:#66ccff;'>Viz Tab</h3>"
             "<p>The Viz tab provides trajectory visualisation coloured by diffusion "
             "properties. Load a FreeTrace output pair (<code>_traces.csv</code> + "
             "<code>_diffusion.csv</code>) to render all trajectories on a spatial plot.</p>"
@@ -4379,6 +4588,7 @@ class FreeTraceGUI(QMainWindow):
                 self._stats_info_label.setText(
                     f"Loaded {total_traj} trajectories from {n} videos"
                     f" ({has_diff} with diffusion data).")
+            self._on_run_preprocessing()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
     def _load_stats_data_from_file(self, selected_path):
         """Load data for Basic Stats — accepts _traces.csv (required), _diffusion.csv (optional)."""
@@ -5244,8 +5454,8 @@ class FreeTraceGUI(QMainWindow):
         pad_y = max((all_y.max() - all_y.min()) * 0.05, 1.0)
         x_min, x_max = float(all_x.min() - pad_x), float(all_x.max() + pad_x)
         y_min, y_max = float(all_y.min() - pad_y), float(all_y.max() + pad_y)
-        ML, MT, PW, PH = 60, 30, 500, 400
-        MR, MB = 30, 50
+        ML, MT, PW, PH = 120, 60, 1000, 800  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        MR, MB = 60, 100
         total_w = ML + PW + MR
         total_h = MT + PH + MB
         self._viz_bounds = (x_min, x_max, y_min, y_max, ML, MT, PW, PH, total_w, total_h)
@@ -5481,24 +5691,25 @@ class FreeTraceGUI(QMainWindow):
                 tpath.lineTo(float(exs[j]), float(eys[j]))
             painter.drawPath(tpath)
 
-        # Colorbar
+        # Colorbar — 60% of plot height, vertically centred  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        cbar_h = int(sPH * 0.6)
         cbar_x = sPW + cbar_gap
-        cbar_y = title_h
-        row_indices = np.clip(((1.0 - np.arange(sPH) / max(sPH - 1, 1)) * 255).astype(int), 0, 255)
+        cbar_y = title_h + (sPH - cbar_h) // 2
+        row_indices = np.clip(((1.0 - np.arange(cbar_h) / max(cbar_h - 1, 1)) * 255).astype(int), 0, 255)
         rgb = lut[row_indices]
-        row_argb = np.zeros((sPH, 4), dtype=np.uint8)
+        row_argb = np.zeros((cbar_h, 4), dtype=np.uint8)
         row_argb[:, 0] = rgb[:, 2]
         row_argb[:, 1] = rgb[:, 1]
         row_argb[:, 2] = rgb[:, 0]
         row_argb[:, 3] = 255
-        img_data = np.tile(row_argb, (1, cbar_w)).reshape(sPH, cbar_w, 4)
-        cbar_img = QImage(img_data.tobytes(), cbar_w, sPH, cbar_w * 4, QImage.Format.Format_ARGB32)
+        img_data = np.tile(row_argb, (1, cbar_w)).reshape(cbar_h, cbar_w, 4)
+        cbar_img = QImage(img_data.tobytes(), cbar_w, cbar_h, cbar_w * 4, QImage.Format.Format_ARGB32)
         painter.drawImage(cbar_x, cbar_y, cbar_img.copy())
 
         # Colorbar border
         painter.setPen(QPen(QColor(180, 180, 180), max(1, scale)))
         painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
-        painter.drawRect(cbar_x, cbar_y, cbar_w, sPH)
+        painter.drawRect(cbar_x, cbar_y, cbar_w, cbar_h)
 
         # Colorbar ticks
         pen_text = QColor(180, 180, 180)
@@ -5509,7 +5720,7 @@ class FreeTraceGUI(QMainWindow):
         n_ticks = 5
         for ti in range(n_ticks + 1):
             frac = ti / n_ticks
-            ty = cbar_y + int(sPH * (1.0 - frac))
+            ty = cbar_y + int(cbar_h * (1.0 - frac))
             val = vmin + (vmax - vmin) * frac
             painter.drawLine(QPointF(cbar_x + cbar_w, ty),
                              QPointF(cbar_x + cbar_w + 3 * scale, ty))
@@ -5563,6 +5774,8 @@ class FreeTraceGUI(QMainWindow):
         pen_grid = QPen(QColor(60, 60, 60), 0.5, Qt.PenStyle.DashLine)
         pen_axis = QPen(QColor(150, 150, 150), 1.5)
         pen_text = QColor(180, 180, 180)
+        scene_font = QFont()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        scene_font.setPointSize(18)  # scaled for 1000x800 scene
 
         self._viz_scene.addRect(QRectF(ML, MT, PW, PH),
                                 QPen(Qt.PenStyle.NoPen), QBrush(QColor(30, 30, 30)))
@@ -5574,9 +5787,9 @@ class FreeTraceGUI(QMainWindow):
             sx = ML + (xv - x_min) / (x_max - x_min) * PW
             if ML <= sx <= ML + PW:
                 self._viz_scene.addLine(sx, MT, sx, MT + PH, pen_grid)
-                t = self._viz_scene.addSimpleText(f"{xv:.0f}")
+                t = self._viz_scene.addSimpleText(f"{xv:.0f}", scene_font)
                 t.setBrush(pen_text)
-                t.setPos(sx - 12, MT + PH + 5)
+                t.setPos(sx - 20, MT + PH + 8)
             xv += x_step
 
         y_range = y_max - y_min
@@ -5586,20 +5799,20 @@ class FreeTraceGUI(QMainWindow):
             sy = MT + (yv - y_min) / (y_max - y_min) * PH
             if MT <= sy <= MT + PH:
                 self._viz_scene.addLine(ML, sy, ML + PW, sy, pen_grid)
-                t = self._viz_scene.addSimpleText(f"{yv:.0f}")
+                t = self._viz_scene.addSimpleText(f"{yv:.0f}", scene_font)
                 t.setBrush(pen_text)
-                t.setPos(ML - 45, sy - 8)
+                t.setPos(ML - 80, sy - 12)
             yv += y_step
 
         self._viz_scene.addLine(ML, MT + PH, ML + PW, MT + PH, pen_axis)
         self._viz_scene.addLine(ML, MT, ML, MT + PH, pen_axis)
 
-        xl = self._viz_scene.addSimpleText("X (pixels)")
+        xl = self._viz_scene.addSimpleText("X (pixels)", scene_font)
         xl.setBrush(pen_text)
-        xl.setPos(ML + PW / 2 - 30, MT + PH + 28)
-        yl = self._viz_scene.addSimpleText("Y (pixels)")
+        xl.setPos(ML + PW / 2 - 55, MT + PH + 45)
+        yl = self._viz_scene.addSimpleText("Y (pixels)", scene_font)
         yl.setBrush(pen_text)
-        yl.setPos(5, MT + PH / 2 - 8)
+        yl.setPos(8, MT + PH / 2 - 12)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
     def _viz_render_dynamic(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
         """Render only trajectories (pixmap) + colorbar. Uses cached screen coords + LUT."""
@@ -5636,7 +5849,7 @@ class FreeTraceGUI(QMainWindow):
             else:
                 r, g, b = int(lut[idx_arr[i], 0]), int(lut[idx_arr[i], 1]), int(lut[idx_arr[i], 2])
                 color = QColor(r, g, b, 200)
-            pen = QPen(color, 0.5)
+            pen = QPen(color, 1.0)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
             pen.setCosmetic(True)
             painter.setPen(pen)
             n = len(sxs)
@@ -5742,6 +5955,7 @@ class FreeTraceGUI(QMainWindow):
             else:
                 self._adv_stats_info_label.setText(
                     f"Loaded {total_traj} trajectories from {n} videos.")
+            self._on_run_adv_stats()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
     def _load_adv_stats_data_from_file(self, selected_path):
         """Load traces CSV for Advanced Stats."""
@@ -6222,17 +6436,31 @@ class FreeTraceGUI(QMainWindow):
         self._adv_sec.add_layout(adv_grid)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
         layout.addWidget(self._adv_sec)
 
-        # Progress
+        # Progress  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        prog_row = QHBoxLayout()
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
         self._progress_bar.setTextVisible(True)
-        self._progress_bar.setFormat("%p%  %v")
-        layout.addWidget(self._progress_bar)
+        self._progress_bar.setFormat("%p%")
+        prog_row.addWidget(self._progress_bar, stretch=1)
+
+        self._elapsed_label = QLabel("")
+        self._elapsed_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._elapsed_label.setMinimumWidth(120)
+        prog_row.addWidget(self._elapsed_label)
+        layout.addLayout(prog_row)
 
         self._stage_label = QLabel("")
         self._stage_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._stage_label)
+
+        # Elapsed / ETA timer
+        self._run_timer = QTimer(self)
+        self._run_timer.setInterval(1000)
+        self._run_timer.timeout.connect(self._update_elapsed)
+        self._run_start_time = 0.0
+        self._progress_history = []  # list of (time, pct) for recent-rate ETA  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
         # Buttons  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
         btn_row = QHBoxLayout()
@@ -6361,6 +6589,7 @@ class FreeTraceGUI(QMainWindow):
             f"color:#888; font-size:{f(14)}px; margin-bottom:4px;"
         )
         self._stage_label.setStyleSheet(f"color:#888; font-size:{f(13)}px;")
+        self._elapsed_label.setStyleSheet(f"color:#aaa; font-size:{f(12)}px;")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
         try: # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
             self._no_results_label.setStyleSheet(
                 f"color:#666; font-size:{f(15)}px; margin:40px;"
@@ -6453,7 +6682,12 @@ class FreeTraceGUI(QMainWindow):
         self._log.append(f"<b>fBm mode:</b> {self._fbm_mode.isChecked()}")
         self._log.append("-" * 60)
         self._progress_bar.setValue(0)
+        self._progress_bar.setFormat("%p%")
         self._stage_label.setText("")
+        self._elapsed_label.setText("")
+        self._run_start_time = time.monotonic()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        self._progress_history = []
+        self._run_timer.start()
         self._run_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._tabs.setCurrentIndex(0)
@@ -6483,11 +6717,47 @@ class FreeTraceGUI(QMainWindow):
             self._log.verticalScrollBar().maximum()
         )
 
-    def _update_progress(self, value: int, label: str):
+    def _update_progress(self, value: int, label: str):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
         self._progress_bar.setValue(value)
+        # Show stage label on the progress bar itself
+        self._progress_bar.setFormat(f"%p%  —  {label}" if label else "%p%")
         self._stage_label.setText(label)
+        # Record progress for ETA estimation (keep last 8 samples)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        now = time.monotonic()
+        if not self._progress_history or value > self._progress_history[-1][1]:
+            self._progress_history.append((now, value))
+            if len(self._progress_history) > 8:
+                self._progress_history = self._progress_history[-8:]
+        # Window title: show batch info while running
+        if label and ("[" in label and "]" in label):
+            batch_tag = label[:label.index("]") + 1]
+            self.setWindowTitle(f"FreeTrace v{_VERSION} — {batch_tag}")
+        elif value >= 100:
+            self.setWindowTitle(f"FreeTrace v{_VERSION}")
+
+    def _update_elapsed(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        elapsed = time.monotonic() - self._run_start_time
+        mins, secs = divmod(int(elapsed), 60)
+        txt = f"{mins:02d}:{secs:02d}"
+        # ETA based on recent progress rate (last few samples)
+        hist = self._progress_history
+        if len(hist) >= 2:
+            t0, p0 = hist[0]
+            t1, p1 = hist[-1]
+            dp = p1 - p0
+            dt = t1 - t0
+            if dp > 0 and dt > 0:
+                rate = dp / dt  # percent per second
+                remaining_pct = 100 - p1
+                eta_remaining = remaining_pct / rate
+                if eta_remaining > 0:
+                    rm, rs = divmod(int(eta_remaining), 60)
+                    txt += f"  (~{rm:02d}:{rs:02d} left)"
+        self._elapsed_label.setText(txt)
 
     def _on_finished(self, success: bool, message: str):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        self._run_timer.stop()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        self.setWindowTitle(f"FreeTrace v{_VERSION}")
         self._reset_buttons()
         if success and message.startswith("BATCH_PARTIAL|"):
             # Batch mode: some files failed, some succeeded
@@ -7249,8 +7519,8 @@ class FreeTraceGUI(QMainWindow):
         log_K = np.log10(safe_K)
 
         # Plot dimensions (mirror HKGatingCanvas layout)
-        ML, MT, PW, PH = 60, 30, 500, 400
-        MR, MB = 30, 50
+        ML, MT, PW, PH = 120, 60, 1000, 800  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        MR, MB = 60, 100  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
         total_w = ML + PW + MR
         total_h = MT + PH + MB
         self._roi_hk_scene.setSceneRect(0, 0, total_w, total_h)
@@ -7266,6 +7536,8 @@ class FreeTraceGUI(QMainWindow):
         pen_grid = QPen(QColor(60, 60, 60), 0.5, Qt.PenStyle.DashLine)
         pen_axis = QPen(QColor(150, 150, 150), 1.5)
         pen_text = QColor(180, 180, 180)
+        scene_font = QFont()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        scene_font.setPointSize(18)  # scaled for 1000x800 scene
 
         self._roi_hk_scene.addRect(QRectF(ML, MT, PW, PH),
                                    QPen(Qt.PenStyle.NoPen), QBrush(QColor(30, 30, 30)))
@@ -7273,26 +7545,26 @@ class FreeTraceGUI(QMainWindow):
         for hv in np.arange(0.0, 1.01, 0.1):
             x = h_to_x(hv)
             self._roi_hk_scene.addLine(x, MT, x, MT + PH, pen_grid)
-            t = self._roi_hk_scene.addSimpleText(f"{hv:.1f}")
+            t = self._roi_hk_scene.addSimpleText(f"{hv:.1f}", scene_font)
             t.setBrush(pen_text)
-            t.setPos(x - 10, MT + PH + 5)
+            t.setPos(x - 18, MT + PH + 8)
 
         for lkv in range(int(logk_min), int(logk_max) + 1):
             y = lk_to_y(lkv)
             self._roi_hk_scene.addLine(ML, y, ML + PW, y, pen_grid)
-            t = self._roi_hk_scene.addSimpleText(f"1e{lkv}")
+            t = self._roi_hk_scene.addSimpleText(f"1e{lkv}", scene_font)
             t.setBrush(pen_text)
-            t.setPos(ML - 45, y - 8)
+            t.setPos(ML - 80, y - 12)
 
         self._roi_hk_scene.addLine(ML, MT + PH, ML + PW, MT + PH, pen_axis)
         self._roi_hk_scene.addLine(ML, MT, ML, MT + PH, pen_axis)
 
-        xl = self._roi_hk_scene.addSimpleText("H (Hurst exponent)")
+        xl = self._roi_hk_scene.addSimpleText("H (Hurst exponent)", scene_font)
         xl.setBrush(pen_text)
-        xl.setPos(ML + PW / 2 - 60, MT + PH + 28)
-        yl = self._roi_hk_scene.addSimpleText("K")
+        xl.setPos(ML + PW / 2 - 100, MT + PH + 45)
+        yl = self._roi_hk_scene.addSimpleText("K", scene_font)
         yl.setBrush(pen_text)
-        yl.setPos(5, MT + PH / 2 - 8)
+        yl.setPos(8, MT + PH / 2 - 12)
 
         # Render dots as pixmap
         pix = QPixmap(total_w, total_h)
@@ -7302,7 +7574,7 @@ class FreeTraceGUI(QMainWindow):
         painter.setPen(Qt.PenStyle.NoPen)
         colors = ROICanvas._ROI_COLORS
         default_color = QColor(180, 180, 180, 160)
-        dot_r = 3.0
+        dot_r = 5.0  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
         for i in range(len(H)):
             if not valid[i]:
@@ -7647,6 +7919,12 @@ def main():  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
 
     app = QApplication(sys.argv)
     app.setApplicationName("FreeTrace")
+    # Ensure Ctrl+C in terminal cleanly shuts down the GUI and child processes  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    # Timer allows Python to process signals (SIGINT) between Qt events
+    _sig_timer = QTimer()
+    _sig_timer.start(200)
+    _sig_timer.timeout.connect(lambda: None)
     win = FreeTraceGUI()
     win.show()
     ret = app.exec()

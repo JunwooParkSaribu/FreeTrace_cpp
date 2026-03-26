@@ -2248,15 +2248,18 @@ std::vector<TrajectoryObj> forecast(const Localizations& locs, // Modified by Cl
 
     std::set<Node> final_graph_node_set_hashed = {source_node}; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
     int saved_time_steps = 1;
+    int trk_iter_count = 0;  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
     while (true) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         std::vector<std::vector<Node>> node_pairs;
         int start_time = selected_time_steps.empty() ? last_time : selected_time_steps.back();
 
-        if (config.verbose && !selected_time_steps.empty() && selected_time_steps[0] % 50 == 0) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
-            std::cerr << "\rTracking frame " << selected_time_steps[0] << "-" << selected_time_steps.back()
-                      << " / " << last_time << std::flush;
+        if (!selected_time_steps.empty() && last_time > 0 && trk_iter_count % 20 == 0) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            int trk_pct = std::min(static_cast<int>(100.0 * selected_time_steps[0] / last_time), 100);
+            std::cerr << "PROGRESS:" << trk_pct << ":Tracking frame " << selected_time_steps[0] << "-" << selected_time_steps.back()
+                      << " / " << last_time << std::endl;
         }
+        trk_iter_count++;  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
         // Check if selected time steps intersect with available steps // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
         bool has_intersection = false;
@@ -2938,12 +2941,24 @@ void write_hk_csv(const std::string& path, // Modified by Claude (claude-opus-4-
         all_ys.push_back(std::move(ys));
     }
 
-    // Batched alpha + k prediction (few ONNX calls instead of N) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
-    std::cerr << "Estimating H for " << trajectories.size() << " trajectories..." << std::flush;
-    auto alpha_batch = predict_alpha_nn_batch(g_nn_models, all_xs, all_ys);
-    std::cerr << " done.\nEstimating K..." << std::flush;
+    // Batched alpha prediction with sub-batch progress  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    int N = (int)all_xs.size();
+    const int SUB_BATCH = 500;  // report progress every 500 trajectories
+    std::vector<float> alpha_batch(N, 1.0f);
+    for (int start = 0; start < N; start += SUB_BATCH) {
+        int end = std::min(start + SUB_BATCH, N);
+        int pct = static_cast<int>(100.0 * end / N);
+        std::cerr << "PROGRESS:" << pct << ":Estimating H (" << end << "/" << N << " trajectories)" << std::endl;
+        std::vector<std::vector<float>> sub_xs(all_xs.begin() + start, all_xs.begin() + end);
+        std::vector<std::vector<float>> sub_ys(all_ys.begin() + start, all_ys.begin() + end);
+        auto sub_result = predict_alpha_nn_batch(g_nn_models, sub_xs, sub_ys);
+        for (int i = 0; i < (int)sub_result.size(); i++)
+            alpha_batch[start + i] = sub_result[i];
+    }
+    // K estimation (fast — direct computation, no sub-batching needed)
+    std::cerr << "PROGRESS:100:Estimating K..." << std::endl;
     auto k_batch = predict_k_nn_batch(g_nn_models, all_xs, all_ys);
-    std::cerr << " done." << std::endl;
+    // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
     for (int i = 0; i < (int)trajectories.size(); i++) {
         float alpha = alpha_batch[i];

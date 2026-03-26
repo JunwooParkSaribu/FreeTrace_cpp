@@ -1,4 +1,5 @@
 #include <iostream> // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+#include <cstdio>
 #include <string>
 #include <cstring>
 #include <algorithm>
@@ -127,6 +128,11 @@ static void parse_loc_opts(int argc, char* argv[], int start_idx, int& window, f
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
 
 int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
+    // Force line-by-line flushing so GUI receives progress updates in real time  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    std::cout << std::unitbuf;
+    std::cerr << std::unitbuf;
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+    setvbuf(stderr, nullptr, _IOLBF, 0);
 
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         print_usage();
@@ -230,6 +236,7 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
         for (size_t idx = 0; idx < files.size(); ++idx) {
             const auto& input = files[idx];
             auto fname = std::filesystem::path(input).filename().string();
+            std::cerr << "PROGRESS_BATCH:" << idx << ":" << files.size() << ":" << fname << std::endl;  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
             std::cout << "=== [" << (idx + 1) << "/" << files.size() << "] " << fname << " ===" << std::endl;
 
             try {  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
