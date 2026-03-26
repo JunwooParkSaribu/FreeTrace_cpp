@@ -82,6 +82,9 @@ set(CORE_SOURCES
 if(USE_ONNXRUNTIME AND EXISTS "${ONNXRUNTIME_DIR}/include/onnxruntime_cxx_api.h")
     list(APPEND CORE_SOURCES src/nn_inference.cpp)
     add_definitions(-DUSE_ONNXRUNTIME)
+elseif(APPLE)
+    # macOS without ONNX: use nn_inference.cpp for CoreML + direct k  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    list(APPEND CORE_SOURCES src/nn_inference.cpp)
 else()
     list(APPEND CORE_SOURCES src/nn_inference_stub.cpp)
     if(USE_ONNXRUNTIME)
