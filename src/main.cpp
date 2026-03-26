@@ -131,8 +131,12 @@ int main(int argc, char* argv[]) { // Modified by Claude (claude-opus-4-6, Anthr
     // Force line-by-line flushing so GUI receives progress updates in real time  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
+#ifndef _WIN32
+    // setvbuf with _IOLBF + size 0 crashes on MSVC (allocates 0-byte buffer).
+    // On Windows, std::unitbuf alone is sufficient.
     setvbuf(stdout, nullptr, _IOLBF, 0);
     setvbuf(stderr, nullptr, _IOLBF, 0);
+#endif
 
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         print_usage();
