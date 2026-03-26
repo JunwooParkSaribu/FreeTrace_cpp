@@ -397,9 +397,9 @@ float predict_alpha_nn(const NNModels& models,
     int n = (int)xs.size();
     int model_num = model_selection(models, n);
 
-    auto it = models.alpha_sessions.find(model_num);
-    if (it == models.alpha_sessions.end()) return 1.0f;
-    auto* session = static_cast<Ort::Session*>(it->second);
+    auto it = models.alpha_sessions.find(model_num);  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    bool has_onnx_session = (it != models.alpha_sessions.end());
+    if (!has_onnx_session && !models.use_coreml) return 1.0f;
 
     // Recoupe trajectory into sliding windows of size model_num
     // Use double for preprocessing, matching Python/NumPy float64
@@ -436,28 +436,31 @@ float predict_alpha_nn(const NNModels& models,
     }
 #endif // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
 
-    try {
-        auto& mem_info = *static_cast<Ort::MemoryInfo*>(models.mem_info);
-        std::vector<int64_t> shape = {batch_size, model_num, 1, 3};
-        Ort::Value input_tensor = Ort::Value::CreateTensor<float>(mem_info, input_data.data(),
-                                                                   input_data.size(), shape.data(), shape.size());
+    if (has_onnx_session) {  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        auto* session = static_cast<Ort::Session*>(it->second);
+        try {
+            auto& mem_info = *static_cast<Ort::MemoryInfo*>(models.mem_info);
+            std::vector<int64_t> shape = {batch_size, model_num, 1, 3};
+            Ort::Value input_tensor = Ort::Value::CreateTensor<float>(mem_info, input_data.data(),
+                                                                       input_data.size(), shape.data(), shape.size());
 
-        const char* input_names[] = {models.alpha_input_names.at(model_num).c_str()};
-        const char* output_names[] = {models.alpha_output_names.at(model_num).c_str()};
+            const char* input_names[] = {models.alpha_input_names.at(model_num).c_str()};
+            const char* output_names[] = {models.alpha_output_names.at(model_num).c_str()};
 
-        auto outputs = session->Run(*static_cast<Ort::RunOptions*>(models.run_options),
-                                    input_names, &input_tensor, 1, output_names, 1);
+            auto outputs = session->Run(*static_cast<Ort::RunOptions*>(models.run_options),
+                                        input_names, &input_tensor, 1, output_names, 1);
 
-        float* pred_data = outputs[0].GetTensorMutableData<float>();
-        std::vector<double> preds(batch_size);
-        for (int i = 0; i < batch_size; i++) preds[i] = (double)pred_data[i];
+            float* pred_data = outputs[0].GetTensorMutableData<float>();
+            std::vector<double> preds(batch_size);
+            for (int i = 0; i < batch_size; i++) preds[i] = (double)pred_data[i];
 
-        if (preds.size() <= 4) return (float)vec_mean_d(preds);
-        return (float)iqr_mean_d(preds);
-    } catch (const Ort::Exception& e) {
-        std::cerr << "Alpha predict error: " << e.what() << std::endl;
-        return 1.0f;
+            if (preds.size() <= 4) return (float)vec_mean_d(preds);
+            return (float)iqr_mean_d(preds);
+        } catch (const Ort::Exception& e) {
+            std::cerr << "Alpha predict error: " << e.what() << std::endl;
+        }
     }
+    return 1.0f;
 }
 
 std::vector<float> predict_alpha_nn_batch(const NNModels& models, // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
@@ -481,7 +484,7 @@ std::vector<float> predict_alpha_nn_batch(const NNModels& models, // Modified by
         if (xs_batch[idx].size() < 3) continue;
         int n = (int)xs_batch[idx].size();
         int model_num = model_selection(models, n);
-        if (models.alpha_sessions.find(model_num) == models.alpha_sessions.end()) continue;
+        if (!models.use_coreml && models.alpha_sessions.find(model_num) == models.alpha_sessions.end()) continue;  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
         // Recoupe into windows
         std::vector<std::vector<double>> windows_x, windows_y;
@@ -506,11 +509,11 @@ std::vector<float> predict_alpha_nn_batch(const NNModels& models, // Modified by
         }
     }
 
-    // Run one ONNX call per model_num (typically 1-3 calls instead of N)
+    // Run one call per model_num (CoreML or ONNX)  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
     for (auto& [model_num, infos] : groups) {
         auto it = models.alpha_sessions.find(model_num);
-        if (it == models.alpha_sessions.end()) continue;
-        auto* session = static_cast<Ort::Session*>(it->second);
+        bool has_onnx = (it != models.alpha_sessions.end());
+        if (!has_onnx && !models.use_coreml) continue;
         auto& data = group_input_data[model_num];
 
         int total_batch = 0;
@@ -526,7 +529,8 @@ std::vector<float> predict_alpha_nn_batch(const NNModels& models, // Modified by
                                             total_batch, model_num, pred_buf.data());
         }
 #endif
-        if (!predicted) {
+        if (!predicted && has_onnx) {  // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+            auto* session = static_cast<Ort::Session*>(it->second);
             try {
                 auto& mem_info = *static_cast<Ort::MemoryInfo*>(models.mem_info);
                 std::vector<int64_t> shape = {total_batch, model_num, 1, 3};
