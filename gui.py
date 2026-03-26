@@ -1717,7 +1717,7 @@ class ROICanvas(QGraphicsView):
     _MARGIN_TOP = 60
     _MARGIN_RIGHT = 60
     _PLOT_W = 1000
-    _PLOT_H = 800  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+    _PLOT_H = 1000  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
 
     _ROI_COLORS = [
         QColor(100, 180, 255, 200),   # blue
@@ -1815,6 +1815,11 @@ class ROICanvas(QGraphicsView):
             self._x_max = float(all_x.max() + pad_x)
             self._y_min = float(all_y.min() - pad_y)
             self._y_max = float(all_y.max() + pad_y)
+            # Enforce equal limits on both axes  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
+            global_min = min(self._x_min, self._y_min)
+            global_max = max(self._x_max, self._y_max)
+            self._x_min = self._y_min = global_min
+            self._x_max = self._y_max = global_max
         self._roi_labels = None
         self._clear_shapes()
         self._draw_plot()
@@ -1853,10 +1858,13 @@ class ROICanvas(QGraphicsView):
             QPen(Qt.PenStyle.NoPen), QBrush(QColor(30, 30, 30))
         )
 
-        # Grid lines — X axis
+        # Use a single grid step for both axes to keep square cells
         x_range = self._x_max - self._x_min
-        x_step = self._nice_step(x_range, 8)
-        xv = math.ceil(self._x_min / x_step) * x_step
+        y_range = self._y_max - self._y_min
+        grid_step = self._nice_step(max(x_range, y_range), 8)
+
+        # Grid lines — X axis
+        xv = math.ceil(self._x_min / grid_step) * grid_step
         while xv <= self._x_max:
             sx = self._x_to_sx(xv)
             if self._MARGIN_LEFT <= sx <= self._MARGIN_LEFT + self._PLOT_W:
@@ -1864,12 +1872,10 @@ class ROICanvas(QGraphicsView):
                 txt = self._scene.addSimpleText(f"{xv:.0f}", scene_font)
                 txt.setBrush(pen_text)
                 txt.setPos(sx - 20, self._MARGIN_TOP + self._PLOT_H + 8)
-            xv += x_step
+            xv += grid_step
 
         # Grid lines — Y axis
-        y_range = self._y_max - self._y_min
-        y_step = self._nice_step(y_range, 8)
-        yv = math.ceil(self._y_min / y_step) * y_step
+        yv = math.ceil(self._y_min / grid_step) * grid_step
         while yv <= self._y_max:
             sy = self._y_to_sy(yv)
             if self._MARGIN_TOP <= sy <= self._MARGIN_TOP + self._PLOT_H:
@@ -1877,7 +1883,7 @@ class ROICanvas(QGraphicsView):
                 txt = self._scene.addSimpleText(f"{yv:.0f}", scene_font)
                 txt.setBrush(pen_text)
                 txt.setPos(self._MARGIN_LEFT - 80, sy - 12)
-            yv += y_step
+            yv += grid_step
 
         self._scene.addLine(
             self._MARGIN_LEFT, self._MARGIN_TOP + self._PLOT_H,
@@ -5372,7 +5378,7 @@ class FreeTraceGUI(QMainWindow):
         ctrl_row.addWidget(QLabel("Min len:"))
         self._viz_minlen_spin = QSpinBox()
         self._viz_minlen_spin.setRange(1, 9999)
-        self._viz_minlen_spin.setValue(1)
+        self._viz_minlen_spin.setValue(3)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
         self._viz_minlen_spin.setFixedWidth(65)
         self._viz_minlen_spin.valueChanged.connect(self._on_viz_minlen_changed)
         ctrl_row.addWidget(self._viz_minlen_spin)
@@ -5462,7 +5468,12 @@ class FreeTraceGUI(QMainWindow):
         pad_y = max((all_y.max() - all_y.min()) * 0.05, 1.0)
         x_min, x_max = float(all_x.min() - pad_x), float(all_x.max() + pad_x)
         y_min, y_max = float(all_y.min() - pad_y), float(all_y.max() + pad_y)
-        ML, MT, PW, PH = 120, 60, 1000, 800  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        # Enforce equal limits on both axes  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
+        global_min = min(x_min, y_min)
+        global_max = max(x_max, y_max)
+        x_min = y_min = global_min
+        x_max = y_max = global_max
+        ML, MT, PW, PH = 120, 60, 1000, 1000  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
         MR, MB = 60, 100
         total_w = ML + PW + MR
         total_h = MT + PH + MB
@@ -5800,9 +5811,11 @@ class FreeTraceGUI(QMainWindow):
         self._viz_scene.addRect(QRectF(ML, MT, PW, PH),
                                 QPen(Qt.PenStyle.NoPen), QBrush(QColor(30, 30, 30)))
 
+        # Use a single grid step for both axes  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
         x_range = x_max - x_min
-        x_step = ROICanvas._nice_step(x_range, 8)
-        xv = math.ceil(x_min / x_step) * x_step
+        y_range = y_max - y_min
+        grid_step = ROICanvas._nice_step(max(x_range, y_range), 8)
+        xv = math.ceil(x_min / grid_step) * grid_step
         while xv <= x_max:
             sx = ML + (xv - x_min) / (x_max - x_min) * PW
             if ML <= sx <= ML + PW:
@@ -5810,11 +5823,9 @@ class FreeTraceGUI(QMainWindow):
                 t = self._viz_scene.addSimpleText(f"{xv:.0f}", scene_font)
                 t.setBrush(pen_text)
                 t.setPos(sx - 20, MT + PH + 8)
-            xv += x_step
+            xv += grid_step
 
-        y_range = y_max - y_min
-        y_step = ROICanvas._nice_step(y_range, 8)
-        yv = math.ceil(y_min / y_step) * y_step
+        yv = math.ceil(y_min / grid_step) * grid_step
         while yv <= y_max:
             sy = MT + (yv - y_min) / (y_max - y_min) * PH
             if MT <= sy <= MT + PH:
@@ -5822,7 +5833,7 @@ class FreeTraceGUI(QMainWindow):
                 t = self._viz_scene.addSimpleText(f"{yv:.0f}", scene_font)
                 t.setBrush(pen_text)
                 t.setPos(ML - 80, sy - 12)
-            yv += y_step
+            yv += grid_step
 
         self._viz_scene.addLine(ML, MT + PH, ML + PW, MT + PH, pen_axis)
         self._viz_scene.addLine(ML, MT, ML, MT + PH, pen_axis)
