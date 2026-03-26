@@ -371,13 +371,17 @@ bool load_nn_models(NNModels& models, const std::string& models_dir) { // Modifi
             std::cout << "\n  NN inference: CPU (" << num_threads << " threads)\n" << std::endl;
         }
         return true; // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
-    } catch (const std::exception& e) {
+    } catch (const std::exception& e) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+#if !defined(__APPLE__)
         std::cerr << "  NN model loading failed: " << e.what() << std::endl;
+#endif
         return false;
     } catch (...) {
+#if !defined(__APPLE__)
         std::cerr << "  NN model loading failed (unknown error)." << std::endl;
+#endif
         return false;
-    }
+    } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-25
 
 void free_nn_models(NNModels& models) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
