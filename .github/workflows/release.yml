@@ -120,7 +120,7 @@ jobs:
         shell: bash
         run: |
           DIST="freetrace-${{ matrix.name }}"
-          DMG_NAME="FreeTrace_v1.6.1.2_macos_arm64"  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+          DMG_NAME="FreeTrace_v1.6.2.0_macos_arm64"  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
 
           # Convert icon to icns
           if [ -f icon/freetrace_icon.png ]; then

@@ -445,7 +445,7 @@ if not defined ISCC_CMD (
     "!ISCC_CMD!" "!ROOT!\installer\freetrace_installer_rtx5000.iss"
     if errorlevel 1 (echo ERROR: Inno Setup failed && exit /b 1)
     echo.
-    echo Installer created: installer\FreeTrace_1.6.1.2_RTX5000_win64_setup.exe
+    echo Installer created: installer\FreeTrace_1.6.2.0_RTX5000_win64_setup.exe
 )
 
 echo.
