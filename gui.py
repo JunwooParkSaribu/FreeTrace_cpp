@@ -1815,11 +1815,12 @@ class ROICanvas(QGraphicsView):
             self._x_max = float(all_x.max() + pad_x)
             self._y_min = float(all_y.min() - pad_y)
             self._y_max = float(all_y.max() + pad_y)
-            # Enforce equal limits on both axes  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
-            global_min = min(self._x_min, self._y_min)
-            global_max = max(self._x_max, self._y_max)
-            self._x_min = self._y_min = global_min
-            self._x_max = self._y_max = global_max
+            # Enforce equal range on both axes, centered on each axis's own midpoint
+            x_center = (self._x_min + self._x_max) / 2
+            y_center = (self._y_min + self._y_max) / 2
+            half_range = max(self._x_max - self._x_min, self._y_max - self._y_min) / 2
+            self._x_min, self._x_max = x_center - half_range, x_center + half_range
+            self._y_min, self._y_max = y_center - half_range, y_center + half_range
         self._roi_labels = None
         self._clear_shapes()
         self._draw_plot()
@@ -1897,7 +1898,8 @@ class ROICanvas(QGraphicsView):
         x_label.setPos(self._MARGIN_LEFT + self._PLOT_W / 2 - 55, self._MARGIN_TOP + self._PLOT_H + 45)
         y_label = self._scene.addSimpleText("Y (pixels)", scene_font)
         y_label.setBrush(pen_text)
-        y_label.setPos(8, self._MARGIN_TOP + self._PLOT_H / 2 - 12)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        y_label.setRotation(-90)
+        y_label.setPos(20, self._MARGIN_TOP + self._PLOT_H / 2 + 40)
 
         self._render_traj_pixmap()
 
@@ -5468,11 +5470,12 @@ class FreeTraceGUI(QMainWindow):
         pad_y = max((all_y.max() - all_y.min()) * 0.05, 1.0)
         x_min, x_max = float(all_x.min() - pad_x), float(all_x.max() + pad_x)
         y_min, y_max = float(all_y.min() - pad_y), float(all_y.max() + pad_y)
-        # Enforce equal limits on both axes  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
-        global_min = min(x_min, y_min)
-        global_max = max(x_max, y_max)
-        x_min = y_min = global_min
-        x_max = y_max = global_max
+        # Enforce equal range on both axes, centered on each axis's own midpoint
+        x_center = (x_min + x_max) / 2
+        y_center = (y_min + y_max) / 2
+        half_range = max(x_max - x_min, y_max - y_min) / 2
+        x_min, x_max = x_center - half_range, x_center + half_range
+        y_min, y_max = y_center - half_range, y_center + half_range
         ML, MT, PW, PH = 120, 60, 1000, 1000  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-27
         MR, MB = 60, 100
         total_w = ML + PW + MR
@@ -5843,7 +5846,8 @@ class FreeTraceGUI(QMainWindow):
         xl.setPos(ML + PW / 2 - 55, MT + PH + 45)
         yl = self._viz_scene.addSimpleText("Y (pixels)", scene_font)
         yl.setBrush(pen_text)
-        yl.setPos(8, MT + PH / 2 - 12)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
+        yl.setRotation(-90)
+        yl.setPos(20, MT + PH / 2 + 40)
 
     def _viz_render_dynamic(self):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
         """Render only trajectories (pixmap) + colorbar. Uses cached screen coords + LUT."""
