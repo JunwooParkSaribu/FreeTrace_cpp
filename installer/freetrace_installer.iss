@@ -12,7 +12,7 @@
 ; (CUDA runtime, cuDNN, ONNX Runtime, libtiff, libpng, VC++ runtime).
 
 #define MyAppName "FreeTrace"
-#define MyAppVersion "1.6.2.0"
+#define MyAppVersion "1.6.3.0"
 #define MyAppPublisher "Junwoo PARK"
 #define MyAppURL "https://github.com/JunwooParkSaribu/FreeTrace_cpp"
 #define MyAppExeName "FreeTrace_GUI.exe"
