@@ -65,7 +65,7 @@ static void print_tracking_banner(const std::string& loc_csv, const std::string&
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-13
 
 static void print_usage() { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
-    std::cout << "FreeTrace v1.6.2.0\n" // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-18
+    std::cout << "FreeTrace v1.6.3.0\n" // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
               << "Usage:\n"
               << "  Full pipeline (localization + tracking):\n"
               << "    freetrace <input> <output_dir> [options]\n"

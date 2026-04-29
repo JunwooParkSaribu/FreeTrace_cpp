@@ -63,7 +63,9 @@ namespace freetrace {
 // ============================================================
 
 #ifdef USE_OPENCV
-std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& height, int& width) {
+std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& height, int& width,
+                              NormalizationParams* params) {
+    (void)params;  // OpenCV path uses different normalisation; params not filled // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
     std::vector<cv::Mat> pages;
     cv::imreadmulti(path, pages, cv::IMREAD_UNCHANGED);
     nb_frames = static_cast<int>(pages.size());
@@ -88,7 +90,8 @@ std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& heigh
     return data;
 }
 #elif defined(USE_LIBTIFF) // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
-std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& height, int& width) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& height, int& width, // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                              NormalizationParams* params) {
     // Suppress libtiff warnings (e.g., TIFFReadDirectory: unknown field tags)
     TIFFSetWarningHandler(nullptr);
     TIFF* tif = TIFFOpen(path.c_str(), "r");
@@ -156,6 +159,13 @@ std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& heigh
         for (int i = 0; i < total; ++i)
             data[i] = (data[i] - s_min) / range;
 
+    // Capture raw frame_max BEFORE per-frame normalisation. // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+    // After step 1 each frame's max is fmax_post_global = (fmax_raw - s_min)/range.
+    if (params) {
+        params->s_min = s_min;
+        params->frame_max_raw.resize(nb_frames);
+    }
+
     // Step 2: per-frame normalization by frame max
     int frame_size = height * width;
     for (int n = 0; n < nb_frames; ++n) {
@@ -163,6 +173,8 @@ std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& heigh
         float fmax = 0.0f;
         for (int i = 0; i < frame_size; ++i)
             fmax = std::max(fmax, data[base + i]);
+        if (params)
+            params->frame_max_raw[n] = fmax * range + s_min;  // raw ADU
         if (fmax > 0.0f)
             for (int i = 0; i < frame_size; ++i)
                 data[base + i] /= fmax;
@@ -171,7 +183,9 @@ std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& heigh
     return data;
 } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-11
 #else
-std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& height, int& width) {
+std::vector<float> read_tiff(const std::string& path, int& nb_frames, int& height, int& width,
+                              NormalizationParams* params) {
+    (void)params; // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
     std::cerr << "TIFF reading requires OpenCV (-DUSE_OPENCV) or libtiff (-DUSE_LIBTIFF)." << std::endl;
     nb_frames = height = width = 0;
     return {};
@@ -228,7 +242,8 @@ static std::vector<uint8_t> nd2_read_chunk_data(std::ifstream& file, uint64_t of
     return file.good() ? data : std::vector<uint8_t>{};
 }
 
-std::vector<float> read_nd2(const std::string& path, int& nb_frames, int& height, int& width) {
+std::vector<float> read_nd2(const std::string& path, int& nb_frames, int& height, int& width, // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                              NormalizationParams* params) {
     nb_frames = height = width = 0;
 
     std::ifstream file(path, std::ios::binary);
@@ -441,12 +456,19 @@ std::vector<float> read_nd2(const std::string& path, int& nb_frames, int& height
         for (int i = 0; i < total; ++i)
             data[i] = (data[i] - s_min) / range;
 
+    if (params) { // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+        params->s_min = s_min;
+        params->frame_max_raw.resize(nb_frames);
+    }
+
     int frame_size = height * width;
     for (int n = 0; n < nb_frames; ++n) {
         int base = n * frame_size;
         float fmax = 0.0f;
         for (int i = 0; i < frame_size; ++i)
             fmax = std::max(fmax, data[base + i]);
+        if (params)
+            params->frame_max_raw[n] = fmax * range + s_min;
         if (fmax > 0.0f)
             for (int i = 0; i < frame_size; ++i)
                 data[base + i] /= fmax;
@@ -467,12 +489,13 @@ static std::string get_extension(const std::string& path) {
     return ext;
 }
 
-std::vector<float> read_image(const std::string& path, int& nb_frames, int& height, int& width) {
+std::vector<float> read_image(const std::string& path, int& nb_frames, int& height, int& width, // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                                NormalizationParams* params) {
     std::string ext = get_extension(path);
     if (ext == ".nd2") {
-        return read_nd2(path, nb_frames, height, width);
+        return read_nd2(path, nb_frames, height, width, params);
     } else if (ext == ".tif" || ext == ".tiff") {
-        return read_tiff(path, nb_frames, height, width);
+        return read_tiff(path, nb_frames, height, width, params);
     } else {
         std::cerr << "Unsupported file format: " << ext << std::endl;
         std::cerr << "Supported formats: .tif, .tiff, .nd2" << std::endl;
@@ -497,7 +520,10 @@ bool write_localization_csv( // Modified by Claude (claude-opus-4-6, Anthropic A
         return false;
     }
     ofs << std::setprecision(15);  // Match Python's full float precision output
-    ofs << "frame,x,y,z,xvar,yvar,rho,norm_cst,intensity,window_size\n";
+    // bg_median = annulus median (raw ADU); bg_var = annulus pop. variance (ddof=0, ADU^2, mean-centred); // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+    // integrated_flux = sum(raw window) - n_pixels * bg_median (raw ADU, no capture correction)
+    ofs << "frame,x,y,z,xvar,yvar,rho,norm_cst,intensity,window_size,bg_median,bg_var,integrated_flux\n";
+    const bool has_bg = !result.bg_stats.empty();
     for (int frame = 0; frame < static_cast<int>(result.coords.size()); ++frame) {
         for (int p = 0; p < static_cast<int>(result.coords[frame].size()); ++p) {
             auto& pos = result.coords[frame][p];
@@ -509,7 +535,18 @@ bool write_localization_csv( // Modified by Claude (claude-opus-4-6, Anthropic A
             ofs << (frame + 1) << ","
                 << pos[1] << "," << pos[0] << "," << pos[2] << ","
                 << info[0] << "," << info[1] << "," << info[2] << ","
-                << info[3] << "," << intensity << "," << ws << "\n";
+                << info[3] << "," << intensity << "," << ws;
+            float bg_median = std::numeric_limits<float>::quiet_NaN();
+            float bg_var = std::numeric_limits<float>::quiet_NaN();
+            float flux = std::numeric_limits<float>::quiet_NaN();
+            if (has_bg
+                && frame < static_cast<int>(result.bg_stats.size())
+                && p < static_cast<int>(result.bg_stats[frame].size())) {
+                bg_median = result.bg_stats[frame][p][0];
+                bg_var = result.bg_stats[frame][p][1];
+                flux = result.bg_stats[frame][p][2];
+            }
+            ofs << "," << bg_median << "," << bg_var << "," << flux << "\n";
         }
     }
     ofs.flush();
@@ -1000,6 +1037,177 @@ static void params_gen(int win_s,
     for (auto& ws : single_ws) single_rad.push_back((ws.w / 2) / 2.0f);
     multi_rad.clear();
     for (auto& ws : multi_ws) multi_rad.push_back((ws.w / 2) / 2.0f);
+}
+
+// ============================================================
+// Local background statistics per spot // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+// Builds residual = raw - sum(fitted PSFs) per frame, extracts annulus stats per spot.
+// Pure additive: existing fields (coords, pdfs, infos) are not modified.
+// ============================================================
+
+void compute_background_stats(
+    LocalizationResult& result,
+    const std::vector<float>& imgs,
+    int nb_imgs, int rows, int cols,
+    const NormalizationParams& params  // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+) {
+    constexpr int R_BG = 6;             // half-window for annulus (13x13 patch)
+    constexpr int R_SIGNAL = 3;         // central exclusion radius
+    constexpr int R_SIGNAL_SQ = R_SIGNAL * R_SIGNAL;
+    const float NaN = std::numeric_limits<float>::quiet_NaN();
+
+    // De-normalisation: scale[f] = frame_max_raw[f] - s_min
+    // bg_median_raw = bg_median_norm * scale + s_min
+    // bg_var_raw    = bg_var_norm * scale^2
+    // flux_raw      = flux_norm * scale
+    const bool have_norm_params = (static_cast<int>(params.frame_max_raw.size()) == nb_imgs);
+
+    result.bg_stats.assign(nb_imgs, {});
+
+    for (int f = 0; f < nb_imgs; ++f) {
+        if (f >= static_cast<int>(result.coords.size())) break;
+        int n_spots = static_cast<int>(result.coords[f].size());
+        if (n_spots == 0) continue;
+
+        // ---- 1. Build residual frame = raw - sum(pure PSFs) ----
+        const float* raw_frame = imgs.data() + static_cast<size_t>(f) * rows * cols;
+        std::vector<float> residual(static_cast<size_t>(rows) * cols);
+        std::copy(raw_frame, raw_frame + static_cast<size_t>(rows) * cols, residual.begin());
+
+        for (int i = 0; i < n_spots; ++i) {
+            float yc_sub = result.coords[f][i][0];   // pos[0] = row (image y)
+            float xc_sub = result.coords[f][i][1];   // pos[1] = col (image x)
+            float xv = result.infos[f][i][0];
+            float yv = result.infos[f][i][1];
+            float rho = result.infos[f][i][2];
+            float amp = result.infos[f][i][3];
+
+            // Skip spots with invalid Guo fit (xvar/yvar set to -100 on regression error)
+            if (!(xv > 0.0f) || !(yv > 0.0f)) continue;
+
+            int ws_pdf = static_cast<int>(std::sqrt(static_cast<float>(result.pdfs[f][i].size())));
+            if (ws_pdf <= 0) continue;
+            int half = ws_pdf / 2;
+            int cy = static_cast<int>(std::round(yc_sub));
+            int cx = static_cast<int>(std::round(xc_sub));
+
+            // Same coefficients as bi_variate_normal_pdf (L809-823)
+            float k_cov = 1.0f - rho * rho;
+            if (std::abs(k_cov) < 1e-12f) k_cov = 1e-12f;
+            float det = xv * yv * k_cov;
+            if (std::abs(det) < 1e-12f) det = 1e-12f;
+            float sx = std::sqrt(std::abs(xv));
+            float sy = std::sqrt(std::abs(yv));
+            float inv00 = yv / det;
+            float inv01 = -rho * sx * sy / det;
+            float inv11 = xv / det;
+
+            for (int dy = -half; dy <= half; ++dy) {
+                int rr = cy + dy;
+                if (rr < 0 || rr >= rows) continue;
+                for (int dx = -half; dx <= half; ++dx) {
+                    int cc = cx + dx;
+                    if (cc < 0 || cc >= cols) continue;
+                    float fdx = static_cast<float>(dx);
+                    float fdy = static_cast<float>(dy);
+                    float exponent = -0.5f * (fdx * fdx * inv00
+                                              + 2.0f * fdx * fdy * inv01
+                                              + fdy * fdy * inv11);
+                    float psf = amp * std::exp(exponent);
+                    residual[static_cast<size_t>(rr) * cols + cc] -= psf;
+                }
+            }
+        }
+
+        // ---- 2. Per-spot annulus stats from residual + flux from raw ----
+        result.bg_stats[f].resize(n_spots);
+        std::vector<float> annulus;
+        annulus.reserve((2 * R_BG + 1) * (2 * R_BG + 1));
+
+        for (int i = 0; i < n_spots; ++i) {
+            float xv = result.infos[f][i][0];
+            float yv = result.infos[f][i][1];
+            if (!(xv > 0.0f) || !(yv > 0.0f)) {
+                result.bg_stats[f][i] = {NaN, NaN, NaN};
+                continue;
+            }
+
+            float yc_sub = result.coords[f][i][0];
+            float xc_sub = result.coords[f][i][1];
+            int cy = static_cast<int>(std::round(yc_sub));
+            int cx = static_cast<int>(std::round(xc_sub));
+
+            // Annulus pixels (residual frame, central R_SIGNAL disk excluded)
+            annulus.clear();
+            for (int dy = -R_BG; dy <= R_BG; ++dy) {
+                int rr = cy + dy;
+                if (rr < 0 || rr >= rows) continue;
+                for (int dx = -R_BG; dx <= R_BG; ++dx) {
+                    int r2 = dx * dx + dy * dy;
+                    if (r2 <= R_SIGNAL_SQ) continue;
+                    int cc = cx + dx;
+                    if (cc < 0 || cc >= cols) continue;
+                    annulus.push_back(residual[static_cast<size_t>(rr) * cols + cc]);
+                }
+            }
+
+            if (annulus.size() < 10) {
+                result.bg_stats[f][i] = {NaN, NaN, NaN};
+                continue;
+            }
+
+            // bg_median = median of annulus (sort and take middle)
+            std::sort(annulus.begin(), annulus.end());
+            size_t n = annulus.size();
+            float bg_median;
+            if (n % 2 == 1) {
+                bg_median = annulus[n / 2];
+            } else {
+                bg_median = 0.5f * (annulus[n / 2 - 1] + annulus[n / 2]);
+            }
+
+            // bg_var = population variance (ddof=0) centred at the MEAN of annulus
+            // (matches numpy.var default; standard form for the Thompson-Mortensen CRLB).
+            double sum = 0.0;
+            for (float v : annulus) sum += v;
+            double mean = sum / static_cast<double>(n);
+            double ssq = 0.0;
+            for (float v : annulus) {
+                double d = static_cast<double>(v) - mean;
+                ssq += d * d;
+            }
+            float bg_var = static_cast<float>(ssq / static_cast<double>(n));
+
+            // integrated_flux = sum(raw window) - n_pixels * bg_median
+            int ws_pdf = static_cast<int>(std::sqrt(static_cast<float>(result.pdfs[f][i].size())));
+            int half = ws_pdf / 2;
+            double flux_sum = 0.0;
+            int flux_n = 0;
+            for (int dy = -half; dy <= half; ++dy) {
+                int rr = cy + dy;
+                if (rr < 0 || rr >= rows) continue;
+                for (int dx = -half; dx <= half; ++dx) {
+                    int cc = cx + dx;
+                    if (cc < 0 || cc >= cols) continue;
+                    flux_sum += static_cast<double>(raw_frame[static_cast<size_t>(rr) * cols + cc]);
+                    flux_n += 1;
+                }
+            }
+            float integrated_flux = static_cast<float>(
+                flux_sum - static_cast<double>(flux_n) * static_cast<double>(bg_median));
+
+            // De-normalise per-spot stats from normalised pixel space to raw ADU. // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+            // (verified equivalent to direct raw-space computation, see verify_denorm.py)
+            if (have_norm_params) {
+                float scale = params.frame_max_raw[f] - params.s_min;
+                bg_median = bg_median * scale + params.s_min;
+                bg_var = bg_var * scale * scale;
+                integrated_flux = integrated_flux * scale;
+            }
+
+            result.bg_stats[f][i] = {bg_median, bg_var, integrated_flux};
+        }
+    }
 }
 
 // ============================================================
@@ -1684,7 +1892,8 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
         return false;
     } // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
     int nb_frames, height, width;
-    auto images = read_image(input_video_path, nb_frames, height, width); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+    NormalizationParams norm_params; // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+    auto images = read_image(input_video_path, nb_frames, height, width, &norm_params); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
     if (images.empty()) {
         std::cerr << "Failed to read: " << input_video_path << std::endl;
         return false;
@@ -1825,6 +2034,13 @@ bool run(const std::string& input_video_path, // Modified by Claude (claude-opus
     if (tif_pos != std::string::npos) loc_output = loc_output.substr(0, tif_pos);
     auto nd2_pos = loc_output.find(".nd2");
     if (nd2_pos != std::string::npos) loc_output = loc_output.substr(0, nd2_pos); // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-15
+
+    // Compute per-spot local background statistics. // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+    // imgs is in normalised pixel space; norm_params (captured in read_image) lets us
+    // de-normalise per-spot results back to raw ADU. Pure additive — only fills
+    // LocalizationResult.bg_stats; does not modify coords/pdfs/infos used by tracking.
+    compute_background_stats(result, images, nb_frames, height, width, norm_params);
+
     if (!write_localization_csv(loc_output, result)) { // Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-23
         return false;
     }

@@ -15,6 +15,12 @@ import subprocess
 import time
 import shutil
 
+# Make the FreeTrace_cpp/python helper directory importable so `import cauchy_fit` // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+# resolves to the bundled module + cov tables regardless of cwd.
+_PY_HELPERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "python")
+if _PY_HELPERS_DIR not in sys.path:
+    sys.path.insert(0, _PY_HELPERS_DIR)
+
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
@@ -44,7 +50,7 @@ from PyQt6.QtWidgets import (
 _BASE_W, _BASE_H = 1920, 1080
 
 # Current version — used for update check against GitHub releases  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
-_VERSION = "1.6.2.0"
+_VERSION = "1.6.3.0"
 _GITHUB_REPO = "JunwooParkSaribu/FreeTrace_cpp"
 
 # Generate arrow icon PNGs for spin box buttons (CSS border-triangles don't work in Qt) # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-16
@@ -615,6 +621,519 @@ def _func_to_minimise(params, func, x, y):
     return np.sum(abs(y_pred - y))  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
 
+# Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+def _read_metadata_from_nd2(nd2_path):
+    """Extract acquisition metadata from an ND2 file using the `nd2` library.
+
+    Returns a dict matching _read_metadata_from_tif's contract:
+      pixel_size_um, finterval_s, exposure_s, R, message.
+    Frame interval is derived from per-frame time stamps (median Δ over first 50
+    frames) since NETimeLoop periodMs is unreliable for non-equidistant captures.
+    Exposure parsed from text_info['capturing'] or ['description'] via regex.
+    """
+    out = {'pixel_size_um': None, 'finterval_s': None, 'exposure_s': None,
+           'R': None, 'message': ''}
+    try:
+        import nd2
+    except Exception as e:
+        out['message'] = f"nd2 library not available: {e}"
+        return out
+    try:
+        with nd2.ND2File(nd2_path) as n:
+            # Pixel size (μm/px)
+            try:
+                vs = n.voxel_size()
+                if vs.x and vs.x > 0:
+                    out['pixel_size_um'] = float(vs.x)
+            except Exception:
+                pass
+
+            # Frame interval from time stamps
+            try:
+                n_frames = int(getattr(n.attributes, 'sequenceCount', 0))
+                if n_frames >= 2:
+                    sample = min(n_frames, 50)
+                    times_ms = []
+                    for i in range(sample):
+                        fm = n.frame_metadata(i)
+                        ch = fm.channels[0] if fm.channels else None
+                        if ch is None:
+                            continue
+                        t = float(ch.time.relativeTimeMs)
+                        if np.isfinite(t):
+                            times_ms.append(t)
+                    if len(times_ms) >= 2:
+                        diffs = np.diff(np.asarray(times_ms))
+                        diffs = diffs[diffs > 0]
+                        if diffs.size:
+                            out['finterval_s'] = float(np.median(diffs)) / 1000.0
+            except Exception:
+                pass
+
+            # Exposure from text_info — Andor / NIS-Elements format "Exposure: 30 ms"
+            try:
+                ti = n.text_info or {}
+                blob = '\n'.join(str(v) for v in ti.values() if isinstance(v, str))
+                import re
+                m = re.search(r'Exposure[^\n]*?:\s*([\d.]+)\s*(ms|s)\b', blob, re.IGNORECASE)
+                if m:
+                    val = float(m.group(1))
+                    unit = m.group(2).lower()
+                    out['exposure_s'] = val / 1000.0 if unit == 'ms' else val
+            except Exception:
+                pass
+    except Exception as e:
+        out['message'] = f"Could not read ND2: {e}"
+        return out
+
+    # Compute R
+    if out['finterval_s'] and out['exposure_s']:
+        R = out['exposure_s'] / out['finterval_s']
+        if 0.0 < R <= 1.01:
+            out['R'] = min(R, 1.0)
+
+    parts = []
+    if out['pixel_size_um'] is not None:
+        parts.append(f"pixel size = {out['pixel_size_um']:.4f} μm/px")
+    if out['finterval_s'] is not None:
+        parts.append(f"Δt = {out['finterval_s']*1000:.3f} ms")
+    if out['exposure_s'] is not None:
+        parts.append(f"τ_exp = {out['exposure_s']*1000:.3f} ms")
+    if out['R'] is not None:
+        parts.append(f"R = {out['R']:.4f}")
+    out['message'] = ", ".join(parts) if parts else "No usable metadata found in ND2."
+    return out
+
+
+# Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+def _read_metadata_from_video(path):
+    """Dispatch to TIFF or ND2 reader based on file extension."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == '.nd2':
+        return _read_metadata_from_nd2(path)
+    return _read_metadata_from_tif(path)
+
+
+# Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+def _read_metadata_from_tif(tif_path):
+    """Extract acquisition metadata from a TIFF file (NIS-Elements-style ImageJ Info).
+
+    Returns a dict with keys (any may be None if unavailable):
+      - pixel_size_um:  pixel size in μm (NIS-Elements 'dCalibration' field)
+      - finterval_s:    frame interval in seconds (ImageJ 'finterval' tag)
+      - exposure_s:     exposure time in seconds (NIS-Elements 'Exposure time (text)')
+      - R:              τ_exp / Δt ∈ [0,1] (computed if both above are present)
+      - message:        human-readable status string
+    """
+    out = {'pixel_size_um': None, 'finterval_s': None, 'exposure_s': None,
+           'R': None, 'message': ''}
+    try:
+        import tifffile
+    except Exception as e:
+        out['message'] = f"tifffile not available: {e}"
+        return out
+    try:
+        with tifffile.TiffFile(tif_path) as tif:
+            ij = tif.imagej_metadata or {}
+            # Frame interval (ImageJ tag, seconds)
+            try:
+                if ij.get('finterval') is not None:
+                    val = float(ij['finterval'])
+                    if val > 0:
+                        out['finterval_s'] = val
+            except Exception:
+                pass
+            info_text = ij.get('Info', '')
+            if not isinstance(info_text, str):
+                info_text = ''
+            # NIS-Elements: 'Exposure time (text) = 0.0XXXX' (seconds)
+            for line in info_text.split('\n'):
+                if 'Exposure time (text)' in line:
+                    try:
+                        out['exposure_s'] = float(line.split('=', 1)[1].strip())
+                        break
+                    except Exception:
+                        pass
+            # Fallback: 'Exposure = X' (ms)
+            if out['exposure_s'] is None:
+                for line in info_text.split('\n'):
+                    s = line.strip()
+                    if s.startswith('Exposure ='):
+                        try:
+                            out['exposure_s'] = float(s.split('=', 1)[1].strip()) / 1000.0
+                            break
+                        except Exception:
+                            pass
+            # NIS-Elements pixel-size: 'dCalibration = 0.16' (μm/px)
+            for line in info_text.split('\n'):
+                s = line.strip()
+                if s.startswith('dCalibration ='):
+                    try:
+                        v = float(s.split('=', 1)[1].strip())
+                        if v > 0:
+                            out['pixel_size_um'] = v
+                            break
+                    except Exception:
+                        pass
+    except Exception as e:
+        out['message'] = f"Could not read TIFF: {e}"
+        return out
+
+    # Compute R
+    if out['finterval_s'] and out['exposure_s']:
+        R = out['exposure_s'] / out['finterval_s']
+        if 0.0 < R <= 1.01:
+            out['R'] = min(R, 1.0)
+
+    # Human-readable summary
+    parts = []
+    if out['pixel_size_um'] is not None:
+        parts.append(f"pixel size = {out['pixel_size_um']:.4f} μm/px")
+    if out['finterval_s'] is not None:
+        parts.append(f"Δt = {out['finterval_s']*1000:.3f} ms")
+    if out['exposure_s'] is not None:
+        parts.append(f"τ_exp = {out['exposure_s']*1000:.3f} ms")
+    if out['R'] is not None:
+        parts.append(f"R = {out['R']:.4f}")
+    if parts:
+        out['message'] = ", ".join(parts)
+    else:
+        out['message'] = "No usable metadata found in TIFF."
+    return out
+
+
+# Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+def _trajs_from_traces_df(traces_df, state, min_length=3):
+    """Convert a per-state traces DataFrame into a list of (T, 3) arrays
+    [frame, x, y] expected by cauchy_fit.extract_ratios.
+
+    Uses the trajectory's reconstructed state field if present (defaults to 0).
+    Trajectories with length < min_length are dropped.
+    """
+    sub = traces_df[traces_df['state'] == state] if 'state' in traces_df.columns else traces_df
+    out = []
+    for _, group in sub.groupby('traj_idx'):
+        g = group.sort_values('frame')
+        if len(g) < min_length:
+            continue
+        # cauchy_fit.extract_ratios expects (T, >=3) with cols (1,2) = x, y.
+        out.append(g[['frame', 'x', 'y']].to_numpy(dtype=np.float64))
+    return out
+
+
+def _estimate_K_corrected_msd(trajs, sigma_loc_px, R, max_lag=10):
+    """Fit K (and a side H) from the corrected ensemble-averaged TAMSD over τ=1..max_lag.
+
+    Model: MSD(τ) = 2*K*J_var(H, R, τ) + 2*sigma_loc_px².
+    Bounded curve_fit in (K, H) over τ=1..max_lag with SEM weighting (matches thesis
+    fit_K_from_msd in PhD_thesis/.../ch1_h2b_cauchy_multidelta_crlb.py).
+
+    Returns (K_est, H_est) or (None, None) if the fit fails / data insufficient.
+    """  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+    from scipy.optimize import curve_fit
+    try:
+        from cauchy_fit import J_var
+    except Exception:
+        return None, None
+    msd_vals, msd_sem = {}, {}
+    for tau in range(1, max_lag + 1):
+        sds = []
+        for tr in trajs:
+            for coord in (1, 2):
+                p = tr[:, coord]
+                if len(p) < tau + 1:
+                    continue
+                d = p[tau:] - p[:-tau]
+                sds.extend(d * d)
+        if sds:
+            arr = np.asarray(sds, dtype=np.float64)
+            msd_vals[tau] = float(arr.mean())
+            sem = arr.std(ddof=1) / np.sqrt(len(arr)) if len(arr) > 1 else float(arr.mean())
+            msd_sem[tau] = max(float(sem), 1e-12)
+    if len(msd_vals) < 2:
+        return None, None
+    taus = np.array(sorted(msd_vals.keys()), dtype=np.float64)
+    msd = np.array([msd_vals[int(t)] for t in taus])
+    sem = np.array([msd_sem[int(t)] for t in taus])
+    s2 = float(sigma_loc_px) ** 2 if sigma_loc_px is not None and np.isfinite(sigma_loc_px) else 0.0
+
+    def model(t, K, H):
+        return np.array([2.0 * K * J_var(float(H), float(R), float(tt)) + 2.0 * s2 for tt in t])
+
+    p0 = [max(msd[0] / 2.0 - s2, 1e-3), 0.4]
+    try:
+        (K_est, H_est), _ = curve_fit(
+            model, taus, msd, p0=p0, sigma=sem, absolute_sigma=True,
+            maxfev=20000, bounds=([1e-4, 0.01], [10.0, 0.99]),
+        )
+        return float(K_est), float(H_est)
+    except Exception:
+        return None, None
+
+
+def _invert_H_from_rho(rho_target, Delta, R, K, sigma_loc,  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                        H_bounds=(0.02, 0.98)):
+    """Bisection-solve rho_corrected(H, Δ, R, K, σ_loc) = rho_target.
+
+    Used by the K- and σ_loc-sensitivity panels: keep the empirical Cauchy location
+    fixed and ask "what H would the corrected model report under a perturbed K or
+    σ_loc?". Returns NaN if the target is outside the achievable range on H_bounds.
+    """
+    try:
+        from cauchy_fit import rho_corrected
+    except Exception:
+        return np.nan
+    if not np.isfinite(rho_target):
+        return np.nan
+    lo, hi = H_bounds
+    f_lo = rho_corrected(lo, Delta, R, K, sigma_loc) - rho_target
+    f_hi = rho_corrected(hi, Delta, R, K, sigma_loc) - rho_target
+    if f_lo * f_hi > 0:
+        # Target outside achievable range — return the closer endpoint.
+        return lo if abs(f_lo) < abs(f_hi) else hi
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        f_mid = rho_corrected(mid, Delta, R, K, sigma_loc) - rho_target
+        if abs(f_mid) < 1e-9 or (hi - lo) < 1e-7:
+            return float(mid)
+        if f_lo * f_mid <= 0:
+            hi, f_hi = mid, f_mid
+        else:
+            lo, f_lo = mid, f_mid
+    return float(0.5 * (lo + hi))
+
+
+def _run_multi_delta_scan(trajs, sigma_loc_rms_px, K, R, delta_max=None,
+                          delta_max_cap=75, min_n_ratios=30):
+    """Multi-Δ corrected-Cauchy scan over Δ = 1 .. Δ_max.
+
+    Auto-selects Δ_max as the largest Δ ≤ delta_max_cap with n_ratios ≥ min_n_ratios,
+    unless delta_max is explicitly supplied. Returns a dict with arrays:
+        deltas:    array of Δ values
+        H_est:     Ĥ(Δ)
+        n_ratios:  ratio counts per Δ
+        converged: bool array
+        n_eff:     theoretical n_eff(Δ) at fitted Ĥ(Δ)
+        sigma_H:   CRLB σ_H(Δ) = 1/sqrt(n_eff·I_1_H), evaluated at fitted Ĥ
+                   (95% CI band half-width = 1.96 * sigma_H)
+    """  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+    try:
+        from cauchy_fit import (extract_ratios, count_ratios, fit_cauchy,
+                                 n_eff_theory, sigma_H_crlb)
+    except Exception:
+        return None
+    if not trajs:
+        return None
+    # Pick Δ_max
+    if delta_max is None:
+        delta_max = 1
+        for d in range(1, delta_max_cap + 1):
+            if count_ratios(trajs, d) >= min_n_ratios:
+                delta_max = d
+            else:
+                break
+        if delta_max < 1:
+            return None
+    deltas = np.arange(1, int(delta_max) + 1)
+    H_est = np.full(len(deltas), np.nan)
+    rho_arr = np.full(len(deltas), np.nan)  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+    n_ratios_arr = np.zeros(len(deltas), dtype=np.int64)
+    converged = np.zeros(len(deltas), dtype=bool)
+    n_eff_arr = np.full(len(deltas), np.nan)
+    sigma_H_arr = np.full(len(deltas), np.nan)
+    s_loc = float(sigma_loc_rms_px) if sigma_loc_rms_px is not None else 0.0
+    traj_lengths = [len(tr) for tr in trajs]
+    for i, d in enumerate(deltas):
+        ratios = extract_ratios(trajs, int(d))
+        n_ratios_arr[i] = ratios.size
+        if ratios.size < min_n_ratios:
+            continue
+        try:
+            res = fit_cauchy(ratios, Delta=int(d), R=float(R), K=float(K),
+                             sigma_loc=s_loc)
+            H_est[i] = res.get('H', np.nan)
+            rho_arr[i] = res.get('rho', np.nan)
+            converged[i] = bool(res.get('converged', False))
+        except Exception:
+            continue
+        # CRLB band — evaluate at the fitted Ĥ. n_eff_theory snaps H to {0.25,0.5,0.75}
+        # internally via _load_cov_table.
+        H_hat = float(H_est[i])
+        if not np.isfinite(H_hat):
+            continue
+        try:
+            n_eff = n_eff_theory(H_hat, int(d), traj_lengths,
+                                 R=float(R), K=float(K), sigma_loc=s_loc)
+            if np.isfinite(n_eff) and n_eff > 0:
+                n_eff_arr[i] = float(n_eff)
+                sigma_H_arr[i] = sigma_H_crlb(H_hat, int(d), float(R), float(K),
+                                              s_loc, n_eff)
+        except Exception:
+            pass
+    return {
+        'deltas': deltas,
+        'H_est': H_est,
+        'rho_arr': rho_arr,
+        'n_ratios': n_ratios_arr,
+        'converged': converged,
+        'n_eff': n_eff_arr,
+        'sigma_H': sigma_H_arr,
+        'delta_max': int(delta_max),
+        'traj_lengths': traj_lengths,
+    }
+
+
+# Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+def _recompute_bg_var_and_flux_from_tif(loc_df, tif_path, R_BG=6, R_SIGNAL=3):
+    """Recompute per-spot bg_var, bg_median, and integrated_flux from the raw TIFF.
+
+    Mirrors PhD_thesis/Figures/tmp/ch1_h2b_crlb.py exactly:
+      - bg pixels: 13×13 patch around the spot (R_BG=6) with a central R_SIGNAL=3
+        disk masked out → annulus.
+      - bg_median = np.median(annulus); bg_var = np.var(annulus).
+      - integrated_flux = sum(window) − window.size · bg_median   (N_direct).
+
+    Returns dict of arrays aligned with loc_df rows, NaN where the patch can't be
+    cropped or fewer than 10 annulus pixels remain. Used to bypass the localiser's
+    own bg_var / integrated_flux columns when a raw TIFF is alongside the loc.csv,
+    so σ_loc matches the thesis convention (otherwise the localiser-saved values
+    underestimate bg_var → σ_loc is biased low → K is biased high).
+    """
+    import tifffile
+    imgs = tifffile.imread(tif_path)
+    if imgs.ndim == 2:
+        imgs = imgs[np.newaxis, ...]
+    T_im, H_im, W_im = imgs.shape
+    n = len(loc_df)
+    bg_var_arr = np.full(n, np.nan)
+    bg_med_arr = np.full(n, np.nan)
+    flux_arr = np.full(n, np.nan)
+    frames = loc_df['frame'].to_numpy(dtype=int)
+    xc = loc_df['x'].to_numpy(dtype=np.float64)
+    yc = loc_df['y'].to_numpy(dtype=np.float64)
+    ws = loc_df['window_size'].to_numpy(dtype=int)
+    for i in range(n):
+        f = frames[i] - 1
+        if not (0 <= f < T_im):
+            continue
+        cx = int(round(xc[i])); cy = int(round(yc[i]))
+        x0 = max(0, cx - R_BG); x1 = min(W_im, cx + R_BG + 1)
+        y0 = max(0, cy - R_BG); y1 = min(H_im, cy + R_BG + 1)
+        patch = imgs[f, y0:y1, x0:x1].astype(np.float64)
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        r2 = (xx - cx) ** 2 + (yy - cy) ** 2
+        bg_pix = patch[r2 > R_SIGNAL ** 2]
+        if bg_pix.size < 10:
+            continue
+        bg_med = float(np.median(bg_pix))
+        bg_med_arr[i] = bg_med
+        bg_var_arr[i] = float(np.var(bg_pix))
+        w = int(ws[i]); r = w // 2
+        x0w = max(0, cx - r); x1w = min(W_im, cx + r + 1)
+        y0w = max(0, cy - r); y1w = min(H_im, cy + r + 1)
+        wp = imgs[f, y0w:y1w, x0w:x1w].astype(np.float64)
+        flux_arr[i] = float(wp.sum() - wp.size * bg_med)
+    return dict(bg_var=bg_var_arr, bg_median=bg_med_arr, integrated_flux=flux_arr)
+
+
+def _find_sibling_tif(loc_path, traces_path, video_name):
+    """Search for a TIFF matching <video_name> next to loc.csv or traces.csv."""
+    candidates = []
+    for ext in ('.tif', '.tiff'):
+        for d in {os.path.dirname(loc_path), os.path.dirname(traces_path)}:
+            candidates.append(os.path.join(d, video_name + ext))
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+# End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+
+
+def _compute_sigma_loc_per_spot(loc_df):
+    """Per-spot localisation precision (sigma_loc, in pixels) from a _loc.csv DataFrame.
+
+    Mirrors the thesis script /home/junwoo/claude/PhD_thesis/Figures/tmp/ch1_h2b_crlb.py:
+      1. Capture-corrected total photon count: I_tot = integrated_flux / capture
+         where capture = erf(r/(σx√2)) * erf(r/(σy√2)), r = window_size/2, clipped to [0.5,1].
+      2. Per-spot 2x2 positional Fisher info via analytic ∂μ/∂x, ∂μ/∂y on the fit window,
+         using bg_var as the per-pixel noise variance.
+      3. Inversion → var_x, var_y; σ_loc = 0.5*(σx + σy) (isotropic average).
+
+    Requires columns: x, y, xvar, yvar, rho, window_size, bg_var, integrated_flux.
+    Returns dict with per-spot arrays:  // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+        sigma_loc_px : σ_loc (pixels) — NaN where the fit is invalid
+        I_tot        : capture-corrected total photons (ADU)
+        bg_var       : per-pixel background variance (raw ADU²)
+        psf_sigma_px : 0.5*(σx + σy) of the fitted PSF in pixels
+    For backward compatibility callers can wrap with .get('sigma_loc_px') or pass the
+    dict to np.asarray (which yields the dict, not the array — callers must extract).
+    """
+    try:
+        from scipy.special import erf
+    except Exception:
+        n0 = len(loc_df)
+        nan_arr = np.full(n0, np.nan)
+        return dict(sigma_loc_px=nan_arr, I_tot=nan_arr, bg_var=nan_arr, psf_sigma_px=nan_arr)
+
+    xc = loc_df['x'].to_numpy(dtype=np.float64)
+    yc = loc_df['y'].to_numpy(dtype=np.float64)
+    xv = loc_df['xvar'].to_numpy(dtype=np.float64)
+    yv = loc_df['yvar'].to_numpy(dtype=np.float64)
+    rho = loc_df['rho'].to_numpy(dtype=np.float64)
+    ws_arr = loc_df['window_size'].to_numpy(dtype=np.int32)
+    bg_var = loc_df['bg_var'].to_numpy(dtype=np.float64)
+    flux = loc_df['integrated_flux'].to_numpy(dtype=np.float64)
+
+    n = len(loc_df)
+    sig_loc_px = np.full(n, np.nan)
+    I_tot_arr = np.full(n, np.nan)
+    psf_sigma_px = np.full(n, np.nan)
+    for i in range(n):
+        u = xv[i]; v = yv[i]; r_ = rho[i]
+        if not (u > 0 and v > 0):
+            continue
+        if not (np.isfinite(bg_var[i]) and bg_var[i] > 0):
+            continue
+        if not np.isfinite(flux[i]):
+            continue
+        sx = np.sqrt(u); sy = np.sqrt(v)
+        psf_sigma_px[i] = 0.5 * (sx + sy)
+        # Capture-fraction correction (window may truncate Gaussian tails)
+        w = int(ws_arr[i]); r_half = w / 2.0
+        cap = float(erf(r_half / (sx * np.sqrt(2.0))) * erf(r_half / (sy * np.sqrt(2.0))))
+        cap = max(0.5, min(1.0, cap))
+        I_tot = flux[i] / cap
+        if not (I_tot > 0):
+            continue
+        I_tot_arr[i] = I_tot
+
+        k = 1.0 - r_ * r_
+        if k <= 0:
+            continue
+
+        cx_int = int(round(xc[i]))
+        cy_int = int(round(yc[i]))
+        nn = np.arange(cx_int - w // 2, cx_int + w // 2 + 1) - xc[i]   # column offsets
+        mm = np.arange(cy_int - w // 2, cy_int + w // 2 + 1) - yc[i]   # row offsets
+        N_grid, M_grid = np.meshgrid(nn, mm, indexing='xy')
+        Q = 0.5 / k * (N_grid ** 2 / u + M_grid ** 2 / v
+                       - 2.0 * r_ * N_grid * M_grid / (sx * sy))
+        mu_star = (I_tot / (2.0 * np.pi * sx * sy * np.sqrt(k))) * np.exp(-Q)
+        dmu_dx = mu_star / k * (N_grid / u - r_ * M_grid / (sx * sy))
+        dmu_dy = mu_star / k * (M_grid / v - r_ * N_grid / (sx * sy))
+        inv_sn2 = 1.0 / bg_var[i]
+        Ixx = inv_sn2 * np.sum(dmu_dx * dmu_dx)
+        Iyy = inv_sn2 * np.sum(dmu_dy * dmu_dy)
+        Ixy = inv_sn2 * np.sum(dmu_dx * dmu_dy)
+        det = Ixx * Iyy - Ixy * Ixy
+        if det > 0:
+            var_x = Iyy / det
+            var_y = Ixx / det
+            sig_loc_px[i] = 0.5 * (np.sqrt(var_x) + np.sqrt(var_y))
+    return dict(sigma_loc_px=sig_loc_px, I_tot=I_tot_arr,
+                bg_var=bg_var, psf_sigma_px=psf_sigma_px)
+
+
 def _preprocess_for_stats(data, pixelmicrons, framerate, cutoff_min=3, cutoff_max=99999,  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
                           has_diffusion=True):
     """Standalone preprocessing for Basic Stats tab.
@@ -875,8 +1394,12 @@ def _preprocess_for_adv_stats(data, pixelmicrons, framerate, cutoff_min=3, cutof
 
             # --- 1D Ratios (consecutive displacement ratios) ---
             if len(dx_consec) > 1:
-                rx = dx_consec[1:] / dx_consec[:-1]
-                ry = dy_consec[1:] / dy_consec[:-1]
+                # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                # Suppress divide-by-zero / invalid-value warnings for the rare zero-denominator
+                # cases — the np.isfinite filter below drops inf/nan rows.
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    rx = dx_consec[1:] / dx_consec[:-1]
+                    ry = dy_consec[1:] / dy_consec[:-1]
                 ratios = np.concatenate([rx, ry])
                 valid = np.isfinite(ratios)
                 ratios_1d['ratio'].extend(ratios[valid].tolist())
@@ -1003,6 +1526,18 @@ class StatsWorker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic AI
                     cutoff_min=self._cutoff_min, has_diffusion=has_diff,
                 )
                 ad1, ad2, ad3, msd, total_states = result
+                # Also compute noise-free advanced stats (TA-EA-SD, ratios, Cauchy fit at Δ=1) // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                # — these were previously in the Advanced Stats tab; moved to Basic since they
+                # are also noise-free / empirical. Advanced Stats now keeps only 1D Displacement+Gaussian.
+                tamsd_df = ratios_1d_df = cauchy_fits = None
+                try:
+                    adv_result = _preprocess_for_adv_stats(
+                        data, self._pixelmicrons, self._framerate,
+                        cutoff_min=self._cutoff_min,
+                    )
+                    tamsd_df, _disp_df, ratios_1d_df, cauchy_fits, _gauss_fits, _ts = adv_result
+                except Exception:
+                    pass  # adv preprocessing failure is non-fatal for basic stats
                 if ad1 is not None and len(ad1) > 0:
                     all_results.append({
                         'name': name,
@@ -1012,6 +1547,10 @@ class StatsWorker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic AI
                         'msd': msd,
                         'total_states': total_states,
                         'has_diffusion': has_diff,
+                        # noise-free adv data (may be None if preprocessing failed)
+                        'tamsd': tamsd_df,
+                        'ratios_1d': ratios_1d_df,
+                        'cauchy_fits': cauchy_fits,
                     })
             if not all_results:
                 self.error.emit("No data remaining after filtering.")
@@ -1023,25 +1562,42 @@ class StatsWorker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic AI
 
 
 class AdvStatsWorker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
-    """Background worker for Advanced Stats — runs TAMSD + 1D displacement + Cauchy fit."""
+    """Background worker for Advanced Stats — runs TAMSD + 1D displacement + Cauchy fit
+    + (when σ_loc and R are available) corrected-Cauchy multi-Δ scan per state.
+
+    Multi-Δ scan operates on raw pixel-coordinate trajectories (cauchy_fit's K is in
+    px²/frame^(2H), σ_loc in pixels, R unitless). Skipped per-dataset when σ_loc_rms_px
+    is None (i.e. the sibling _loc.csv lacks bg_median/bg_var/integrated_flux columns).
+    """  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(list)
     error = pyqtSignal(str)
 
-    def __init__(self, datasets, pixelmicrons, framerate, cutoff_min):
-        """datasets: list of (name, DataFrame) tuples."""
+    def __init__(self, datasets, pixelmicrons, framerate, cutoff_min,
+                 R=0.0, sigma_loc_rms_per_dataset=None):  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+        """datasets: list of (name, DataFrame) tuples.
+        R: motion-blur fraction (toolbar spinbox value); when 0 the multi-Δ scan still
+           runs but assumes no motion blur.
+        sigma_loc_rms_per_dataset: list aligned with datasets of σ_loc_rms in pixels
+           (or None when CRLB columns are absent). When entry is None, multi-Δ scan
+           is skipped for that dataset.
+        """
         super().__init__()
         self._datasets = datasets
         self._pixelmicrons = pixelmicrons
         self._framerate = framerate
         self._cutoff_min = cutoff_min
+        self._R = float(R)
+        if sigma_loc_rms_per_dataset is None:
+            sigma_loc_rms_per_dataset = [None] * len(datasets)
+        self._sigma_loc_rms_per_dataset = sigma_loc_rms_per_dataset
 
     def run(self):
         try:
             all_results = []
             n = len(self._datasets)
             for idx, (name, data) in enumerate(self._datasets):
-                pct = int(10 + 80 * idx / max(n, 1))
+                pct = int(10 + 70 * idx / max(n, 1))
                 self.progress.emit(pct, f"Processing {name}...")
                 result = _preprocess_for_adv_stats(
                     data, self._pixelmicrons, self._framerate,
@@ -1049,17 +1605,72 @@ class AdvStatsWorker(QThread):  # Modified by Claude (claude-opus-4-6, Anthropic
                 )
                 tamsd_df, disp_df, ratios_df, cauchy_fits, gaussian_fits, total_states = result  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
                 n_trajs = int(data['traj_idx'].nunique())
-                if tamsd_df is not None and len(tamsd_df) > 0:
-                    all_results.append({
-                        'name': name,
-                        'tamsd': tamsd_df,
-                        'displacements_1d': disp_df,
-                        'ratios_1d': ratios_df,
-                        'cauchy_fits': cauchy_fits,
-                        'gaussian_fits': gaussian_fits,
-                        'total_states': total_states,
-                        'n_trajectories': n_trajs,
-                    })
+                if tamsd_df is None or len(tamsd_df) == 0:
+                    continue
+
+                # Multi-Δ corrected-Cauchy scan per state (in pixel coords). // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                # Skip the scan when raw MSD(τ=1) is at or below the localisation noise
+                # floor 2σ_loc² (signal/noise ≤ 1) — the corrected Cauchy fit cannot
+                # recover Ĥ when there is no diffusion signal above noise. We surface a
+                # diagnostic to the user instead of plotting H values that hit the
+                # boundary {0.02, 0.98} as artefacts.
+                multi_delta_per_state = {}
+                K_est_per_state = {}
+                noise_floor_per_state = {}  # (msd1, 2σ², s/n)
+                sigma_loc_rms_px = self._sigma_loc_rms_per_dataset[idx] if idx < len(self._sigma_loc_rms_per_dataset) else None
+                if sigma_loc_rms_px is not None and np.isfinite(sigma_loc_rms_px):
+                    self.progress.emit(pct + 5, f"Multi-Δ scan {name}...")
+                    for st in total_states:
+                        trajs = _trajs_from_traces_df(data, st, min_length=max(self._cutoff_min, 3))
+                        if len(trajs) < 5:
+                            continue
+                        # Per-state signal-to-noise check.
+                        sds = []
+                        for tr in trajs:
+                            for c in (1, 2):
+                                p = tr[:, c]
+                                if len(p) >= 2:
+                                    sds.append(((p[1:] - p[:-1]) ** 2))
+                        if not sds:
+                            continue
+                        msd1 = float(np.concatenate(sds).mean())
+                        noise_floor = 2.0 * float(sigma_loc_rms_px) ** 2
+                        snr = msd1 / noise_floor if noise_floor > 0 else np.inf
+                        noise_floor_per_state[st] = (msd1, noise_floor, snr)
+                        # Run K_est unconditionally; rely on its own lower-bound rejection // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                        # rather than a fixed S/N threshold (testsample4 region subsets sit
+                        # at S/N≈1.4 but still have a clear MSD growth signal).
+                        K_est, _H_init = _estimate_K_corrected_msd(
+                            trajs, sigma_loc_rms_px, self._R, max_lag=10,
+                        )
+                        if K_est is None or not np.isfinite(K_est) or K_est <= 0:
+                            continue
+                        # Reject K_est pinned to the curve_fit lower bound (no diffusion signal).
+                        if K_est <= 1.01e-4:
+                            continue
+                        K_est_per_state[st] = float(K_est)
+                        scan = _run_multi_delta_scan(
+                            trajs, sigma_loc_rms_px, K_est, self._R,
+                            delta_max=None, delta_max_cap=75, min_n_ratios=30,
+                        )
+                        if scan is not None:
+                            multi_delta_per_state[st] = scan
+
+                all_results.append({
+                    'name': name,
+                    'tamsd': tamsd_df,
+                    'displacements_1d': disp_df,
+                    'ratios_1d': ratios_df,
+                    'cauchy_fits': cauchy_fits,
+                    'gaussian_fits': gaussian_fits,
+                    'total_states': total_states,
+                    'n_trajectories': n_trajs,
+                    'multi_delta_per_state': multi_delta_per_state,  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                    'K_est_per_state': K_est_per_state,
+                    'noise_floor_per_state': noise_floor_per_state,  # state -> (msd1, 2σ², snr)
+                    'sigma_loc_rms_px': sigma_loc_rms_px,
+                    'R_used': self._R,
+                })
             if not all_results:
                 self.error.emit("No data remaining after filtering.")
                 return
@@ -3983,8 +4594,13 @@ class FreeTraceGUI(QMainWindow):
             "<code>_diffusion.csv</code> is optional. If only traces are available, "
             "all trajectory-based plots (jump distance, duration, EA-SD, angles) work normally. "
             "H and K distributions require <code>_diffusion.csv</code>.</p>"
-            "<p><b>Advanced Stats tab</b> — Requires only <code>_traces.csv</code> "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
-            "(<code>_diffusion.csv</code> is not used).</p>"
+            "<p><b>Advanced Stats tab</b> — Requires <code>_traces.csv</code>; "  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+            "auto-pairs a sibling <code>_loc.csv</code> for the noise-aware panels "
+            "(skipped silently when <code>bg_median</code>/<code>bg_var</code>/"
+            "<code>integrated_flux</code> are missing — re-run localisation with the "
+            "current FreeTrace to enable). A sibling TIFF, when present, recomputes "
+            "<code>bg_var</code>/<code>integrated_flux</code> via the thesis-style "
+            "annulus convention. <code>_diffusion.csv</code> is not used.</p>"
             "<h3 style='color:#66ccff;'>Key Concepts</h3>"
             "<p><b>Consecutive frames only (Δt = 1)</b> — Jump distance, mean jump distance, "
             "1D displacement, 1D displacement ratio, and angle distributions use only steps "
@@ -4061,18 +4677,14 @@ class FreeTraceGUI(QMainWindow):
             "<p><b>Angle / Polar Angle</b> — Deflection angle (0°–180°) and signed turning "
             "angle (0°–360°) between consecutive step pairs, both Δt = 1. "
             "Uniform if isotropic &amp; Brownian.</p>"
-            "<h3 style='color:#66ccff;'>Advanced Stats Tab</h3>"  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
-            "<p>The Advanced Stats tab provides computationally intensive analyses that "
-            "complement the Basic Stats tab. It requires only <code>_traces.csv</code> "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
-            "(no diffusion data needed).</p>"
-            "<p><b>TA-EA-SD (Time-Averaged Ensemble-Averaged Squared Displacement)</b> — "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+            "<p><b>TA-EA-SD (Time-Averaged Ensemble-Averaged Squared Displacement)</b> — "  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
             "For each trajectory, the squared displacement at lag τ is averaged over all "
             "valid time windows of size τ (the <i>time-average</i>). These per-trajectory "
             "means are then averaged across all trajectories in the ensemble (the "
-            "<i>ensemble-average</i>). This two-stage averaging is more robust than the "
-            "EA-SD in Basic Stats, especially for short trajectories with frame gaps: "
-            "EA-SD uses only the displacement from the trajectory origin at each time "
-            "point, while TA-EA-SD exploits all overlapping windows of size τ. "
+            "<i>ensemble-average</i>). This two-stage averaging is more robust than EA-SD "
+            "above, especially for short trajectories with frame gaps: EA-SD uses only "
+            "the displacement from the trajectory origin at each time point, while "
+            "TA-EA-SD exploits all overlapping windows of size τ. "
             "Only windows where the actual frame gap equals the lag τ are included "
             "(gaps are skipped, not interpolated). The shaded region shows ± 1 std "
             "across the ensemble.</p>"
@@ -4080,23 +4692,6 @@ class FreeTraceGUI(QMainWindow):
             "slope directly gives the anomalous diffusion exponent α: slope = 1 for "
             "Brownian motion, &lt; 1 for subdiffusion, &gt; 1 for superdiffusion. "
             "The log-log plot omits the std fill to avoid y-axis distortion.</p>"
-            "<p><b>1D Displacement (Δx, Δy)</b> — Projection of each step onto the x and y "
-            "axes separately, using only consecutive-frame steps (Δt = 1). For a "
-            "homogeneous population of Brownian or fBm molecules, each projection is "
-            "Gaussian with zero mean. A non-Gaussian shape (heavy tails, multiple peaks) "
-            "indicates a heterogeneous population with mixed diffusion states. Δx and Δy "
-            "are shown overlaid; for isotropic motion they should be identical. "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
-            "A Gaussian N(x; μ, σ) × α is fitted to each histogram using L1 minimisation "
-            "(<code>scipy.optimize.minimize</code>, Nelder-Mead). "
-            "The stats panel reports empirical location/scale, plus the fitted parameters:</p>"
-            "<ul>"
-            "<li><b>Location</b> — Fitted mean μ of the Gaussian. Should be ≈ 0 for "
-            "unbiased diffusion (no drift).</li>"
-            "<li><b>Scale</b> — Fitted standard deviation σ. Related to the diffusion "
-            "coefficient: σ² = 2D·Δt for free Brownian motion.</li>"
-            "<li><b>Amplitude</b> — Vertical scaling factor α that adjusts the PDF to "
-            "the histogram density. For a perfect fit, α ≈ 1.</li>"
-            "</ul>"
             "<p><b>1D Displacement Ratio — Cauchy Fit</b> — The ratio of consecutive "
             "1D displacements: Δx(t+1) / Δx(t) (and similarly for Δy). For fractional "
             "Brownian motion with Hurst exponent H, this ratio follows a Cauchy "
@@ -4118,8 +4713,34 @@ class FreeTraceGUI(QMainWindow):
             "<p>Deviation of the observed histogram from the fitted Cauchy curve suggests "
             "the underlying motion is not purely fractional Brownian (e.g., confined "
             "diffusion, active transport, or a mixture of diffusion states). "
-            "Ratios are clipped to [−10, 10] and data with fewer than 10 valid ratios "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
-            "per homogeneous population are excluded from fitting.</p>"
+            "Ratios are clipped to [−10, 10] and data with fewer than 10 valid ratios "
+            "per homogeneous population are excluded from fitting. This noise-free "
+            "single-Ĥ Cauchy fit is distinct from the per-Δ corrected Cauchy scan in "
+            "the Advanced Stats tab.</p>"
+            "<h3 style='color:#66ccff;'>Advanced Stats Tab</h3>"  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+            "<p>The Advanced Stats tab adds noise-aware diffusion analyses driven by the "
+            "per-spot σ_loc CRLB and a motion-blur correction R. The headline output is "
+            "the corrected Cauchy multi-Δ scan Ĥ(Δ) with a 95% CRLB band, complemented "
+            "by a pairwise Z-significance matrix, an adjacent-Δ drift trace, a λ_noise "
+            "sensitivity sweep, a noise-floor diagnostic, and a precision map. The "
+            "panel-by-panel guide further down this Help tab covers each in detail.</p>"
+            "<p><b>1D Displacement (Δx, Δy)</b> — Projection of each step onto the x and y "
+            "axes separately, using only consecutive-frame steps (Δt = 1). For a "
+            "homogeneous population of Brownian or fBm molecules, each projection is "
+            "Gaussian with zero mean. A non-Gaussian shape (heavy tails, multiple peaks) "
+            "indicates a heterogeneous population with mixed diffusion states. Δx and Δy "
+            "are shown overlaid; for isotropic motion they should be identical. "
+            "A Gaussian N(x; μ, σ) × α is fitted to each histogram using L1 minimisation "
+            "(<code>scipy.optimize.minimize</code>, Nelder-Mead). "
+            "The stats panel reports empirical location/scale, plus the fitted parameters:</p>"
+            "<ul>"
+            "<li><b>Location</b> — Fitted mean μ of the Gaussian. Should be ≈ 0 for "
+            "unbiased diffusion (no drift).</li>"
+            "<li><b>Scale</b> — Fitted standard deviation σ. Related to the diffusion "
+            "coefficient: σ² = 2D·Δt for free Brownian motion.</li>"
+            "<li><b>Amplitude</b> — Vertical scaling factor α that adjusts the PDF to "
+            "the histogram density. For a perfect fit, α ≈ 1.</li>"
+            "</ul>"
             "<h3 style='color:#66ccff;'>Log-log TA-EA-SD vs Cauchy Fit — When to Use Which?</h3>"  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
             "<p>Both the log-log TA-EA-SD plot and the Cauchy ratio fit estimate the "
             "anomalous diffusion exponent (and hence the Hurst exponent H), but they "
@@ -4168,14 +4789,14 @@ class FreeTraceGUI(QMainWindow):
             "<td style='padding:4px 12px;'>Per-population — one Ĥ per homogeneous population</td></tr>"
             "<tr><td style='padding:4px 12px;'><b>Requires</b></td>"
             "<td style='padding:4px 12px;'><code>_diffusion.csv</code> (Basic Stats / Class tab)</td>"
-            "<td style='padding:4px 12px;'><code>_traces.csv</code> only (Advanced Stats tab)</td></tr>"
+            "<td style='padding:4px 12px;'><code>_traces.csv</code> (Basic Stats tab)</td></tr>"  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
             "<tr><td style='padding:4px 12px;'><b>Best for</b></td>"
             "<td style='padding:4px 12px;'>Per-trajectory H distribution, H-K scatter classification</td>"
             "<td style='padding:4px 12px;'>Independent validation of the ensemble diffusion regime</td></tr>"
             "</table>"
-            "<p>Comparing the two: the NN-estimated H distribution (Basic Stats) "  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-20
+            "<p>Comparing the two: the NN-estimated H distribution (Basic Stats) "  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
             "shows the spread of H across individual trajectories, while the "
-            "Cauchy-fitted Ĥ (Advanced Stats) gives an ensemble-level estimate. "
+            "Cauchy-fitted Ĥ (Basic Stats) gives an ensemble-level estimate. "
             "If the Cauchy Ĥ falls near the peak of the NN H distribution, "
             "both methods agree. A significant discrepancy may indicate that the "
             "NN model and the Cauchy assumption capture different aspects of the "
@@ -4232,6 +4853,15 @@ class FreeTraceGUI(QMainWindow):
             "population size information when comparing datasets.</p>"
         )
         container_layout.addWidget(help_text)
+
+        # Adv Stats panel-by-panel guide (moved from former popup) // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+        adv_stats_panel_guide = QLabel()
+        adv_stats_panel_guide.setWordWrap(True)
+        adv_stats_panel_guide.setTextFormat(Qt.TextFormat.RichText)
+        adv_stats_panel_guide.setStyleSheet("color:#cccccc; font-size:13px; padding:0 20px 12px 20px;")
+        adv_stats_panel_guide.setText(self._adv_stats_help_html())
+        container_layout.addWidget(adv_stats_panel_guide)
+        # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
 
         container_layout.addStretch()
         scroll.setWidget(container)
@@ -4819,7 +5449,8 @@ class FreeTraceGUI(QMainWindow):
             return fig, ax, ax_stats
 
         def _fill_stats_panel(ax_stats, stat_lines):
-            """Fill the stats panel with lines of (label, color, mean, std)."""
+            """Fill the stats panel with lines of (label, color, mean, std).
+            If mean/std are both None, only the bold label line is drawn (informational)."""
             y = 0.95
             ax_stats.text(0.05, y, 'Mean \u00b1 Std', color='#aaaaaa', fontsize=9,
                          fontweight='bold', transform=ax_stats.transAxes, va='top')
@@ -4830,8 +5461,9 @@ class FreeTraceGUI(QMainWindow):
                     ax_stats.text(0.05, y, txt, color=color, fontsize=8,
                                  transform=ax_stats.transAxes, va='top', fontweight='bold')
                     y -= 0.06
-                ax_stats.text(0.05, y, f'{mean_val:.4g} \u00b1 {std_val:.4g}', color=color, fontsize=8,
-                             transform=ax_stats.transAxes, va='top')
+                if mean_val is not None and std_val is not None:  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                    ax_stats.text(0.05, y, f'{mean_val:.4g} \u00b1 {std_val:.4g}', color=color, fontsize=8,
+                                 transform=ax_stats.transAxes, va='top')
                 y -= 0.07  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
         # --- Summary table ---
@@ -5154,6 +5786,109 @@ class FreeTraceGUI(QMainWindow):
         polar_section.add_widget(_make_canvas(fig))
         self._stats_plot_layout.addWidget(polar_section)
 
+        # --- TA-EA-SD (Time-Averaged Ensemble-Averaged Squared Displacement) --- // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+        # Moved here from Advanced Stats since these are noise-free / empirical analyses.
+        tamsd_section = CollapsibleSection("TA-EA-SD (Time-Averaged Ensemble-Averaged Squared Displacement)")
+        with plt.style.context(dark_style):
+            fig = Figure(figsize=(10, 4), dpi=100, constrained_layout=True)
+            ax = fig.add_subplot(111)
+            plotted = False
+            for di, r, st, color in _iter_colors(results_list):
+                tamsd = r.get('tamsd')
+                if tamsd is None or len(tamsd) == 0:
+                    continue
+                subset = tamsd[tamsd['state'] == st]
+                if subset.empty:
+                    continue
+                label = _ds_label(r, st) or 'data'
+                ax.plot(subset['time'], subset['mean'], color=color, label=label, linewidth=1.5)
+                mean_arr = subset['mean'].to_numpy()
+                std_arr = subset['std'].to_numpy()
+                time_arr = subset['time'].to_numpy()
+                ax.fill_between(time_arr, mean_arr - std_arr, mean_arr + std_arr,
+                                color=color, alpha=0.2)
+                plotted = True
+            ax.set_xlabel('Time lag (s)')
+            ax.set_ylabel('TA-EA-SD (μm²)')
+            ax.set_title('TA-EA-SD')
+            if need_legend and plotted:
+                ax.legend(fontsize=7, loc='best')
+            ax.grid(True, alpha=0.3)
+        tamsd_section.add_widget(_make_canvas(fig))
+        self._stats_plot_layout.addWidget(tamsd_section)
+
+        # --- TA-EA-SD log-log ---
+        tamsd_log_section = CollapsibleSection("TA-EA-SD — log-log")
+        with plt.style.context(dark_style):
+            fig_log = Figure(figsize=(10, 4), dpi=100, constrained_layout=True)
+            ax_log = fig_log.add_subplot(111)
+            plotted = False
+            for di, r, st, color in _iter_colors(results_list):
+                tamsd = r.get('tamsd')
+                if tamsd is None or len(tamsd) == 0:
+                    continue
+                subset = tamsd[tamsd['state'] == st]
+                if subset.empty:
+                    continue
+                valid = (subset['mean'] > 0) & (subset['time'] > 0)
+                s = subset[valid]
+                if s.empty:
+                    continue
+                label = _ds_label(r, st) or 'data'
+                ax_log.plot(s['time'], s['mean'], color=color, label=label, linewidth=1.5)
+                plotted = True
+            ax_log.set_xscale('log')
+            ax_log.set_yscale('log')
+            ax_log.set_xlabel('Time lag (s)')
+            ax_log.set_ylabel('TA-EA-SD (μm²)')
+            ax_log.set_title('TA-EA-SD — log-log')
+            if need_legend and plotted:
+                ax_log.legend(fontsize=7, loc='best')
+            ax_log.grid(True, alpha=0.3, which='both')
+        tamsd_log_section.add_widget(_make_canvas(fig_log))
+        self._stats_plot_layout.addWidget(tamsd_log_section)
+
+        # --- 1D Displacement Ratio — Cauchy fit (noise-free, Δ=1) ---
+        ratio_section = CollapsibleSection("1D Displacement Ratio — Cauchy Fit (noise-free, Δ = 1)")
+        with plt.style.context(dark_style):
+            for di, r, st, color in _iter_colors(results_list):
+                ratios_df = r.get('ratios_1d')
+                cauchy_fits = r.get('cauchy_fits') or {}
+                if ratios_df is None or len(ratios_df) == 0:
+                    continue
+                subset = ratios_df[ratios_df['state'] == st]
+                if subset.empty:
+                    continue
+                fig3, ax3, ax3_stats = _make_fig_with_stats()
+                label = _ds_label(r, st) or 'data'
+                ratio_data = subset['ratio'].to_numpy()
+                ratio_clipped = ratio_data[(ratio_data > -10) & (ratio_data < 10)]
+                if len(ratio_clipped) > 0:
+                    ax3.hist(ratio_clipped, bins=100, density=True, alpha=0.6,
+                             color=color, edgecolor='none', label=f'{label} data')
+                stat_lines = [(f'Ratio (n={len(ratio_clipped)})', color,
+                               np.mean(ratio_clipped) if len(ratio_clipped) > 0 else None,
+                               np.std(ratio_clipped) if len(ratio_clipped) > 0 else None)]
+                if st in cauchy_fits:
+                    cf = cauchy_fits[st]
+                    ax3.plot(cf['x_fit'], cf['y_fit'], color='#ff6666', linewidth=2,
+                             label=f'Cauchy fit (Ĥ={cf["h_est"]:.3f})')
+                    ax3.axvline(cf['location'], color='#ff6666', linestyle='--',
+                                alpha=0.6, linewidth=1)
+                    stat_lines.append((f'Ĥ = {cf["h_est"]:.4f}', '#ff6666', None, None))
+                    stat_lines.append((f'Location param = {cf["location"]:.4f}', '#ff6666', None, None))
+                    stat_lines.append((f'Amplitude factor = {cf["alpha_est"]:.4f}', '#ff6666', None, None))
+                ax3.set_xlabel('Displacement Ratio')
+                ax3.set_ylabel('Density')
+                ax3.set_title(f'1D Ratio — Cauchy Fit — {label}')
+                if need_legend:
+                    ax3.legend(fontsize=7, loc='best')
+                ax3.grid(True, alpha=0.3)
+                ax3.set_xlim(-5, 5)
+                _fill_stats_panel(ax3_stats, stat_lines)
+                ratio_section.add_widget(_make_canvas(fig3))
+        self._stats_plot_layout.addWidget(ratio_section)
+
         self._stats_plot_layout.addStretch()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
         # Apply legend visibility from checkbox  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
@@ -5203,53 +5938,109 @@ class FreeTraceGUI(QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        # Toolbar
-        toolbar = QHBoxLayout()
+        # Toolbar — three rows (config / actions / messages). // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+        # Row 1: Load Data | σ_loc | Pixel size | Frame rate | Min traj length | R | Read metadata | Legend
+        row1 = QHBoxLayout()
         self._adv_stats_load_btn = QPushButton("Load Data")
         self._adv_stats_load_btn.clicked.connect(self._on_adv_stats_load_data)
-        toolbar.addWidget(self._adv_stats_load_btn)
+        row1.addWidget(self._adv_stats_load_btn)
 
-        toolbar.addWidget(QLabel("Pixel size (μm):"))
+        # σ_loc spinbox — auto-filled on data load from loc.csv / TIFF, user-editable.
+        row1.addWidget(QLabel("σ_loc:"))
+        self._adv_stats_sigma_loc = QDoubleSpinBox()
+        self._adv_stats_sigma_loc.setRange(0.0, 5.0)
+        self._adv_stats_sigma_loc.setDecimals(4)
+        self._adv_stats_sigma_loc.setSingleStep(0.001)
+        self._adv_stats_sigma_loc.setValue(0.0)
+        self._adv_stats_sigma_loc.setSuffix(" px")
+        self._adv_stats_sigma_loc.setToolTip(
+            "Localisation precision σ_loc (pixels) used as plug-in for the corrected\n"
+            "Cauchy multi-Δ scan and K_est. Auto-filled on data load from loc.csv\n"
+            "(or sibling TIFF, thesis-style annulus). Edit to override."
+        )
+        row1.addWidget(self._adv_stats_sigma_loc)
+
+        row1.addWidget(QLabel("Pixel size (μm):"))
         self._adv_stats_pixelsize = QDoubleSpinBox()
         self._adv_stats_pixelsize.setRange(0.001, 10.0)
         self._adv_stats_pixelsize.setValue(1.0)
         self._adv_stats_pixelsize.setDecimals(4)
         self._adv_stats_pixelsize.setSingleStep(0.01)
-        toolbar.addWidget(self._adv_stats_pixelsize)
+        row1.addWidget(self._adv_stats_pixelsize)
 
-        toolbar.addWidget(QLabel("Frame rate (s):"))
+        row1.addWidget(QLabel("Frame rate (s):"))
         self._adv_stats_framerate = QDoubleSpinBox()
         self._adv_stats_framerate.setRange(0.0001, 10.0)
         self._adv_stats_framerate.setValue(1.0)
         self._adv_stats_framerate.setDecimals(4)
         self._adv_stats_framerate.setSingleStep(0.001)
-        toolbar.addWidget(self._adv_stats_framerate)
+        row1.addWidget(self._adv_stats_framerate)
 
-        toolbar.addWidget(QLabel("Min traj length:"))
+        row1.addWidget(QLabel("Min traj length:"))
         self._adv_stats_cutoff = QSpinBox()
         self._adv_stats_cutoff.setRange(1, 9999)
         self._adv_stats_cutoff.setValue(3)
-        toolbar.addWidget(self._adv_stats_cutoff)
+        row1.addWidget(self._adv_stats_cutoff)
 
-        self._adv_stats_legend_cb = QCheckBox("Legend")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        row1.addWidget(QLabel("R (τ_exp/Δt):"))
+        self._adv_stats_R = QDoubleSpinBox()
+        self._adv_stats_R.setRange(0.0, 1.0)
+        self._adv_stats_R.setDecimals(4)
+        self._adv_stats_R.setSingleStep(0.01)
+        self._adv_stats_R.setValue(0.0)
+        self._adv_stats_R.setToolTip(
+            "Exposure ratio R = exposure time / frame interval ∈ [0, 1].\n"
+            "0 = instantaneous exposure (no motion blur). 1 = continuous exposure.\n"
+            "Use 'Read metadata from video' to extract from TIFF metadata, or set manually."
+        )
+        row1.addWidget(self._adv_stats_R)
+
+        self._adv_stats_R_btn = QPushButton("Read metadata from video")
+        self._adv_stats_R_btn.setToolTip(
+            "Pick a TIFF/ND2 video and read its ImageJ/NIS-Elements metadata.\n"
+            "Auto-fills pixel size (μm), frame interval (s), and R = τ_exp/Δt when available."
+        )
+        self._adv_stats_R_btn.clicked.connect(self._on_adv_stats_read_R)
+        row1.addWidget(self._adv_stats_R_btn)
+
+        self._adv_stats_legend_cb = QCheckBox("Legend")
         self._adv_stats_legend_cb.setChecked(True)
         self._adv_stats_legend_cb.stateChanged.connect(self._on_adv_stats_legend_toggled)
-        toolbar.addWidget(self._adv_stats_legend_cb)
+        row1.addWidget(self._adv_stats_legend_cb)
 
+        row1.addStretch()
+        layout.addLayout(row1)
+
+        # Row 2: Run | Save Plots | Save Data
+        row2 = QHBoxLayout()
         self._adv_stats_run_btn = QPushButton("▶ Run Advanced Stats")
         self._adv_stats_run_btn.clicked.connect(self._on_run_adv_stats)
-        toolbar.addWidget(self._adv_stats_run_btn)
+        row2.addWidget(self._adv_stats_run_btn)
 
         self._adv_stats_save_btn = QPushButton("Save Plots")
         self._adv_stats_save_btn.clicked.connect(self._on_save_adv_stats_plots)
         self._adv_stats_save_btn.setEnabled(False)
-        toolbar.addWidget(self._adv_stats_save_btn)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        row2.addWidget(self._adv_stats_save_btn)
 
+        self._adv_stats_save_data_btn = QPushButton("Save Data")
+        self._adv_stats_save_data_btn.setToolTip(
+            "Export multi-Δ scan results as CSV (one file per dataset×state)."
+        )
+        self._adv_stats_save_data_btn.clicked.connect(self._on_save_adv_stats_data)
+        self._adv_stats_save_data_btn.setEnabled(False)
+        row2.addWidget(self._adv_stats_save_data_btn)
+
+        row2.addStretch()
+        layout.addLayout(row2)
+
+        # Row 3: status messages
+        row3 = QHBoxLayout()
         self._adv_stats_status_label = QLabel("")
         self._adv_stats_status_label.setStyleSheet("color:#888;")
-        toolbar.addWidget(self._adv_stats_status_label)
-        toolbar.addStretch()
-        layout.addLayout(toolbar)
+        row3.addWidget(self._adv_stats_status_label)
+        row3.addStretch()
+        layout.addLayout(row3)
+        # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
 
         self._adv_stats_info_label = QLabel("Click 'Load Data' to load trajectory data.")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
         self._adv_stats_info_label.setStyleSheet("color:#888; padding-left:4px;")
@@ -5984,15 +6775,48 @@ class FreeTraceGUI(QMainWindow):
             self._load_adv_stats_data_from_file(p)
         self._adv_stats_datasets.sort(key=lambda ds: ds['video_name'])
         n = len(self._adv_stats_datasets)
+        # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+        # Multi-dataset: reset σ_loc spinbox to 0 so each dataset uses its own auto rms
+        # (per-dataset σ_loc plug-in). Single-dataset: spinbox already auto-filled at load.
+        if n > 1:
+            try:
+                self._adv_stats_sigma_loc.setValue(0.0)
+            except Exception:
+                pass
+        # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
         if n > 0:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
             total_traj = sum(ds['traces_df']['traj_idx'].nunique() for ds in self._adv_stats_datasets)
+            # Per-dataset CRLB-column availability + σ_loc summary (added 2026-04-28).
+            # Corrected Cauchy multi-Δ requires the bg_median/bg_var/integrated_flux columns,
+            # which only the latest FreeTrace localisation produces.
+            datasets_with_crlb = [ds for ds in self._adv_stats_datasets if ds.get('has_crlb_cols')]
+            n_with_crlb = len(datasets_with_crlb)
+            if n_with_crlb == 0:
+                crlb_msg = "  No CRLB columns found — re-run localisation with current FreeTrace to enable corrected Cauchy."
+            else:
+                # Aggregate σ_loc across the videos that have it
+                all_sigma_px = np.concatenate([
+                    ds['sigma_loc_px'][np.isfinite(ds['sigma_loc_px'])]
+                    for ds in datasets_with_crlb if ds.get('sigma_loc_px') is not None
+                ]) if any(ds.get('sigma_loc_px') is not None for ds in datasets_with_crlb) else np.array([])
+                px_um = self._adv_stats_pixelsize.value() if hasattr(self, '_adv_stats_pixelsize') else None
+                if all_sigma_px.size > 0 and px_um:
+                    med_nm = float(np.median(all_sigma_px)) * px_um * 1000.0
+                    rms_nm = float(np.sqrt(np.mean(all_sigma_px ** 2))) * px_um * 1000.0
+                    sigma_str = f"σ_loc median={med_nm:.1f} nm, RMS={rms_nm:.1f} nm"
+                else:
+                    sigma_str = "σ_loc unavailable"
+                if n_with_crlb == n:
+                    crlb_msg = f"  CRLB columns present — corrected Cauchy enabled ({sigma_str})."
+                else:
+                    crlb_msg = f"  CRLB columns present in {n_with_crlb}/{n} videos ({sigma_str})."
             if n == 1:
                 fname = self._adv_stats_datasets[0]['video_name']
                 self._adv_stats_info_label.setText(
-                    f"Loaded {total_traj} trajectories from '{fname}'.")
+                    f"Loaded {total_traj} trajectories from '{fname}'.{crlb_msg}")
             else:
                 self._adv_stats_info_label.setText(
-                    f"Loaded {total_traj} trajectories from {n} videos.")
+                    f"Loaded {total_traj} trajectories from {n} videos.{crlb_msg}")
             self._on_run_adv_stats()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-26
 
     def _load_adv_stats_data_from_file(self, selected_path):
@@ -6025,13 +6849,154 @@ class FreeTraceGUI(QMainWindow):
             fname = os.path.basename(traces_path)
             video_name = fname.replace('_traces.csv', '')
 
+            # Look for matching _loc.csv to harvest CRLB columns. // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+            # ROI and classification exports produce subset traces files like
+            # <v>_roi_2_traces.csv or <v>_region_1_traces.csv. The loc file lives at
+            # the parent <v>_loc.csv, so we try the direct sibling first then walk
+            # back the filename by stripping trailing "_<token>" up to 3 levels.
+            base_no_ext = traces_path[:-len('_traces.csv')]
+            loc_candidates = [base_no_ext + '_loc.csv']
+            cur = base_no_ext
+            for _ in range(3):
+                if '_' not in os.path.basename(cur):
+                    break
+                cur = cur.rsplit('_', 1)[0]
+                loc_candidates.append(cur + '_loc.csv')
+            loc_path = next((p for p in loc_candidates if os.path.exists(p)), loc_candidates[0])
+            loc_df = None
+            has_crlb_cols = False
+            sigma_loc_px = None
+            sigma_loc_median_px = None
+            sigma_loc_rms_px = None
+            I_tot_arr = None  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+            psf_sigma_px_arr = None
+            if os.path.exists(loc_path):
+                try:
+                    loc_df = pd.read_csv(loc_path)
+                    has_crlb_cols = {'bg_median', 'bg_var', 'integrated_flux'}.issubset(loc_df.columns)
+                    if has_crlb_cols:
+                        # If the traces file is a subset of the parent loc file (ROI / class
+                        # export), filter loc rows to only those that survived into the
+                        # current traces — match by (frame, round(x,3), round(y,3)).
+                        # Falls back to all loc rows if the join keeps too few rows.
+                        if loc_path != base_no_ext + '_loc.csv':
+                            try:
+                                key_traces = set(zip(
+                                    traces_df['frame'].astype(int).tolist(),
+                                    np.round(traces_df['x'].to_numpy(), 3).tolist(),
+                                    np.round(traces_df['y'].to_numpy(), 3).tolist(),
+                                ))
+                                key_loc = list(zip(
+                                    loc_df['frame'].astype(int).tolist(),
+                                    np.round(loc_df['x'].to_numpy(), 3).tolist(),
+                                    np.round(loc_df['y'].to_numpy(), 3).tolist(),
+                                ))
+                                mask = np.array([k in key_traces for k in key_loc], dtype=bool)
+                                if mask.sum() >= max(10, int(0.5 * len(traces_df))):
+                                    loc_df = loc_df.iloc[mask].reset_index(drop=True)
+                            except Exception:
+                                pass
+                        # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                        # Override loc.csv bg_var / integrated_flux with thesis-style annulus
+                        # values when a raw TIFF is alongside, so σ_loc matches the thesis CRLB.
+                        crlb_source = "loc.csv"
+                        tif_path = _find_sibling_tif(loc_path, traces_path, video_name)
+                        if tif_path is not None:
+                            try:
+                                rec = _recompute_bg_var_and_flux_from_tif(loc_df, tif_path)
+                                loc_df = loc_df.copy()
+                                loc_df['bg_var'] = rec['bg_var']
+                                loc_df['bg_median'] = rec['bg_median']
+                                loc_df['integrated_flux'] = rec['integrated_flux']
+                                crlb_source = f"TIFF ({os.path.basename(tif_path)})"
+                            except Exception as _e:
+                                crlb_source = f"loc.csv (TIFF recompute failed: {_e})"
+                        # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                        sl_data = _compute_sigma_loc_per_spot(loc_df)
+                        sigma_loc_px = sl_data['sigma_loc_px']
+                        I_tot_arr = sl_data['I_tot']
+                        psf_sigma_px_arr = sl_data['psf_sigma_px']
+                        finite = np.isfinite(sigma_loc_px)
+                        if finite.any():
+                            sigma_loc_median_px = float(np.median(sigma_loc_px[finite]))
+                            # RMS pooling per feedback_sigma_loc_plugin.md
+                            sigma_loc_rms_px = float(np.sqrt(np.mean(sigma_loc_px[finite] ** 2)))
+                            # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                            # Pre-fill the toolbar σ_loc spinbox with the freshly-computed rms.
+                            try:
+                                self._adv_stats_sigma_loc.setValue(float(sigma_loc_rms_px))
+                            except Exception:
+                                pass
+                            # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                except Exception:
+                    loc_df = None
+
             self._adv_stats_datasets.append({
                 'video_name': video_name,
                 'traces_path': traces_path,
                 'traces_df': traces_df,
+                'loc_path': loc_path if loc_df is not None else None,
+                'loc_df': loc_df,
+                'has_crlb_cols': has_crlb_cols,
+                'sigma_loc_px': sigma_loc_px,                  # per-spot, may be None
+                'sigma_loc_median_px': sigma_loc_median_px,
+                'sigma_loc_rms_px': sigma_loc_rms_px,
+                'I_tot_arr': I_tot_arr,                        # capture-corrected photons per spot
+                'psf_sigma_px_arr': psf_sigma_px_arr,           # PSF size per spot (for Thompson line)
+                # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                'crlb_source': crlb_source if has_crlb_cols else None,
+                # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
             })
         except Exception as e:
             QMessageBox.critical(self, "Error loading data", str(e))
+
+    def _on_adv_stats_read_R(self):  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+        """Pick a video file and auto-fill pixel size, frame interval, and R from its metadata."""
+        # Default starting dir: dir of first loaded dataset, or cwd
+        start_dir = ""
+        if self._adv_stats_datasets:
+            start_dir = os.path.dirname(self._adv_stats_datasets[0]['traces_path'])
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select video file (TIFF / ND2)", start_dir,
+            "Microscopy videos (*.tif *.tiff *.nd2);;All files (*)",
+        )
+        if not path:
+            return
+        meta = _read_metadata_from_video(path)  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28 — dispatches TIFF/ND2
+        # All-or-nothing per user request: only update if pixel size, frame interval, // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+        # AND R are all present. Otherwise show a warning listing what's missing and
+        # leave all toolbar fields untouched.
+        missing = []
+        if meta.get('pixel_size_um') is None:
+            missing.append('pixel size')
+        if meta.get('finterval_s') is None:
+            missing.append('frame interval')
+        if meta.get('R') is None:
+            missing.append('R (exposure/Δt)')
+        msg = meta.get('message') or "No usable metadata."
+        if missing:
+            QMessageBox.warning(
+                self, "Read metadata from video",
+                f"{os.path.basename(path)}: {msg}\n\n"
+                f"Missing: {', '.join(missing)}.\n\n"
+                f"No fields were updated. Enter values manually.",
+            )
+            return
+        self._adv_stats_pixelsize.setValue(float(meta['pixel_size_um']))
+        # The toolbar field is labelled "Frame rate (s)" but stores the frame interval in seconds.
+        self._adv_stats_framerate.setValue(float(meta['finterval_s']))
+        self._adv_stats_R.setValue(float(meta['R']))
+        self._adv_stats_status_label.setText(
+            f"Read {os.path.basename(path)}: {msg} → updated pixel size, frame interval, R."
+        )
+        # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+        # Auto re-run Adv Stats now that the metadata is loaded, but only if a dataset is
+        # already loaded and no run is currently in progress.
+        if self._adv_stats_datasets and not (
+            self._adv_stats_worker is not None and self._adv_stats_worker.isRunning()
+        ):
+            self._on_run_adv_stats()
+        # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
 
     def _on_run_adv_stats(self):
         """Run Advanced Stats preprocessing in background thread."""
@@ -6042,17 +7007,55 @@ class FreeTraceGUI(QMainWindow):
             return
 
         dataset_tuples = []
-        for ds in self._adv_stats_datasets:
-            tdf = ds['traces_df'].copy()
-            if 'state' not in tdf.columns:
-                tdf['state'] = 0
-            dataset_tuples.append((ds['video_name'], tdf))
+        sigma_loc_rms_per_dataset = []
+        sigma_loc_spin = float(self._adv_stats_sigma_loc.value())
+        # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+        # When more than one dataset is loaded, pool them into a single "merged" run
+        # (trajectories concatenated with offset traj_idx; joint σ_loc rms across all
+        # per-dataset values, unless the spinbox sets an explicit override). Single
+        # dataset path is the standard case — no merging needed.
+        if len(self._adv_stats_datasets) > 1:
+            tid_offset = 0
+            merged_traces = []
+            for ds in self._adv_stats_datasets:
+                tdf = ds['traces_df'].copy()
+                if 'state' not in tdf.columns:
+                    tdf['state'] = 0
+                tdf['traj_idx'] = tdf['traj_idx'].astype(int) + tid_offset
+                tid_offset = int(tdf['traj_idx'].max()) + 1
+                merged_traces.append(tdf)
+            merged = pd.concat(merged_traces, ignore_index=True)
+            dataset_tuples.append(('merged', merged))
+            if sigma_loc_spin > 0:
+                sigma_loc_rms_per_dataset.append(sigma_loc_spin)
+            else:
+                vals = [float(ds.get('sigma_loc_rms_px')) for ds in self._adv_stats_datasets
+                        if ds.get('sigma_loc_rms_px') is not None
+                        and np.isfinite(ds.get('sigma_loc_rms_px'))]
+                if vals:
+                    sigma_loc_rms_per_dataset.append(float(np.sqrt(np.mean(np.asarray(vals) ** 2))))
+                else:
+                    sigma_loc_rms_per_dataset.append(None)
+        else:
+            for ds in self._adv_stats_datasets:
+                tdf = ds['traces_df'].copy()
+                if 'state' not in tdf.columns:
+                    tdf['state'] = 0
+                dataset_tuples.append((ds['video_name'], tdf))
+                if sigma_loc_spin > 0:
+                    sigma_loc_rms_per_dataset.append(sigma_loc_spin)
+                else:
+                    sigma_loc_rms_per_dataset.append(ds.get('sigma_loc_rms_px'))
 
         self._adv_stats_run_btn.setEnabled(False)
-        self._adv_stats_status_label.setText("Processing...")
+        merged_run = len(self._adv_stats_datasets) > 1
+        self._adv_stats_status_label.setText(
+            "Processing (merged)..." if merged_run else "Processing...")
         self._adv_stats_worker = AdvStatsWorker(
             dataset_tuples, self._adv_stats_pixelsize.value(),
             self._adv_stats_framerate.value(), self._adv_stats_cutoff.value(),
+            R=self._adv_stats_R.value(),  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+            sigma_loc_rms_per_dataset=sigma_loc_rms_per_dataset,
         )
         self._adv_stats_worker.progress.connect(
             lambda pct, msg: self._adv_stats_status_label.setText(f"{msg} ({pct}%)")
@@ -6073,6 +7076,10 @@ class FreeTraceGUI(QMainWindow):
         self._adv_stats_status_label.setText("Done. " + ", ".join(parts))
         self._adv_stats_results = results_list
         self._adv_stats_save_btn.setEnabled(True)
+        # Enable scan-data export only when at least one dataset has multi-Δ results.  // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+        self._adv_stats_save_data_btn.setEnabled(
+            any(r.get('multi_delta_per_state') for r in results_list)
+        )
         self._render_adv_stats_plots(results_list)
 
     def _render_adv_stats_plots(self, results_list):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
@@ -6104,9 +7111,11 @@ class FreeTraceGUI(QMainWindow):
             'grid.color': '#333333',
         }
 
-        def _make_canvas(fig):
+        def _make_canvas(fig, save_name=None):  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
             canvas = FigureCanvasQTAgg(fig)
             canvas.setMinimumHeight(350)
+            if save_name is not None:
+                canvas._save_name = save_name
             self._adv_stats_canvases.append(canvas)
             return canvas
 
@@ -6154,62 +7163,14 @@ class FreeTraceGUI(QMainWindow):
                         yield r, st, ds_palette[ds_idx % len(ds_palette)]
 
         with plt.style.context(dark_style):
-            # ---- 1. TA-EA-SD (Time-Averaged Ensemble-Averaged Squared Displacement) ----
-            section1 = CollapsibleSection("TA-EA-SD (Time-Averaged Ensemble-Averaged Squared Displacement)")
-            fig = Figure(figsize=(10, 4), dpi=100, constrained_layout=True)
-            ax = fig.add_subplot(111)
-
-            for r, st, color in _iter_colors(results_list):
-                tamsd = r['tamsd']
-                subset = tamsd[tamsd['state'] == st]
-                if subset.empty:
-                    continue
-                label = _ds_label(r, st)
-                ax.plot(subset['time'], subset['mean'], color=color, label=label, linewidth=1.5)
-                mean_arr = subset['mean'].to_numpy()
-                std_arr = subset['std'].to_numpy()
-                time_arr = subset['time'].to_numpy()
-                ax.fill_between(time_arr, mean_arr - std_arr, mean_arr + std_arr,
-                               color=color, alpha=0.2)
-
-            ax.set_xlabel('Time lag (s)')
-            ax.set_ylabel('TA-EA-SD (μm²)')
-            ax.set_title('TA-EA-SD')
-            ax.legend(fontsize=7, loc='best')
-            ax.grid(True, alpha=0.3)
-            section1.add_widget(_make_canvas(fig))
-            self._adv_stats_plot_layout.addWidget(section1)
-
-            # ---- 1b. TA-EA-SD log-log ----
-            section1b = CollapsibleSection("TA-EA-SD — log-log")  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
-            fig_log = Figure(figsize=(10, 4), dpi=100, constrained_layout=True)
-            ax_log = fig_log.add_subplot(111)
-
-            for r, st, color in _iter_colors(results_list):
-                tamsd = r['tamsd']
-                subset = tamsd[tamsd['state'] == st]
-                if subset.empty:
-                    continue
-                label = _ds_label(r, st)
-                valid = (subset['mean'] > 0) & (subset['time'] > 0)
-                s = subset[valid]
-                if s.empty:
-                    continue
-                ax_log.plot(s['time'], s['mean'], color=color, label=label, linewidth=1.5)
-
-            ax_log.set_xscale('log')
-            ax_log.set_yscale('log')
-            ax_log.set_xlabel('Time lag (s)')
-            ax_log.set_ylabel('TA-EA-SD (μm²)')
-            ax_log.set_title('TA-EA-SD — log-log')
-            ax_log.legend(fontsize=7, loc='best')
-            ax_log.grid(True, alpha=0.3, which='both')
-            section1b.add_widget(_make_canvas(fig_log))
-            self._adv_stats_plot_layout.addWidget(section1b)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
-
-            # ---- 2. 1D Displacement (Δx, Δy) ----
+            # ---- 1D Displacement (Δx, Δy) — Gaussian distortion diagnostic ---- // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+            # TA-EA-SD (linear + log-log) and 1D Ratio + Cauchy fit moved to the Basic Stats tab
+            # since they are noise-free / empirical analyses. Advanced Stats keeps 1D Displacement
+            # because the Gaussian-fit deviation from a true Gaussian is a useful distortion
+            # diagnostic. Phase 3 will add the corrected-Cauchy multi-Δ 6-panel figure here.
             section2 = CollapsibleSection("1D Displacement (Δx, Δy) — consecutive frames only, Δt = 1")
 
+            disp_panel_idx = 0  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
             for r, st, color in _iter_colors(results_list):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
                 disp = r['displacements_1d']
                 gaussian_fits = r['gaussian_fits']
@@ -6259,54 +7220,767 @@ class FreeTraceGUI(QMainWindow):
                 ax2.grid(True, alpha=0.3)
 
                 _fill_stats_panel(ax2_stats, stat_lines)
-                section2.add_widget(_make_canvas(fig2))  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                section2.add_widget(_make_canvas(fig2, save_name=f'displacement_1d_{disp_panel_idx}'))  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                disp_panel_idx += 1
+            # Section 2 addWidget moved to the end — see panel-order block. // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
 
-            self._adv_stats_plot_layout.addWidget(section2)
+            # ---- Corrected Cauchy multi-Δ scan: Ĥ(Δ) per state ---- // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+            # Phase 3 step 3d: noise-aware H estimator from per-Δ ratio chains.
+            # Skipped per-dataset when σ_loc could not be computed (e.g. _loc.csv lacks
+            # bg_median/bg_var/integrated_flux), or when MSD(τ=1) ≤ ~1.5·2σ_loc² (noise
+            # floor — the corrected fit cannot recover H from pure noise).
+            # Always render a diagnostic panel showing MSD(τ=1) vs the noise floor when
+            # σ_loc is available, so the user can see WHY a scan was skipped.
+            has_any_diag = any(r.get('noise_floor_per_state') for r in results_list)
+            if has_any_diag:
+                section_diag = CollapsibleSection("Noise-floor diagnostic — σ_loc(I) scatter + MSD(τ=1) vs 2σ_loc²")
+                # Look up per-dataset per-spot arrays from self._adv_stats_datasets by name. // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                ds_by_name = {ds['video_name']: ds for ds in getattr(self, '_adv_stats_datasets', [])}
+                px_um = self._adv_stats_pixelsize.value() if hasattr(self, '_adv_stats_pixelsize') else 1.0
+                pix_nm = float(px_um) * 1000.0
+                for r in results_list:
+                    nf = r.get('noise_floor_per_state') or {}
+                    if not nf:
+                        continue
+                    name = r['name']
+                    safe_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in name)
+                    ds = ds_by_name.get(name) or {}
+                    sigma_loc_px_arr = ds.get('sigma_loc_px')
+                    I_tot_arr = ds.get('I_tot_arr')
+                    psf_sigma_px_arr = ds.get('psf_sigma_px_arr')
+                    bg_var_arr = ds['loc_df']['bg_var'].to_numpy() if (ds.get('loc_df') is not None and 'bg_var' in ds['loc_df'].columns) else None
 
-            # ---- 3. 1D Displacement Ratio — Cauchy Fit ----
-            section3 = CollapsibleSection("1D Displacement Ratio — Cauchy Fit")
+                    # 3-column layout: scatter | bar | stats text
+                    fig_nf = Figure(figsize=(13, 4.5), dpi=100, constrained_layout=True)
+                    gs = fig_nf.add_gridspec(1, 3, width_ratios=[5, 4, 1], wspace=0.05)
+                    ax_sc = fig_nf.add_subplot(gs[0])
+                    ax_bar = fig_nf.add_subplot(gs[1])
+                    ax_nf_stats = fig_nf.add_subplot(gs[2])
+                    ax_nf_stats.axis('off')
 
-            for r, st, color in _iter_colors(results_list):
-                ratios = r['ratios_1d']
-                cauchy_fits = r['cauchy_fits']
-                subset = ratios[ratios['state'] == st]
-                if subset.empty:
-                    continue
+                    # ---- LEFT: σ_loc (nm) vs I_tot (ADU) scatter ----
+                    if sigma_loc_px_arr is not None and I_tot_arr is not None:
+                        m = np.isfinite(sigma_loc_px_arr) & np.isfinite(I_tot_arr) & (I_tot_arr > 0)
+                        if m.any():
+                            sig_nm = sigma_loc_px_arr[m] * pix_nm
+                            I_use = I_tot_arr[m]
+                            ax_sc.scatter(I_use, sig_nm, c='tab:blue', s=2, alpha=0.5,
+                                           label=f'spots (n={int(m.sum())})')
+                            # Thompson theory line: σ² = (s² + a²/12)/N + 8π s⁴ b² / (a² N²)
+                            if psf_sigma_px_arr is not None and bg_var_arr is not None:
+                                m2 = m & np.isfinite(psf_sigma_px_arr) & np.isfinite(bg_var_arr) & (bg_var_arr > 0)
+                                if m2.sum() > 10:
+                                    s_nm_med = float(np.median(psf_sigma_px_arr[m2])) * pix_nm
+                                    b_med = float(np.median(bg_var_arr[m2]))
+                                    a = pix_nm
+                                    Ngrid = np.logspace(np.log10(max(I_use.min(), 1.0)),
+                                                        np.log10(I_use.max()), 200)
+                                    th = np.sqrt((s_nm_med ** 2 + a ** 2 / 12.0) / Ngrid
+                                                 + 8.0 * np.pi * s_nm_med ** 4 * b_med
+                                                 / (a ** 2 * Ngrid ** 2))
+                                    ax_sc.plot(Ngrid, th, 'r-', lw=1.6,
+                                                label=f'Thompson (s={s_nm_med:.0f} nm, b²={b_med:.0f})')
+                                    ax_sc.plot(Ngrid, s_nm_med / np.sqrt(Ngrid), 'k--', lw=0.8,
+                                                label='shot-noise s/√N')
+                            ax_sc.set_xscale('log'); ax_sc.set_yscale('log')
+                            ax_sc.set_xlabel('I (ADU)')
+                            ax_sc.set_ylabel('σ_loc (nm)')
+                            ax_sc.set_title(f'Per-spot CRLB σ_loc vs I — {name}')
+                            ax_sc.grid(True, alpha=0.3, which='both')
+                            ax_sc.legend(fontsize=7, loc='best')
+                        else:
+                            ax_sc.text(0.5, 0.5, 'no valid spots', ha='center', va='center',
+                                        transform=ax_sc.transAxes, color='#888')
+                            ax_sc.axis('off')
+                    else:
+                        ax_sc.text(0.5, 0.5, 'σ_loc per-spot data unavailable',
+                                    ha='center', va='center', transform=ax_sc.transAxes, color='#888')
+                        ax_sc.axis('off')
 
-                fig3, ax3, ax3_stats = _make_fig_with_stats()
-                label = _ds_label(r, st)
-                ratio_data = subset['ratio'].to_numpy()
-                ratio_clipped = ratio_data[(ratio_data > -10) & (ratio_data < 10)]
+                    # ---- RIGHT: MSD(τ) log-log per state with horizontal noise-floor 2σ² ----
+                    # Replaces the earlier bar chart per user request: same diagnostic but
+                    # in the thesis style — TA-EA MSD curve + dashed black noise floor line.
+                    states = sorted(nf.keys())
+                    state_pal = sns.color_palette('tab10', n_colors=max(len(r['total_states']), 1))
+                    nf_lines = [(f'σ_loc rms = {r.get("sigma_loc_rms_px"):.4g} px', '#aaaaaa', None, None)]
+                    sigma_loc_rms_px = r.get('sigma_loc_rms_px') or 0.0
+                    noise_floor = 2.0 * float(sigma_loc_rms_px) ** 2
+                    MAX_TAU_DIAG = 30
+                    # Need raw traces — pull from the dataset record.
+                    traces_df_full = ds.get('traces_df')
+                    any_curve = False
+                    md_keys = set((r.get('multi_delta_per_state') or {}).keys())  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                    for st in states:
+                        msd1, _noise, snr = nf[st]
+                        try:
+                            color = state_pal[r['total_states'].index(st) % len(state_pal)]
+                        except Exception:
+                            color = state_pal[0]
+                        ok = '✓ scan ran' if st in md_keys else '✗ scan skipped (no diffusion signal)'
+                        nf_lines.append((f'State {st}: MSD(τ=1)={msd1:.4g}  S/N={snr:.2f}  {ok}',
+                                         color, None, None))
+                        # Compute TA-EA MSD up to MAX_TAU_DIAG
+                        if traces_df_full is None:
+                            continue
+                        tdf = traces_df_full
+                        if 'state' in tdf.columns:
+                            tdf = tdf[tdf['state'] == st]
+                        if tdf is None or len(tdf) == 0:
+                            continue
+                        trajs_st = []
+                        for _, g in tdf.groupby('traj_idx'):
+                            g = g.sort_values('frame')
+                            if len(g) >= 2:
+                                trajs_st.append(g[['frame', 'x', 'y']].to_numpy(dtype=np.float64))
+                        if not trajs_st:
+                            continue
+                        taus = np.arange(1, MAX_TAU_DIAG + 1)
+                        msd = np.full(MAX_TAU_DIAG, np.nan)
+                        sem = np.full(MAX_TAU_DIAG, np.nan)
+                        for ti, tau in enumerate(taus):
+                            sds = []
+                            for tr in trajs_st:
+                                if len(tr) <= tau:
+                                    continue
+                                dx = tr[tau:, 1] - tr[:-tau, 1]
+                                dy = tr[tau:, 2] - tr[:-tau, 2]
+                                sds.append(np.concatenate([dx ** 2, dy ** 2]))
+                            if sds:
+                                a = np.concatenate(sds)
+                                msd[ti] = float(a.mean())
+                                sem[ti] = float(a.std(ddof=1) / np.sqrt(max(len(a), 1)))
+                        m = np.isfinite(msd) & (msd > 0)
+                        if not m.any():
+                            continue
+                        label = f'State {st} TA-EA MSD' if len(states) > 1 else 'TA-EA MSD'
+                        ax_bar.errorbar(taus[m], msd[m], yerr=sem[m], fmt='o-',
+                                         color=color, lw=1.2, ms=4, capsize=2, label=label)
+                        any_curve = True
+                    if noise_floor > 0:
+                        ax_bar.axhline(noise_floor, ls='-.', color='black', lw=0.9, alpha=0.7,
+                                        label=fr'noise floor $2\sigma_{{loc}}^2$={noise_floor:.3g}')
+                    if any_curve:
+                        ax_bar.set_xscale('log'); ax_bar.set_yscale('log')
+                    ax_bar.set_xlabel('τ (frames)')
+                    ax_bar.set_ylabel('TA-EA MSD (px²)')
+                    ax_bar.set_title('MSD(τ) vs noise floor')
+                    ax_bar.grid(True, which='both', alpha=0.3)
+                    ax_bar.legend(fontsize=7, loc='best')
 
-                if len(ratio_clipped) > 0:
-                    ax3.hist(ratio_clipped, bins=100, density=True, alpha=0.6,
-                            color=color, edgecolor='none', label=f'{label} data')
+                    _fill_stats_panel(ax_nf_stats, nf_lines)
+                    section_diag.add_widget(_make_canvas(fig_nf, save_name=f'noise_floor_{safe_name}'))
+                # Section_diag addWidget moved to the end. // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
 
-                stat_lines = [(f'Ratio (n={len(ratio_clipped)})', color,
-                              np.mean(ratio_clipped) if len(ratio_clipped) > 0 else None,
-                              np.std(ratio_clipped) if len(ratio_clipped) > 0 else None)]
+            has_any_md = any(r.get('multi_delta_per_state') for r in results_list)
+            if has_any_md:
+                section3 = CollapsibleSection("Corrected Cauchy multi-Δ scan — Ĥ(Δ)")
+                for r in results_list:
+                    md_per_st = r.get('multi_delta_per_state') or {}
+                    if not md_per_st:
+                        continue
+                    fig3, ax3, ax3_stats = _make_fig_with_stats()
+                    name = r['name']
+                    states_in_md = sorted(md_per_st.keys())
+                    state_pal = sns.color_palette('tab10', n_colors=max(len(r['total_states']), 1))
+                    stat_lines = []
+                    for st in states_in_md:
+                        scan = md_per_st[st]
+                        deltas = np.asarray(scan['deltas'], dtype=float)
+                        H_est = np.asarray(scan['H_est'], dtype=float)
+                        n_ratios = np.asarray(scan['n_ratios'], dtype=int)
+                        converged = np.asarray(scan.get('converged', np.zeros_like(deltas, dtype=bool)), dtype=bool)
+                        sigma_H = np.asarray(scan.get('sigma_H', np.full_like(deltas, np.nan)), dtype=float)  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                        try:
+                            color = state_pal[r['total_states'].index(st) % len(state_pal)]
+                        except Exception:
+                            color = state_pal[0]
+                        finite = np.isfinite(H_est)
+                        if not np.any(finite):
+                            continue
+                        # 95% CRLB band (1.96σ) — drawn first so points/line render on top.
+                        band_mask = finite & np.isfinite(sigma_H)
+                        if np.any(band_mask):
+                            lo = np.clip(H_est[band_mask] - 1.96 * sigma_H[band_mask], 0.0, 1.0)
+                            hi = np.clip(H_est[band_mask] + 1.96 * sigma_H[band_mask], 0.0, 1.0)
+                            ax3.fill_between(deltas[band_mask], lo, hi, color=color,
+                                             alpha=0.15, linewidth=0)
+                        # Solid points for converged fits, hollow for non-converged.
+                        conv_mask = finite & converged
+                        nonconv_mask = finite & (~converged)
+                        ax3.plot(deltas[finite], H_est[finite], '-', color=color, alpha=0.6,
+                                 label=f'State {st}' if len(states_in_md) > 1 else name)
+                        if np.any(conv_mask):
+                            ax3.scatter(deltas[conv_mask], H_est[conv_mask], color=color,
+                                        s=30, edgecolors='none')
+                        if np.any(nonconv_mask):
+                            ax3.scatter(deltas[nonconv_mask], H_est[nonconv_mask],
+                                        facecolors='none', edgecolors=color, s=30, linewidth=1.0)
+                        K_val = (r.get('K_est_per_state') or {}).get(st)
+                        if K_val is not None and np.isfinite(K_val):
+                            stat_lines.append((f'State {st}: K={K_val:.4g} px²/fr^(2H)',
+                                               color, None, None))
+                        stat_lines.append((f'  Δ_max={int(scan["delta_max"])}, n_ratios(Δ=1)={int(n_ratios[0])}',
+                                           color, None, None))
+                        if np.any(band_mask):
+                            stat_lines.append((f'  CRLB σ_H(Δ=1)={float(sigma_H[band_mask][0]):.3f}',
+                                               color, None, None))
+                    sigma_loc_rms_px = r.get('sigma_loc_rms_px')
+                    R_used = r.get('R_used')
+                    if sigma_loc_rms_px is not None:
+                        stat_lines.insert(0, (f'σ_loc rms = {sigma_loc_rms_px:.4g} px',
+                                              '#aaaaaa', None, None))
+                    if R_used is not None:
+                        stat_lines.insert(1 if sigma_loc_rms_px is not None else 0,
+                                          (f'R = {R_used:.3g}', '#aaaaaa', None, None))
+                    # Trust bands: σ_Ĥ_CRLB ≤ τ AND |Ĥ-spread| ≤ τ under σ_loc·{√0.5, √2}.  // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                    # Two thresholds (τ ∈ {0.05, 0.01}); per-state masks intersected.
+                    sigma_for_band = (float(sigma_loc_rms_px)
+                                      if (sigma_loc_rms_px is not None
+                                          and np.isfinite(sigma_loc_rms_px)) else 0.0)
+                    R_for_band = float(R_used or 0.0)
+                    TAU_LEVELS = [(0.05, 0.10), (0.01, 0.18)]  # (τ, axvspan alpha)
+                    trust_masks = {tau: None for tau, _ in TAU_LEVELS}
+                    deltas_band = None
+                    for st in states_in_md:
+                        K_st = (r.get('K_est_per_state') or {}).get(st)
+                        if K_st is None or not np.isfinite(K_st) or K_st <= 0:
+                            continue
+                        scan_st = md_per_st[st]
+                        deltas_st = np.asarray(scan_st['deltas'], dtype=float)
+                        sigma_H_st = np.asarray(scan_st.get('sigma_H', np.full_like(deltas_st, np.nan)), dtype=float)
+                        rho_arr_st = np.asarray(scan_st.get('rho_arr', np.full_like(deltas_st, np.nan)), dtype=float)
+                        H_est_st = np.asarray(scan_st['H_est'], dtype=float)
+                        spread = np.full(len(deltas_st), np.nan)
+                        # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                        # Bias proxy via first-order error propagation (chapter01.tex
+                        # eq:ch1_Hhat_sensitivity, generalised to R>0 via J_var/J_cov):
+                        #   ∂ρ/∂σ²  = -K·(J_var(H,R,Δ) + J_cov(H,R,Δ)) / [2·(K·J_var + σ²)²]
+                        #   ∂Ĥ/∂σ² = -∂ρ/∂σ² / ∂ρ/∂H        (∂ρ/∂H from cauchy_fit numerics)
+                        # spread(Δ) = |∂Ĥ/∂σ²| · σ²   ← convention δσ² = σ² (100% relative).
+                        try:
+                            from cauchy_fit import (J_var as _Jv, J_cov as _Jc,
+                                                     drho_dH_numerical as _drho_dH)
+                        except Exception:
+                            _Jv = _Jc = _drho_dH = None
+                        sigma2 = float(sigma_for_band) ** 2
+                        for i, dval in enumerate(deltas_st):
+                            if not (np.isfinite(rho_arr_st[i]) and np.isfinite(H_est_st[i])):
+                                continue
+                            if _Jv is None or _Jc is None or _drho_dH is None:
+                                spread[i] = float('inf')
+                                continue
+                            H_hat = float(H_est_st[i])
+                            Jv = _Jv(H_hat, R_for_band, float(dval))
+                            Jc = _Jc(H_hat, R_for_band, float(dval))
+                            M = float(K_st) * Jv
+                            denom = 2.0 * (M + sigma2) ** 2
+                            if denom <= 0:
+                                spread[i] = float('inf')
+                                continue
+                            drho_dsig2 = -float(K_st) * (Jv + Jc) / denom
+                            d_rho_dH = _drho_dH(H_hat, float(dval), R_for_band,
+                                                 float(K_st), sigma_for_band)
+                            if not np.isfinite(d_rho_dH) or abs(d_rho_dH) < 1e-12:
+                                spread[i] = float('inf')
+                                continue
+                            spread[i] = abs(drho_dsig2 / d_rho_dH) * sigma2
+                        if deltas_band is None:
+                            deltas_band = deltas_st
+                        n = int(min(len(deltas_band), len(deltas_st)))
+                        deltas_band = deltas_band[:n]
+                        for tau, _ in TAU_LEVELS:
+                            prec_ok = np.isfinite(sigma_H_st[:n]) & (sigma_H_st[:n] <= tau)
+                            bias_ok = np.isfinite(spread[:n]) & (spread[:n] <= tau)
+                            pass_st = prec_ok & bias_ok
+                            if trust_masks[tau] is None:
+                                trust_masks[tau] = pass_st.copy()
+                            else:
+                                trust_masks[tau] = trust_masks[tau][:n] & pass_st
+                    if deltas_band is not None and len(deltas_band) > 0:
+                        # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                        # Edge runs extend to the axis xlim margins so the colour reaches the figure edge.
+                        def _runs_indices(mask):
+                            in_run = False; lo_idx = None
+                            for i, ok in enumerate(mask):
+                                if ok and not in_run:
+                                    lo_idx = i; in_run = True
+                                elif (not ok) and in_run:
+                                    yield (lo_idx, i - 1); in_run = False
+                            if in_run:
+                                yield (lo_idx, len(mask) - 1)
 
-                if st in cauchy_fits:  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
-                    cf = cauchy_fits[st]
-                    ax3.plot(cf['x_fit'], cf['y_fit'], color='#ff6666', linewidth=2,
-                            label=f'Cauchy fit (Ĥ={cf["h_est"]:.3f})')
-                    ax3.axvline(cf['location'], color='#ff6666', linestyle='--',
-                               alpha=0.6, linewidth=1)
-                    stat_lines.append((f'Ĥ = {cf["h_est"]:.4f}', '#ff6666', None, None))
-                    stat_lines.append((f'Location param = {cf["location"]:.4f}', '#ff6666', None, None))
-                    stat_lines.append((f'Amplitude factor = {cf["alpha_est"]:.4f}', '#ff6666', None, None))
+                        m05 = trust_masks.get(0.05)
+                        m01 = trust_masks.get(0.01)
+                        if m05 is not None and m01 is not None:
+                            xlim_lo, xlim_hi = ax3.get_xlim()
+                            n_db = int(len(deltas_band))
+                            fail_05 = ~m05
+                            borderline = m05 & (~m01)
 
-                ax3.set_xlabel('Displacement Ratio')
-                ax3.set_ylabel('Density')
-                ax3.set_title(f'1D Ratio — Cauchy Fit — {label}')
-                ax3.legend(fontsize=7, loc='best')
-                ax3.grid(True, alpha=0.3)
-                ax3.set_xlim(-5, 5)
+                            def _to_xrange(lo_idx, hi_idx):
+                                lx = xlim_lo if lo_idx == 0 else float(deltas_band[lo_idx]) - 0.5
+                                hx = xlim_hi if hi_idx == n_db - 1 else float(deltas_band[hi_idx]) + 0.5
+                                return lx, hx
 
-                _fill_stats_panel(ax3_stats, stat_lines)
-                section3.add_widget(_make_canvas(fig3))
+                            for (li, hi_) in _runs_indices(fail_05):
+                                lx, hx = _to_xrange(li, hi_)
+                                ax3.axvspan(lx, hx, alpha=0.7, color='#5d4037',  # dark brown = fail-loose
+                                            linewidth=0, zorder=0)
+                            for (li, hi_) in _runs_indices(borderline):
+                                lx, hx = _to_xrange(li, hi_)
+                                ax3.axvspan(lx, hx, alpha=0.4, color='#d2b48c',  # tan = borderline
+                                            linewidth=0, zorder=0)
+                            ax3.set_xlim(xlim_lo, xlim_hi)
+                        # Trust-band legend + per-τ Δ ranges. // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                        stat_lines.append(('Trust-band overlay:', '#aaaaaa', None, None))
+                        stat_lines.append(('  dark brown = fail-loose (fails ε=0.05)',
+                                            '#5d4037', None, None))
+                        stat_lines.append(('  tan = borderline (passes ε=0.05, fails ε=0.01)',
+                                            '#a87c4f', None, None))
+                        stat_lines.append(('  no overlay = strict trust (passes ε=0.01)',
+                                            '#aaaaaa', None, None))
+                        # Trust-band Δ-range lines removed (per user request) — the visual band on // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                        # the plot already conveys this; the text duplicate was confusing.
+                        # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                    # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                    ax3.axhline(0.5, linestyle=':', color='#888888', linewidth=0.8)
+                    ax3.axhline(0.25, linestyle=':', color='#888888', linewidth=0.8)  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                    ax3.axhline(0.75, linestyle=':', color='#888888', linewidth=0.8)  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                    ax3.set_xlabel('Δ (frames)')
+                    ax3.set_ylabel('Ĥ(Δ)')
+                    ax3.set_ylim(-0.05, 1.05)
+                    ax3.set_title(f'Corrected Cauchy Ĥ(Δ) — {name}')
+                    ax3.grid(True, alpha=0.3)
+                    ax3.legend(fontsize=7, loc='best')
+                    _fill_stats_panel(ax3_stats, stat_lines)
+                    safe_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in name)
+                    section3.add_widget(_make_canvas(fig3, save_name=f'multi_delta_H_{safe_name}'))
+                # Section3 addWidget moved to the end. // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
 
-            self._adv_stats_plot_layout.addWidget(section3)  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+                # ---- Drift / sensitivity / reliability — 4 supplementary panels ----  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                # Drift Ĥ(Δ+1)−Ĥ(Δ) with ±1/2/3σ floor (built from sigma_H).
+                # K-sensitivity: re-invert H at K·{0.8..1.2} via _invert_H_from_rho.
+                # σ_loc-sensitivity: same with σ_loc·{0.8..1.2}.
+                # Reliability map: pcolormesh of (Δ, n_eff_grid) → CRLB σ_H/√n_eff at Ĥ(Δ),
+                # with empirical n_eff(Δ) overlaid as a cyan curve.
+                from matplotlib.colors import LogNorm as _LogNorm
+                try:
+                    from cauchy_fit import sigma_H_crlb as _sigma_H_crlb
+                except Exception:
+                    _sigma_H_crlb = None
+                section_zmat = CollapsibleSection("Pairwise Ĥ(Δ) significance matrix — Z = ΔH / √(σ²+σ²)")  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                section_drift = CollapsibleSection("Adjacent-Δ drift Ĥ(Δ+1)−Ĥ(Δ)")
+                # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                # Replace separate K-sensitivity and σ_loc-sensitivity panels with a single
+                # λ_noise = σ_loc² / K sweep (thesis Appendix A convention).
+                section_lambda = CollapsibleSection("Ĥ(Δ) sensitivity to λ_noise = σ²_loc / K")
+                section_REL = CollapsibleSection("Precision map — CRLB σ_H over (Δ, n_eff)")  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                added_zmat = added_drift = added_lambda = added_REL = False
+                # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                for r in results_list:
+                    md_per_st = r.get('multi_delta_per_state') or {}
+                    if not md_per_st:
+                        continue
+                    name = r['name']
+                    safe_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in name)
+                    states_in_md = sorted(md_per_st.keys())
+                    state_pal = sns.color_palette('tab10', n_colors=max(len(r['total_states']), 1))
+                    R_used = float(r.get('R_used') or 0.0)
+                    K_per_state = r.get('K_est_per_state') or {}
+                    sigma_loc_rms_px = r.get('sigma_loc_rms_px')
+                    s_loc = float(sigma_loc_rms_px) if (sigma_loc_rms_px is not None and np.isfinite(sigma_loc_rms_px)) else 0.0
+
+                    # ---- Pairwise Ĥ(Δ) significance Z-matrix ---- // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                    # Z_{ij} = (Ĥ(Δ_i) − Ĥ(Δ_j)) / √(σ_H(Δ_i)² + σ_H(Δ_j)²)
+                    # Two-sided p_{ij} = 2·(1 − Φ(|Z|)) per pair. With ~75 Δ values we get
+                    # ~2775 pairs — under H₀ (Ĥ truly constant) ~138 fall below p<0.05 by
+                    # chance. We apply Benjamini–Hochberg FDR control (q≤0.05) which is
+                    # valid under positive regression dependence — the Ĥ(Δ) chain satisfies
+                    # this since adjacent Δ share most of the same ratio data.
+                    from scipy.stats import norm as _norm  # erfc-backed CDF tail
+                    for st in states_in_md:
+                        scan = md_per_st[st]
+                        deltas = np.asarray(scan['deltas'], dtype=float)
+                        H_est = np.asarray(scan['H_est'], dtype=float)
+                        sigma_H = np.asarray(scan.get('sigma_H', np.full_like(deltas, np.nan)), dtype=float)
+                        finite = np.isfinite(H_est) & np.isfinite(sigma_H) & (sigma_H > 0)
+                        if finite.sum() < 3:
+                            continue
+                        d_arr = deltas[finite]
+                        H_arr = H_est[finite]
+                        s_arr = sigma_H[finite]
+                        n = len(d_arr)
+                        Hi = H_arr[:, None]; Hj = H_arr[None, :]
+                        si = s_arr[:, None]; sj = s_arr[None, :]
+                        Z = (Hi - Hj) / np.sqrt(si ** 2 + sj ** 2)
+                        absZ = np.abs(Z)
+                        upper = np.triu_indices(n, k=1)
+                        n_pairs = upper[0].size
+                        absZ_upper = absZ[upper]
+                        n_sig2 = int((absZ_upper > 2).sum())
+                        n_sig3 = int((absZ_upper > 3).sum())
+                        max_idx = np.unravel_index(np.argmax(absZ * np.triu(np.ones_like(absZ), k=1)), absZ.shape)
+                        max_z = float(Z[max_idx])
+                        max_pair = (int(d_arr[max_idx[0]]), int(d_arr[max_idx[1]]))
+
+                        # ---- Benjamini–Hochberg FDR control at q≤0.05 ---- // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                        FDR_Q = 0.05
+                        # Two-sided p per pair via norm survival (numerically stable for large |Z|).
+                        p_upper = 2.0 * _norm.sf(absZ_upper)
+                        order = np.argsort(p_upper)
+                        p_sorted = p_upper[order]
+                        N_tests = n_pairs
+                        # Largest k such that p₍ₖ₎ ≤ q·k/N (1-indexed in formula → 0-indexed below).
+                        thresholds = FDR_Q * (np.arange(1, N_tests + 1)) / N_tests
+                        passing = p_sorted <= thresholds
+                        if np.any(passing):
+                            k_star = int(np.max(np.flatnonzero(passing)))
+                            p_cut = float(p_sorted[k_star])
+                            n_fdr = k_star + 1
+                        else:
+                            p_cut = 0.0
+                            n_fdr = 0
+                        # Build a boolean significance mask in the upper-triangle layout, then
+                        # symmetrise for the 2D matrix.
+                        sig_mask_upper = (p_upper <= p_cut) if n_fdr > 0 else np.zeros_like(p_upper, dtype=bool)
+                        sig_mat = np.zeros((n, n), dtype=bool)
+                        sig_mat[upper] = sig_mask_upper
+                        sig_mat = sig_mat | sig_mat.T  # symmetric display
+
+                        # Custom larger figure for the heatmap (default 10x4 is too short  // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                        # for a square Δ×Δ matrix). 13x8 with 4:1 width split → ~10x8 plot.
+                        fig_z = Figure(figsize=(13, 8), dpi=100, constrained_layout=True)
+                        gs_z = fig_z.add_gridspec(1, 2, width_ratios=[4, 1], wspace=0.02)
+                        ax_z = fig_z.add_subplot(gs_z[0])
+                        ax_z_stats = fig_z.add_subplot(gs_z[1])
+                        ax_z_stats.axis('off')
+                        # |Z| matrix with fixed scale [0, 5]: blue → white → red.
+                        # |Z| is symmetric in (i,j), so the lower and upper triangles are mirror.
+                        # |Z|=2 → p≈0.05, |Z|=3 → p≈0.003, |Z|=5 → p≈6e-7. Saturating at 5
+                        # keeps the colormap interpretable rather than swamped by extreme cells.
+                        edges = np.concatenate([d_arr - 0.5, [d_arr[-1] + 0.5]])
+                        im = ax_z.pcolormesh(edges, edges, absZ, cmap='coolwarm',
+                                              vmin=0.0, vmax=5.0, shading='auto')
+                        # FDR-significant cells: outline with a black contour around the // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                        # boolean mask. Cells outside this contour are NOT significant after
+                        # multiple-comparison correction (BH at q≤0.05) — even if their |Z|>2.
+                        try:
+                            if sig_mat.any() and (~sig_mat).any():
+                                ax_z.contour(d_arr, d_arr, sig_mat.astype(float),
+                                              levels=[0.5], colors=['black'], linewidths=1.4)
+                        except Exception:
+                            pass
+                        # Light reference contours at |z|=2, |z|=3 (uncorrected thresholds).
+                        try:
+                            ax_z.contour(d_arr, d_arr, absZ,
+                                          levels=[2.0, 3.0], colors=['#888888', '#444444'],
+                                          linewidths=[0.5, 0.8], linestyles=['--', '--'])
+                        except Exception:
+                            pass
+                        # Trust-band shading on the matrix: dim Δs outside the trust band. // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                        # Computed per-state from σ_Ĥ_CRLB (precision) AND |Ĥ|-spread under
+                        # σ_loc·{√0.5, √2} (bias). Two thresholds (0.05, 0.01).
+                        try:
+                            sigma_for_band_z = (float(sigma_loc_rms_px)
+                                                if (sigma_loc_rms_px is not None
+                                                    and np.isfinite(sigma_loc_rms_px)) else 0.0)
+                            R_for_band_z = float(R_used or 0.0)
+                            K_st_z = (r.get('K_est_per_state') or {}).get(st)
+                            sigma_H_arr_z = np.asarray(scan.get('sigma_H', np.full_like(deltas, np.nan)),
+                                                       dtype=float)
+                            rho_arr_z = np.asarray(scan.get('rho_arr', np.full_like(deltas, np.nan)),
+                                                   dtype=float)
+                            H_est_arr_z = np.asarray(scan['H_est'], dtype=float)
+                            spread_z = np.full(len(deltas), np.nan)
+                            # Analytic bias proxy = |∂Ĥ/∂σ²|·σ² (thesis eq:ch1_Hhat_sensitivity). // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                            try:
+                                from cauchy_fit import (J_var as _Jv2, J_cov as _Jc2,
+                                                         drho_dH_numerical as _drho_dH2)
+                            except Exception:
+                                _Jv2 = _Jc2 = _drho_dH2 = None
+                            sigma2_z = float(sigma_for_band_z) ** 2
+                            if (K_st_z is not None and np.isfinite(K_st_z) and K_st_z > 0
+                                    and _Jv2 is not None):
+                                for i, dval in enumerate(deltas):
+                                    if not (np.isfinite(rho_arr_z[i]) and np.isfinite(H_est_arr_z[i])):
+                                        continue
+                                    H_hat = float(H_est_arr_z[i])
+                                    Jv = _Jv2(H_hat, R_for_band_z, float(dval))
+                                    Jc = _Jc2(H_hat, R_for_band_z, float(dval))
+                                    M = float(K_st_z) * Jv
+                                    denom = 2.0 * (M + sigma2_z) ** 2
+                                    if denom <= 0:
+                                        spread_z[i] = float('inf')
+                                        continue
+                                    drho_dsig2 = -float(K_st_z) * (Jv + Jc) / denom
+                                    d_rho_dH = _drho_dH2(H_hat, float(dval), R_for_band_z,
+                                                          float(K_st_z), sigma_for_band_z)
+                                    if not np.isfinite(d_rho_dH) or abs(d_rho_dH) < 1e-12:
+                                        spread_z[i] = float('inf')
+                                        continue
+                                    spread_z[i] = abs(drho_dsig2 / d_rho_dH) * sigma2_z
+                            n_z = len(d_arr)
+                            prec_05 = np.isfinite(sigma_H_arr_z[:n_z]) & (sigma_H_arr_z[:n_z] <= 0.05)
+                            bias_05 = np.isfinite(spread_z[:n_z]) & (spread_z[:n_z] <= 0.05)
+                            trust_05 = prec_05 & bias_05
+                            prec_01 = np.isfinite(sigma_H_arr_z[:n_z]) & (sigma_H_arr_z[:n_z] <= 0.01)
+                            bias_01 = np.isfinite(spread_z[:n_z]) & (spread_z[:n_z] <= 0.01)
+                            trust_01 = prec_01 & bias_01
+
+                            def _runs_where(mask, vals):
+                                in_run = False; lo = None
+                                for i, ok in enumerate(mask):
+                                    if ok and not in_run:
+                                        lo = float(vals[i]) - 0.5; in_run = True
+                                    elif (not ok) and in_run:
+                                        yield (lo, float(vals[i - 1]) + 0.5)
+                                        in_run = False
+                                if in_run:
+                                    yield (lo, float(vals[-1]) + 0.5)
+
+                            # Unified single-color overlay (no double-alpha at intersections). // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                            # 2D mask: dark gray if Δᵢ OR Δⱼ fails loose; light gray if either is
+                            # borderline (and neither fails loose); no overlay if both pass strict.
+                            n_z2 = int(len(d_arr))
+                            fail_05_arr = (~trust_05).astype(bool)
+                            border_arr = (trust_05 & (~trust_01)).astype(bool)
+                            row_fail = fail_05_arr[:, None] | fail_05_arr[None, :]
+                            row_border = border_arr[:, None] | border_arr[None, :]
+                            overlay = np.zeros((n_z2, n_z2, 4), dtype=np.float32)
+                            # dark brown #5d4037 (alpha 0.7) for FAIL-LOOSE
+                            overlay[row_fail] = (0x5d / 255.0, 0x40 / 255.0, 0x37 / 255.0, 0.7)
+                            # tan #d2b48c (alpha 0.4) for BORDERLINE only
+                            border_only = row_border & (~row_fail)
+                            overlay[border_only] = (0xd2 / 255.0, 0xb4 / 255.0, 0x8c / 255.0, 0.4)
+                            ax_z.imshow(
+                                overlay,
+                                extent=[float(d_arr[0]) - 0.5, float(d_arr[-1]) + 0.5,
+                                        float(d_arr[0]) - 0.5, float(d_arr[-1]) + 0.5],
+                                origin='lower', aspect='auto',
+                                interpolation='nearest', zorder=3.0,
+                            )
+                        except Exception:
+                            pass
+                        ax_z.set_xlabel('Δⱼ (frames)')
+                        ax_z.set_ylabel('Δᵢ (frames)')
+                        title_st = f' state {st}' if len(states_in_md) > 1 else ''
+                        ax_z.set_title(f'Pairwise |Z|(Δᵢ,Δⱼ) — {name}{title_st}')
+                        ax_z.set_aspect('equal')
+                        cb = fig_z.colorbar(im, ax=ax_z, fraction=0.045, pad=0.02, extend='max')
+                        cb.set_label('|Z| = |Ĥᵢ−Ĥⱼ|/√(σᵢ²+σⱼ²)   (saturated at 5)', fontsize=8)
+                        cb.set_ticks([0, 2, 3, 5])
+                        cb.set_ticklabels(['0  (no diff)', '2  (p≈0.05)', '3  (p≈3e-3)', '5  (p≈6e-7)'])
+                        try:
+                            color_st = state_pal[r['total_states'].index(st) % len(state_pal)]
+                        except Exception:
+                            color_st = state_pal[0]
+                        # Expected counts under H₀ (true uniformity), for context. // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                        exp_p05 = 0.05 * n_pairs
+                        exp_p003 = 0.0027 * n_pairs
+                        z_lines = [
+                            (f'{n} Δ values, {n_pairs} unique pairs', '#aaaaaa', None, None),
+                            (f'|z|>2 (p<0.05): {n_sig2}/{n_pairs} = {100*n_sig2/max(n_pairs,1):.0f}%   (expected ≈{exp_p05:.0f})',
+                             '#dd8866' if n_sig2 > 0 else '#aaaaaa', None, None),
+                            (f'|z|>3 (p<0.003): {n_sig3}/{n_pairs} = {100*n_sig3/max(n_pairs,1):.0f}%   (expected ≈{exp_p003:.1f})',
+                             '#cc4444' if n_sig3 > 0 else '#aaaaaa', None, None),
+                            (f'BH-FDR significant (q≤{FDR_Q}): {n_fdr}/{n_pairs} = {100*n_fdr/max(n_pairs,1):.0f}%   (p_cut={p_cut:.2g})',
+                             '#88cc44' if n_fdr > 0 else '#aaaaaa', None, None),
+                            (f'max |z| = {abs(max_z):.2f} at (Δ={max_pair[0]}, Δ={max_pair[1]})',
+                             color_st, None, None),
+                            (f'Ĥ(Δ={max_pair[0]})={H_arr[max_idx[0]]:.3f}, Ĥ(Δ={max_pair[1]})={H_arr[max_idx[1]]:.3f}',
+                             color_st, None, None),
+                            ('Solid black contour: BH-FDR-significant region', '#aaaaaa', None, None),
+                            ('Dashed grey: |z|=2, |z|=3 (uncorrected)', '#888888', None, None),
+                            # Trust-band legend // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                            ('Trust-band overlay (rows + cols):', '#aaaaaa', None, None),
+                            ('  dark brown = fail-loose Δ', '#5d4037', None, None),
+                            ('  tan = borderline Δ', '#a87c4f', None, None),
+                            ('  no overlay = strict trust', '#aaaaaa', None, None),
+                        ]
+                        _fill_stats_panel(ax_z_stats, z_lines)
+                        canvas_z = _make_canvas(fig_z, save_name=f'zmat_{safe_name}_S{st}')
+                        canvas_z.setMinimumHeight(700)  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                        section_zmat.add_widget(canvas_z)
+                        added_zmat = True
+
+                    # ---- Drift panel ----
+                    fig_d, ax_d, ax_d_stats = _make_fig_with_stats()
+                    drift_lines = []
+                    has_drift = False
+                    for st in states_in_md:
+                        scan = md_per_st[st]
+                        deltas = np.asarray(scan['deltas'], dtype=float)
+                        H_est = np.asarray(scan['H_est'], dtype=float)
+                        sigma_H = np.asarray(scan.get('sigma_H', np.full_like(deltas, np.nan)), dtype=float)
+                        finite = np.isfinite(H_est) & np.isfinite(sigma_H)
+                        if finite.sum() < 2:
+                            continue
+                        try:
+                            color = state_pal[r['total_states'].index(st) % len(state_pal)]
+                        except Exception:
+                            color = state_pal[0]
+                        d_arr = deltas[finite]
+                        H_arr = H_est[finite]
+                        s_arr = sigma_H[finite]
+                        d_adj = d_arr[1:]
+                        drift = np.diff(H_arr)
+                        floor = np.sqrt(s_arr[:-1] ** 2 + s_arr[1:] ** 2)
+                        ax_d.fill_between(d_adj, -3 * floor, 3 * floor, color=color, alpha=0.08)
+                        ax_d.fill_between(d_adj, -2 * floor, 2 * floor, color=color, alpha=0.14)
+                        ax_d.fill_between(d_adj, -floor, floor, color=color, alpha=0.22)
+                        ax_d.plot(d_adj, drift, 'o-', color=color, lw=1.2, markersize=3,
+                                  label=f'State {st}' if len(states_in_md) > 1 else name)
+                        has_drift = True
+                    if has_drift:
+                        ax_d.axhline(0, color='#888888', lw=0.8)
+                        ax_d.set_xlabel('Δ (frames)')
+                        ax_d.set_ylabel('Ĥ(Δ+1) − Ĥ(Δ)')
+                        ax_d.set_title(f'Adjacent-Δ drift — {name}')
+                        ax_d.grid(True, alpha=0.3)
+                        ax_d.legend(fontsize=7, loc='best')
+                        section_drift.add_widget(_make_canvas(fig_d, save_name=f'drift_{safe_name}'))
+                        added_drift = True
+                    else:
+                        plt.close(fig_d)
+
+                    # ---- λ_noise = σ²_loc / K sensitivity ---- // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                    # References are multipliers of the data-derived λ_baseline.
+                    # m·λ_baseline = (σ_target² / K_fit), so σ_target = √m · σ_loc (K_fit fixed).
+                    fig_L, ax_L, ax_L_stats = _make_fig_with_stats()
+                    has_L = False
+                    LAMBDA_MULTS = [0.1, 0.5, 1.0, 2.0, 10.0]
+                    sens_pal = sns.color_palette('tab10', n_colors=len(LAMBDA_MULTS))
+                    for st in states_in_md:
+                        K_st = K_per_state.get(st)
+                        if K_st is None or not np.isfinite(K_st) or K_st <= 0:
+                            continue
+                        scan = md_per_st[st]
+                        deltas = np.asarray(scan['deltas'], dtype=float)
+                        rho_arr = np.asarray(scan.get('rho_arr', np.full_like(deltas, np.nan)), dtype=float)
+                        finite = np.isfinite(rho_arr)
+                        if not np.any(finite):
+                            continue
+                        lambda_base = (s_loc * s_loc) / float(K_st)
+                        for ci, mult in enumerate(LAMBDA_MULTS):
+                            sigma_target = float(np.sqrt(mult)) * s_loc  # √m · σ_loc
+                            lam_target = mult * lambda_base
+                            H_l = np.full(len(deltas), np.nan)
+                            for i, d in enumerate(deltas):
+                                if not finite[i]:
+                                    continue
+                                H_l[i] = _invert_H_from_rho(float(rho_arr[i]), float(d),
+                                                             R_used, float(K_st), sigma_target)
+                            mk = np.isfinite(H_l)
+                            is_baseline = (mult == 1.0)
+                            ls = '-' if is_baseline else '--'
+                            lw = 2.5 if is_baseline else 1.0
+                            tag = ' (baseline)' if is_baseline else ''
+                            label = (f'S{st} λ={lam_target:.3g} ({mult:g}×λ₀){tag}'
+                                     if len(states_in_md) > 1
+                                     else f'λ={lam_target:.3g} ({mult:g}×λ₀){tag}')
+                            ax_L.plot(deltas[mk], H_l[mk], ls, color=sens_pal[ci],
+                                      lw=lw, label=label)
+                        has_L = True
+                    if has_L:
+                        ax_L.axhline(0.5, linestyle=':', color='#888888', linewidth=0.8)
+                        ax_L.set_xlabel('Δ (frames)')
+                        ax_L.set_ylabel('Ĥ (corrected)')
+                        ax_L.set_ylim(-0.05, 1.05)
+                        ax_L.set_title(f'Ĥ(Δ) sensitivity to λ_noise = σ²_loc / K — {name}')
+                        ax_L.grid(True, alpha=0.3)
+                        ax_L.legend(fontsize=7, loc='best', ncol=1)
+                        section_lambda.add_widget(_make_canvas(fig_L, save_name=f'sens_lambda_{safe_name}'))
+                        added_lambda = True
+                    else:
+                        plt.close(fig_L)
+                    # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+
+                    # ---- Reliability map ----
+                    if _sigma_H_crlb is None:
+                        continue
+                    for st in states_in_md:
+                        K_st = K_per_state.get(st)
+                        if K_st is None or not np.isfinite(K_st) or K_st <= 0:
+                            continue
+                        scan = md_per_st[st]
+                        deltas = np.asarray(scan['deltas'], dtype=float)
+                        H_est = np.asarray(scan['H_est'], dtype=float)
+                        n_eff = np.asarray(scan.get('n_eff', np.full_like(deltas, np.nan)), dtype=float)
+                        finite_H = np.isfinite(H_est)
+                        finite_n = np.isfinite(n_eff)
+                        if finite_H.sum() < 2:
+                            continue
+                        try:
+                            color = state_pal[r['total_states'].index(st) % len(state_pal)]
+                        except Exception:
+                            color = state_pal[0]
+                        # σ_H(Δ; n_eff=1) per Δ at fitted Ĥ(Δ); Z = factor / √n_eff.
+                        factors = np.full(len(deltas), np.nan)
+                        for i, d in enumerate(deltas):
+                            if finite_H[i]:
+                                factors[i] = _sigma_H_crlb(float(H_est[i]), float(d),
+                                                            R_used, float(K_st), s_loc, 1.0)
+                        m_factors = np.isfinite(factors)
+                        if m_factors.sum() < 2:
+                            continue
+                        d_grid = deltas[m_factors]
+                        f_grid = factors[m_factors]
+                        n_eff_grid = np.logspace(1, 5, 120)
+                        Z_rel = f_grid[None, :] / np.sqrt(n_eff_grid[:, None])
+                        Z_rel = np.clip(Z_rel, 1e-4, 1.0)
+
+                        fig_R, ax_R, ax_R_stats = _make_fig_with_stats()
+                        im = ax_R.pcolormesh(d_grid, n_eff_grid, Z_rel,
+                                              norm=_LogNorm(vmin=0.005, vmax=0.5),
+                                              cmap='RdYlGn_r', shading='auto')
+                        cs = ax_R.contour(d_grid, n_eff_grid, Z_rel,
+                                           levels=[0.01, 0.02, 0.05, 0.1, 0.2],
+                                           colors='black', linewidths=0.6)
+                        ax_R.clabel(cs, fmt='%.2f', fontsize=6)
+                        if np.any(finite_n):
+                            ax_R.plot(deltas[finite_n], n_eff[finite_n], '-', color='cyan', lw=1.6)
+                            ax_R.scatter(deltas[finite_n], n_eff[finite_n], s=18, color='cyan',
+                                          edgecolor='black', linewidth=0.4, zorder=5,
+                                          label=f'empirical n_eff(Δ)' if len(states_in_md) == 1 else f'S{st} n_eff(Δ)')
+                        ax_R.set_yscale('log')
+                        ax_R.set_xlim(d_grid[0], d_grid[-1])
+                        ax_R.set_ylim(n_eff_grid[0], n_eff_grid[-1])
+                        ax_R.set_xlabel('Δ (frames)')
+                        ax_R.set_ylabel('n_eff')
+                        title_st = f' state {st}' if len(states_in_md) > 1 else ''
+                        ax_R.set_title(f'Precision map — {name}{title_st}')  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                        cb = fig_R.colorbar(im, ax=ax_R, fraction=0.04, pad=0.02)
+                        cb.set_label('CRLB σ_H', fontsize=8)
+                        ax_R.legend(fontsize=7, loc='upper right')
+                        ax_R_stats.axis('off')
+                        rel_lines = [
+                            (f'σ_loc rms = {s_loc:.4g} px', '#aaaaaa', None, None),
+                            (f'R = {R_used:.3g}', '#aaaaaa', None, None),
+                            (f'K (state {st}) = {K_st:.4g}', color, None, None),
+                            ('Contours: σ_H levels', '#aaaaaa', None, None),
+                        ]
+                        _fill_stats_panel(ax_R_stats, rel_lines)
+                        section_REL.add_widget(_make_canvas(fig_R, save_name=f'reliability_{safe_name}_S{st}'))
+                        added_REL = True
+
+            # Section ordering: Ĥ(Δ) first, then |Z| matrix, then 1D Disp / noise floor / drift / λ_noise / Reliability. // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+            ordered_sections = []
+            if has_any_md:
+                ordered_sections.append(section3)
+                if added_zmat:
+                    ordered_sections.append(section_zmat)
+            ordered_sections.append(section2)
+            if has_any_diag:
+                ordered_sections.append(section_diag)
+            if has_any_md:
+                if added_drift:
+                    ordered_sections.append(section_drift)
+                if added_lambda:
+                    ordered_sections.append(section_lambda)
+                if added_REL:
+                    ordered_sections.append(section_REL)
+            for _sec in ordered_sections:
+                self._adv_stats_plot_layout.addWidget(_sec)
 
         # Apply legend visibility from checkbox  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         if not show_legend:
@@ -6318,29 +7992,186 @@ class FreeTraceGUI(QMainWindow):
                 canvas.draw_idle()  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
 
     def _on_save_adv_stats_plots(self):
-        """Save all Advanced Stats plot canvases as PNG files."""
+        """Save all Advanced Stats plot canvases as PNG files."""  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
         if not self._adv_stats_canvases:
             QMessageBox.warning(self, "No plots", "Run Advanced Stats first.")
             return
         save_dir = QFileDialog.getExistingDirectory(self, "Select directory to save plots")
         if not save_dir:
             return
-        plot_names = ['ta_ea_sd', 'ta_ea_sd_loglog']  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
-        # After the two TA-EA-SD canvases, remaining alternate: displacement, ratio per state
-        pair_idx = 0
-        for i in range(2, len(self._adv_stats_canvases)):
-            if (i - 2) % 2 == 0:
-                plot_names.append(f'displacement_1d_{pair_idx}')
-            else:
-                plot_names.append(f'ratio_cauchy_{pair_idx}')
-                pair_idx += 1  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        # Use names tagged on each canvas at render time when available; otherwise fall
+        # back to a sequential index. Naming scheme:
+        #   1D Displacement panels are tagged 'displacement_1d_<n>'; multi-Δ panels are
+        #   tagged 'multi_delta_H_<dataset>'.
         saved = 0
         for i, canvas in enumerate(self._adv_stats_canvases):
-            name = plot_names[i] if i < len(plot_names) else f'adv_plot_{i}'
-            path = os.path.join(save_dir, f'{name}.png')
+            tag = getattr(canvas, '_save_name', None) or f'adv_plot_{i}'
+            path = os.path.join(save_dir, f'{tag}.png')
             canvas.figure.savefig(path, dpi=150, bbox_inches='tight', transparent=True)
             saved += 1
         self._adv_stats_status_label.setText(f"Saved {saved} plots to {save_dir}")
+
+    def _on_save_adv_stats_data(self):  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+        """Export multi-Δ scan results as one CSV per dataset×state.
+
+        Columns: delta, H_estim, H_std, rho, n_eff, n_ratios, converged.
+        Filename: <dataset>_S<state>_multi_delta.csv
+        """
+        results = self._adv_stats_results or []
+        if not any(r.get('multi_delta_per_state') for r in results):
+            QMessageBox.warning(self, "No scan data", "Run Advanced Stats first.")
+            return
+        save_dir = QFileDialog.getExistingDirectory(self, "Select directory to save scan data")
+        if not save_dir:
+            return
+        written = 0
+        for r in results:
+            md_per_st = r.get('multi_delta_per_state') or {}
+            if not md_per_st:
+                continue
+            name = r['name']
+            safe_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in name)
+            K_per_state = r.get('K_est_per_state') or {}
+            sigma_loc_rms_px = r.get('sigma_loc_rms_px')
+            R_used = r.get('R_used')
+            for st, scan in md_per_st.items():
+                deltas = np.asarray(scan['deltas'], dtype=int)
+                # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                df = pd.DataFrame({
+                    'delta':     deltas,
+                    'H_estim':   np.asarray(scan['H_est']),
+                    'H_std':     np.asarray(scan.get('sigma_H', np.full(len(deltas), np.nan))),
+                    'rho':       np.asarray(scan.get('rho_arr', np.full(len(deltas), np.nan))),
+                    'n_eff':     np.asarray(scan.get('n_eff', np.full(len(deltas), np.nan))),
+                    'n_ratios':  np.asarray(scan['n_ratios']),
+                    'converged': np.asarray(scan.get('converged', np.zeros(len(deltas), dtype=bool))).astype(int),
+                })
+                # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+                # Header lines with the plug-in parameters used by the scan.
+                header_lines = [
+                    f'# dataset = {name}',
+                    f'# state = {st}',
+                    f'# K_est_px2_per_frame_2H = {K_per_state.get(st)}',
+                    f'# sigma_loc_rms_px = {sigma_loc_rms_px}',
+                    f'# R = {R_used}',
+                    f'# delta_max = {int(scan["delta_max"])}',
+                ]
+                out_path = os.path.join(save_dir, f'{safe_name}_S{st}_multi_delta.csv')
+                with open(out_path, 'w') as f:
+                    f.write('\n'.join(header_lines) + '\n')
+                    df.to_csv(f, index=False)
+                written += 1
+        self._adv_stats_status_label.setText(f"Saved {written} scan-data CSV(s) to {save_dir}")
+
+    def _adv_stats_help_html(self):  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
+        """One-paragraph plain-language description for each panel."""
+        return """
+<h2>Advanced Stats — panel guide</h2>
+<p>Each Run produces a stack of collapsible panels in the order below. Sections that
+require σ_loc (per-spot CRLB) are skipped when the loaded <code>_loc.csv</code> lacks
+<code>bg_median</code> / <code>bg_var</code> / <code>integrated_flux</code> — re-run
+localisation with the current FreeTrace to enable them.</p>
+
+<h3>1. Corrected Cauchy Ĥ(Δ)  <small>(headline)</small></h3>
+<p>Per-Δ Hurst estimate from the corrected Cauchy MLE on displacement-ratio chains,
+with a 95% CRLB band shaded around it. Flat curve at H≈0.5 is Brownian; monotone
+decrease with Δ suggests confinement or non-Markov memory; V-shaped curves are
+characteristic of confined Rouse polymer dynamics. K_est (from short-lag MSD fit)
+and σ_loc rms appear in the stats panel.</p>
+<p><b>Trust-band overlay</b> (brown / tan): Δs are flagged untrustworthy when either
+the statistical CRLB (σ_Ĥ) or the bias proxy (|Ĥ-spread| under σ_loc·{√0.5, √2})
+exceeds a precision target ε. Two ε levels — ε=0.05 (loose) and ε=0.01 (strict).</p>
+<ul>
+  <li>No overlay → Δ inside the strict trust band (passes both ε); Ĥ(Δ) is robust.</li>
+  <li><b>Tan</b> (light) → borderline (passes ε=0.05 but fails ε=0.01).</li>
+  <li><b>Dark brown</b> → fail-loose (Ĥ(Δ) clearly untrustworthy at this Δ).</li>
+</ul>
+<p>The bias proxy uses a saturation guard: when both σ_loc perturbations clamp at the
+same H bound (degenerate inversion), spread is forced to +∞.</p>
+
+<h3>2. Pairwise |Z| significance matrix</h3>
+<p>For each pair of Δ values, the matrix shows
+|Ĥ(Δᵢ)−Ĥ(Δⱼ)| / √(σ_H(Δᵢ)² + σ_H(Δⱼ)²) — the number of CRLB standard deviations
+separating two H estimates. Cells inside the solid black contour are significant
+under Benjamini–Hochberg FDR control at q≤0.05 (≤5% expected false positives among
+the flagged cells). Dashed grey lines are the uncorrected |z|=2 / |z|=3 thresholds
+(reference only — under H₀ with ~2,400 pairs, ~120 will exceed |z|=2 by chance).
+Stats panel reports observed vs expected counts and the BH cutoff p-value.</p>
+<p><b>Trust-band overlay</b>: same brown/tan convention as panel 1, applied as
+row+column overlays (single-color, no double-alpha at intersections). Cells where
+either Δᵢ or Δⱼ falls in the fail-loose region are dark brown; cells where either is
+borderline (and neither fails loose) are tan; cells with both Δs in the strict
+trust band are unshaded.</p>
+
+<h3>3. 1D Displacement (Δx, Δy)</h3>
+<p>Histogram of consecutive-frame jumps in x and y, with a Gaussian fit overlaid. A
+clean Gaussian indicates a single diffusive regime; visible heavy tails or a central
+spike suggest mixed populations or motion blur.</p>
+
+<h3>4. Noise-floor diagnostic</h3>
+<p><b>Left:</b> per-spot σ_loc (CRLB-derived) plotted against per-spot photon count
+<i>I</i>. The red Thompson line is the theoretical Cramér–Rao bound at the dataset's
+median PSF size and background. Spots hugging the red line means localisation is
+shot-noise-limited (good); systematic offset above means residual systematic error
+(drift, calibration, etc.).</p>
+<p><b>Right:</b> ensemble TA-MSD(τ) on log-log axes with the noise floor 2σ_loc²
+drawn as a dashed black horizontal line. The MSD curve must sit clearly above the
+floor and grow with τ for diffusion to be detectable. Curves that flatten near the
+floor at small τ are dominated by localisation noise and the corrected Cauchy fit
+will be skipped (status flagged in the stats panel).</p>
+
+<h3>5. Adjacent-Δ drift Ĥ(Δ+1)−Ĥ(Δ)</h3>
+<p>The first-difference of Ĥ(Δ), with ±1σ / ±2σ / ±3σ floors built from the
+neighbouring sigma_H values. Excursions outside the ±2σ band signal "real" jumps in
+Ĥ at that Δ. Useful to identify the Δ at which the curve transitions between
+regimes (e.g., from caged to free).</p>
+
+<h3>6. Ĥ(Δ) sensitivity to λ_noise = σ²_loc / K</h3>
+<p>Single panel that subsumes the previous K and σ_loc sensitivity panels. Holds
+K = K_fit fixed and varies σ_loc to multiply the data-derived λ_baseline by
+{0.1×, 0.5×, 1×, 2×, 10×}. So σ_target = √m · σ_loc for each multiplier m. The 1×
+curve (solid, bold) is the baseline at the data's own (K_fit, σ_loc); the 0.5×
+curve halves λ (cleaner-than-data), 2× doubles λ (noisier-than-data), etc. When
+the curves agree across multipliers at large Δ, diffusion dominates and Ĥ(Δ) is
+robust to noise; where they fan out (typically small Δ) you're in the
+noise-dominated regime and Ĥ(Δ) at that lag is bias-prone.</p>
+
+<h3>7. Precision map — CRLB σ_H over (Δ, n_eff)</h3>
+<p>A 2-D heatmap showing the theoretical CRLB σ_H you'd get at any combination of Δ
+and effective sample size n_eff. Contours mark σ_H levels (0.01, 0.02, 0.05, 0.1,
+0.2). The cyan curve overlays your data's empirical n_eff(Δ). Reading: where the cyan
+curve sits relative to the contours tells you the <i>statistical</i> precision floor
+on Ĥ for each Δ. Note: this map only reports precision (CRLB); the systematic bias
+from σ_loc misspecification is shown by the trust-band overlay on panels 1 and 2,
+not here.</p>
+
+<h3>Toolbar fields</h3>
+<ul>
+  <li><b>Load Data</b>: pick a <code>_traces.csv</code>; the GUI auto-pairs with
+      a sibling <code>_loc.csv</code> (or its parent for ROI / region exports) and a
+      sibling TIFF (when present, used to recompute <code>bg_var</code> /
+      <code>integrated_flux</code> with the thesis-style annulus convention).</li>
+  <li><b>σ_loc</b>: localisation precision in pixels, used as the noise plug-in for
+      both K_est and the multi-Δ Cauchy fit. Auto-filled on data load from the
+      computed CRLB rms; can be edited to override (e.g., to plug in a fiducial-bead
+      calibration or to match the thesis value).</li>
+  <li><b>Pixel size (μm/px)</b>, <b>Frame rate (s)</b>: scaling for displacements
+      and times in the 1D Displacement / TA-MSD plots only — the multi-Δ scan and
+      K_est are computed in raw pixel/frame units.</li>
+  <li><b>Min traj length</b>: trajectories shorter than this are dropped.</li>
+  <li><b>R</b>: motion-blur fraction τ_exp/Δt ∈ [0,1]. 0 = instantaneous capture; 1 =
+      full-frame integration.</li>
+  <li><b>Read metadata from video</b>: pick a TIFF/ND2 to auto-fill pixel size,
+      frame interval, and R from ImageJ / NIS-Elements metadata. All-or-nothing —
+      missing fields trigger a warning and the toolbar is left untouched. On
+      success, Adv Stats is automatically re-run.</li>
+  <li><b>▶ Run Advanced Stats</b>: launches the background worker.</li>
+  <li><b>Save Plots</b>: PNG of every rendered panel in the chosen folder.</li>
+  <li><b>Save Data</b>: per-(dataset×state) CSV of the multi-Δ scan
+      (<code>delta, H_estim, H_std, rho, n_eff, n_ratios, converged</code>) plus
+      K, σ_loc, R, and Δ_max in the comment-line metadata header.</li>
+</ul>
+"""
 
     def _on_adv_stats_legend_toggled(self, state):  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
         show = bool(state)
