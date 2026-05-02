@@ -825,8 +825,8 @@ def _estimate_K_corrected_msd(trajs, sigma_loc_px, R, max_lag=10):
     """Fit K (and a side H) from the corrected ensemble-averaged TAMSD over τ=1..max_lag.
 
     Model: MSD(τ) = 2*K*J_var(H, R, τ) + 2*sigma_loc_px².
-    Bounded curve_fit in (K, H) over τ=1..max_lag with SEM weighting (matches thesis
-    fit_K_from_msd in [private thesis path]).
+    Bounded curve_fit in (K, H) over τ=1..max_lag with SEM weighting (corrected
+    ensemble TAMSD fit on raw px/frame).
 
     Returns (K_est, H_est) or (None, None) if the fit fails / data insufficient.
     """  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
@@ -987,7 +987,7 @@ def _run_multi_delta_scan(trajs, sigma_loc_rms_px, K, R, delta_max=None,
 def _recompute_bg_var_and_flux_from_tif(loc_df, tif_path, R_BG=6, R_SIGNAL=3):
     """Recompute per-spot bg_var, bg_median, and integrated_flux from the raw TIFF.
 
-    Mirrors [private thesis path] exactly:
+    Annulus background statistics around each detected spot:
       - bg pixels: 13×13 patch around the spot (R_BG=6) with a central R_SIGNAL=3
         disk masked out → annulus.
       - bg_median = np.median(annulus); bg_var = np.var(annulus).
@@ -1052,7 +1052,7 @@ def _find_sibling_tif(loc_path, traces_path, video_name):
 def _compute_sigma_loc_per_spot(loc_df):
     """Per-spot localisation precision (sigma_loc, in pixels) from a _loc.csv DataFrame.
 
-    Mirrors the thesis script <HOME> thesis path]:
+    Per-spot σ_loc CRLB (Mortensen-style with capture correction):
       1. Capture-corrected total photon count: I_tot = integrated_flux / capture
          where capture = erf(r/(σx√2)) * erf(r/(σy√2)), r = window_size/2, clipped to [0.5,1].
       2. Per-spot 2x2 positional Fisher info via analytic ∂μ/∂x, ∂μ/∂y on the fit window,
@@ -4721,7 +4721,8 @@ class FreeTraceGUI(QMainWindow):
             "<p>The Advanced Stats tab adds noise-aware diffusion analyses driven by the "
             "per-spot σ_loc CRLB and a motion-blur correction R. The headline output is "
             "the corrected Cauchy multi-Δ scan Ĥ(Δ) with a 95% CRLB band, complemented "
-            "by a pairwise Z-significance matrix, an adjacent-Δ drift trace, a λ_noise "
+            "by three pairwise Z-significance matrices (all-Δ / loose-trust / "
+            "strict-trust subsets), an adjacent-Δ drift trace, a λ_noise "
             "sensitivity sweep, a noise-floor diagnostic, and a precision map. The "
             "panel-by-panel guide further down this Help tab covers each in detail.</p>"
             "<p><b>1D Displacement (Δx, Δy)</b> — Projection of each step onto the x and y "
@@ -5955,7 +5956,7 @@ class FreeTraceGUI(QMainWindow):
         self._adv_stats_sigma_loc.setSuffix(" px")
         self._adv_stats_sigma_loc.setToolTip(
             "Localisation precision σ_loc (pixels) used as plug-in for the corrected\n"
-            "Cauchy multi-Δ scan and K_est. Auto-filled on data load from loc.csv\n"
+            "Cauchy multi-Δ scan and K_estim. Auto-filled on data load from loc.csv\n"
             "(or sibling TIFF, thesis-style annulus). Edit to override."
         )
         row1.addWidget(self._adv_stats_sigma_loc)
@@ -7568,14 +7569,22 @@ class FreeTraceGUI(QMainWindow):
                     from cauchy_fit import sigma_H_crlb as _sigma_H_crlb
                 except Exception:
                     _sigma_H_crlb = None
-                section_zmat = CollapsibleSection("Pairwise Ĥ(Δ) significance matrix — Z = ΔH / √(σ²+σ²)")  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
+                # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-05-02
+                # Three Z-matrix sections (all Δ / loose-trust / strict-trust). Loose+strict default-collapsed.
+                section_zmat_all = CollapsibleSection("Pairwise |Z| matrix (all Δ) — Z = ΔH / √(σ²+σ²)")
+                section_zmat_loose = CollapsibleSection("Pairwise |Z| matrix (loose-trust Δ, ε=0.05)")
+                section_zmat_strict = CollapsibleSection("Pairwise |Z| matrix (strict-trust Δ, ε=0.01)")
+                section_zmat_loose._toggle.setChecked(False)
+                section_zmat_strict._toggle.setChecked(False)
+                # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-05-02
                 section_drift = CollapsibleSection("Adjacent-Δ drift Ĥ(Δ+1)−Ĥ(Δ)")
                 # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
                 # Replace separate K-sensitivity and σ_loc-sensitivity panels with a single
                 # λ_noise = σ_loc² / K sweep (thesis Appendix A convention).
                 section_lambda = CollapsibleSection("Ĥ(Δ) sensitivity to λ_noise = σ²_loc / K")
                 section_REL = CollapsibleSection("Precision map — CRLB σ_H over (Δ, n_eff)")  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
-                added_zmat = added_drift = added_lambda = added_REL = False
+                added_zmat_all = added_zmat_loose = added_zmat_strict = False  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-05-02
+                added_drift = added_lambda = added_REL = False
                 # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
                 for r in results_list:
                     md_per_st = r.get('multi_delta_per_state') or {}
@@ -7590,222 +7599,248 @@ class FreeTraceGUI(QMainWindow):
                     sigma_loc_rms_px = r.get('sigma_loc_rms_px')
                     s_loc = float(sigma_loc_rms_px) if (sigma_loc_rms_px is not None and np.isfinite(sigma_loc_rms_px)) else 0.0
 
-                    # ---- Pairwise Ĥ(Δ) significance Z-matrix ---- // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
-                    # Z_{ij} = (Ĥ(Δ_i) − Ĥ(Δ_j)) / √(σ_H(Δ_i)² + σ_H(Δ_j)²)
-                    # Two-sided p_{ij} = 2·(1 − Φ(|Z|)) per pair. With ~75 Δ values we get
-                    # ~2775 pairs — under H₀ (Ĥ truly constant) ~138 fall below p<0.05 by
-                    # chance. We apply Benjamini–Hochberg FDR control (q≤0.05) which is
-                    # valid under positive regression dependence — the Ĥ(Δ) chain satisfies
-                    # this since adjacent Δ share most of the same ratio data.
+                    # ---- Pairwise Ĥ(Δ) significance Z-matrix ---- // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-05-02
+                    # Three trust-subset matrices per state: all Δ / loose-trust (ε=0.05) / strict-trust (ε=0.01).
+                    # Each subset gets its own BH-FDR (q≤0.05) over its own pair count.
+                    # Trust-band brown/tan overlay is drawn only on the all-Δ matrix.
                     from scipy.stats import norm as _norm  # erfc-backed CDF tail
+                    try:
+                        from cauchy_fit import (J_var as _Jv2, J_cov as _Jc2,
+                                                 drho_dH_numerical as _drho_dH2)
+                    except Exception:
+                        _Jv2 = _Jc2 = _drho_dH2 = None
+                    sigma_for_band_z = (float(sigma_loc_rms_px)
+                                        if (sigma_loc_rms_px is not None
+                                            and np.isfinite(sigma_loc_rms_px)) else 0.0)
+                    R_for_band_z = float(R_used or 0.0)
+                    sigma2_z = float(sigma_for_band_z) ** 2
                     for st in states_in_md:
                         scan = md_per_st[st]
-                        deltas = np.asarray(scan['deltas'], dtype=float)
-                        H_est = np.asarray(scan['H_est'], dtype=float)
-                        sigma_H = np.asarray(scan.get('sigma_H', np.full_like(deltas, np.nan)), dtype=float)
-                        finite = np.isfinite(H_est) & np.isfinite(sigma_H) & (sigma_H > 0)
-                        if finite.sum() < 3:
+                        deltas_full = np.asarray(scan['deltas'], dtype=float)
+                        H_est_full = np.asarray(scan['H_est'], dtype=float)
+                        sigma_H_full = np.asarray(scan.get('sigma_H', np.full_like(deltas_full, np.nan)),
+                                                  dtype=float)
+                        rho_arr_full = np.asarray(scan.get('rho_arr', np.full_like(deltas_full, np.nan)),
+                                                  dtype=float)
+                        finite_full = (np.isfinite(H_est_full) & np.isfinite(sigma_H_full)
+                                       & (sigma_H_full > 0))
+                        if finite_full.sum() < 3:
                             continue
-                        d_arr = deltas[finite]
-                        H_arr = H_est[finite]
-                        s_arr = sigma_H[finite]
-                        n = len(d_arr)
-                        Hi = H_arr[:, None]; Hj = H_arr[None, :]
-                        si = s_arr[:, None]; sj = s_arr[None, :]
-                        Z = (Hi - Hj) / np.sqrt(si ** 2 + sj ** 2)
-                        absZ = np.abs(Z)
-                        upper = np.triu_indices(n, k=1)
-                        n_pairs = upper[0].size
-                        absZ_upper = absZ[upper]
-                        n_sig2 = int((absZ_upper > 2).sum())
-                        n_sig3 = int((absZ_upper > 3).sum())
-                        max_idx = np.unravel_index(np.argmax(absZ * np.triu(np.ones_like(absZ), k=1)), absZ.shape)
-                        max_z = float(Z[max_idx])
-                        max_pair = (int(d_arr[max_idx[0]]), int(d_arr[max_idx[1]]))
+                        K_st_z = (r.get('K_est_per_state') or {}).get(st)
+                        spread_full = np.full(len(deltas_full), np.nan)
+                        if (K_st_z is not None and np.isfinite(K_st_z) and K_st_z > 0
+                                and _Jv2 is not None):
+                            for i, dval in enumerate(deltas_full):
+                                if not (np.isfinite(rho_arr_full[i]) and np.isfinite(H_est_full[i])):
+                                    continue
+                                H_hat = float(H_est_full[i])
+                                Jv = _Jv2(H_hat, R_for_band_z, float(dval))
+                                Jc = _Jc2(H_hat, R_for_band_z, float(dval))
+                                M = float(K_st_z) * Jv
+                                denom = 2.0 * (M + sigma2_z) ** 2
+                                if denom <= 0:
+                                    spread_full[i] = float('inf')
+                                    continue
+                                drho_dsig2 = -float(K_st_z) * (Jv + Jc) / denom
+                                d_rho_dH = _drho_dH2(H_hat, float(dval), R_for_band_z,
+                                                      float(K_st_z), sigma_for_band_z)
+                                if not np.isfinite(d_rho_dH) or abs(d_rho_dH) < 1e-12:
+                                    spread_full[i] = float('inf')
+                                    continue
+                                spread_full[i] = abs(drho_dsig2 / d_rho_dH) * sigma2_z
+                        prec_05_full = np.isfinite(sigma_H_full) & (sigma_H_full <= 0.05)
+                        bias_05_full = np.isfinite(spread_full) & (spread_full <= 0.05)
+                        trust_05_full = prec_05_full & bias_05_full
+                        prec_01_full = np.isfinite(sigma_H_full) & (sigma_H_full <= 0.01)
+                        bias_01_full = np.isfinite(spread_full) & (spread_full <= 0.01)
+                        trust_01_full = prec_01_full & bias_01_full
 
-                        # ---- Benjamini–Hochberg FDR control at q≤0.05 ---- // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
-                        FDR_Q = 0.05
-                        # Two-sided p per pair via norm survival (numerically stable for large |Z|).
-                        p_upper = 2.0 * _norm.sf(absZ_upper)
-                        order = np.argsort(p_upper)
-                        p_sorted = p_upper[order]
-                        N_tests = n_pairs
-                        # Largest k such that p₍ₖ₎ ≤ q·k/N (1-indexed in formula → 0-indexed below).
-                        thresholds = FDR_Q * (np.arange(1, N_tests + 1)) / N_tests
-                        passing = p_sorted <= thresholds
-                        if np.any(passing):
-                            k_star = int(np.max(np.flatnonzero(passing)))
-                            p_cut = float(p_sorted[k_star])
-                            n_fdr = k_star + 1
-                        else:
-                            p_cut = 0.0
-                            n_fdr = 0
-                        # Build a boolean significance mask in the upper-triangle layout, then
-                        # symmetrise for the 2D matrix.
-                        sig_mask_upper = (p_upper <= p_cut) if n_fdr > 0 else np.zeros_like(p_upper, dtype=bool)
-                        sig_mat = np.zeros((n, n), dtype=bool)
-                        sig_mat[upper] = sig_mask_upper
-                        sig_mat = sig_mat | sig_mat.T  # symmetric display
-
-                        # Custom larger figure for the heatmap (default 10x4 is too short  // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
-                        # for a square Δ×Δ matrix). 13x8 with 4:1 width split → ~10x8 plot.
-                        fig_z = Figure(figsize=(13, 8), dpi=100, constrained_layout=True)
-                        gs_z = fig_z.add_gridspec(1, 2, width_ratios=[4, 1], wspace=0.02)
-                        ax_z = fig_z.add_subplot(gs_z[0])
-                        ax_z_stats = fig_z.add_subplot(gs_z[1])
-                        ax_z_stats.axis('off')
-                        # |Z| matrix with fixed scale [0, 5]: blue → white → red.
-                        # |Z| is symmetric in (i,j), so the lower and upper triangles are mirror.
-                        # |Z|=2 → p≈0.05, |Z|=3 → p≈0.003, |Z|=5 → p≈6e-7. Saturating at 5
-                        # keeps the colormap interpretable rather than swamped by extreme cells.
-                        edges = np.concatenate([d_arr - 0.5, [d_arr[-1] + 0.5]])
-                        im = ax_z.pcolormesh(edges, edges, absZ, cmap='coolwarm',
-                                              vmin=0.0, vmax=5.0, shading='auto')
-                        # FDR-significant cells: outline with a black contour around the // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
-                        # boolean mask. Cells outside this contour are NOT significant after
-                        # multiple-comparison correction (BH at q≤0.05) — even if their |Z|>2.
-                        try:
-                            if sig_mat.any() and (~sig_mat).any():
-                                ax_z.contour(d_arr, d_arr, sig_mat.astype(float),
-                                              levels=[0.5], colors=['black'], linewidths=1.4)
-                        except Exception:
-                            pass
-                        # Light reference contours at |z|=2, |z|=3 (uncorrected thresholds).
-                        try:
-                            ax_z.contour(d_arr, d_arr, absZ,
-                                          levels=[2.0, 3.0], colors=['#888888', '#444444'],
-                                          linewidths=[0.5, 0.8], linestyles=['--', '--'])
-                        except Exception:
-                            pass
-                        # Trust-band shading on the matrix: dim Δs outside the trust band. // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
-                        # Computed per-state from σ_Ĥ_CRLB (precision) AND |Ĥ|-spread under
-                        # σ_loc·{√0.5, √2} (bias). Two thresholds (0.05, 0.01).
-                        try:
-                            sigma_for_band_z = (float(sigma_loc_rms_px)
-                                                if (sigma_loc_rms_px is not None
-                                                    and np.isfinite(sigma_loc_rms_px)) else 0.0)
-                            R_for_band_z = float(R_used or 0.0)
-                            K_st_z = (r.get('K_est_per_state') or {}).get(st)
-                            sigma_H_arr_z = np.asarray(scan.get('sigma_H', np.full_like(deltas, np.nan)),
-                                                       dtype=float)
-                            rho_arr_z = np.asarray(scan.get('rho_arr', np.full_like(deltas, np.nan)),
-                                                   dtype=float)
-                            H_est_arr_z = np.asarray(scan['H_est'], dtype=float)
-                            spread_z = np.full(len(deltas), np.nan)
-                            # Analytic bias proxy = |∂Ĥ/∂σ²|·σ² (thesis eq:ch1_Hhat_sensitivity). // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
-                            try:
-                                from cauchy_fit import (J_var as _Jv2, J_cov as _Jc2,
-                                                         drho_dH_numerical as _drho_dH2)
-                            except Exception:
-                                _Jv2 = _Jc2 = _drho_dH2 = None
-                            sigma2_z = float(sigma_for_band_z) ** 2
-                            if (K_st_z is not None and np.isfinite(K_st_z) and K_st_z > 0
-                                    and _Jv2 is not None):
-                                for i, dval in enumerate(deltas):
-                                    if not (np.isfinite(rho_arr_z[i]) and np.isfinite(H_est_arr_z[i])):
-                                        continue
-                                    H_hat = float(H_est_arr_z[i])
-                                    Jv = _Jv2(H_hat, R_for_band_z, float(dval))
-                                    Jc = _Jc2(H_hat, R_for_band_z, float(dval))
-                                    M = float(K_st_z) * Jv
-                                    denom = 2.0 * (M + sigma2_z) ** 2
-                                    if denom <= 0:
-                                        spread_z[i] = float('inf')
-                                        continue
-                                    drho_dsig2 = -float(K_st_z) * (Jv + Jc) / denom
-                                    d_rho_dH = _drho_dH2(H_hat, float(dval), R_for_band_z,
-                                                          float(K_st_z), sigma_for_band_z)
-                                    if not np.isfinite(d_rho_dH) or abs(d_rho_dH) < 1e-12:
-                                        spread_z[i] = float('inf')
-                                        continue
-                                    spread_z[i] = abs(drho_dsig2 / d_rho_dH) * sigma2_z
-                            n_z = len(d_arr)
-                            prec_05 = np.isfinite(sigma_H_arr_z[:n_z]) & (sigma_H_arr_z[:n_z] <= 0.05)
-                            bias_05 = np.isfinite(spread_z[:n_z]) & (spread_z[:n_z] <= 0.05)
-                            trust_05 = prec_05 & bias_05
-                            prec_01 = np.isfinite(sigma_H_arr_z[:n_z]) & (sigma_H_arr_z[:n_z] <= 0.01)
-                            bias_01 = np.isfinite(spread_z[:n_z]) & (spread_z[:n_z] <= 0.01)
-                            trust_01 = prec_01 & bias_01
-
-                            def _runs_where(mask, vals):
-                                in_run = False; lo = None
-                                for i, ok in enumerate(mask):
-                                    if ok and not in_run:
-                                        lo = float(vals[i]) - 0.5; in_run = True
-                                    elif (not ok) and in_run:
-                                        yield (lo, float(vals[i - 1]) + 0.5)
-                                        in_run = False
-                                if in_run:
-                                    yield (lo, float(vals[-1]) + 0.5)
-
-                            # Unified single-color overlay (no double-alpha at intersections). // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
-                            # 2D mask: dark gray if Δᵢ OR Δⱼ fails loose; light gray if either is
-                            # borderline (and neither fails loose); no overlay if both pass strict.
-                            n_z2 = int(len(d_arr))
-                            fail_05_arr = (~trust_05).astype(bool)
-                            border_arr = (trust_05 & (~trust_01)).astype(bool)
-                            row_fail = fail_05_arr[:, None] | fail_05_arr[None, :]
-                            row_border = border_arr[:, None] | border_arr[None, :]
-                            overlay = np.zeros((n_z2, n_z2, 4), dtype=np.float32)
-                            # dark brown #5d4037 (alpha 0.7) for FAIL-LOOSE
-                            overlay[row_fail] = (0x5d / 255.0, 0x40 / 255.0, 0x37 / 255.0, 0.7)
-                            # tan #d2b48c (alpha 0.4) for BORDERLINE only
-                            border_only = row_border & (~row_fail)
-                            overlay[border_only] = (0xd2 / 255.0, 0xb4 / 255.0, 0x8c / 255.0, 0.4)
-                            ax_z.imshow(
-                                overlay,
-                                extent=[float(d_arr[0]) - 0.5, float(d_arr[-1]) + 0.5,
-                                        float(d_arr[0]) - 0.5, float(d_arr[-1]) + 0.5],
-                                origin='lower', aspect='auto',
-                                interpolation='nearest', zorder=3.0,
-                            )
-                        except Exception:
-                            pass
-                        ax_z.set_xlabel('Δⱼ (frames)')
-                        ax_z.set_ylabel('Δᵢ (frames)')
-                        title_st = f' state {st}' if len(states_in_md) > 1 else ''
-                        ax_z.set_title(f'Pairwise |Z|(Δᵢ,Δⱼ) — {name}{title_st}')
-                        ax_z.set_aspect('equal')
-                        cb = fig_z.colorbar(im, ax=ax_z, fraction=0.045, pad=0.02, extend='max')
-                        cb.set_label('|Z| = |Ĥᵢ−Ĥⱼ|/√(σᵢ²+σⱼ²)   (saturated at 5)', fontsize=8)
-                        cb.set_ticks([0, 2, 3, 5])
-                        cb.set_ticklabels(['0  (no diff)', '2  (p≈0.05)', '3  (p≈3e-3)', '5  (p≈6e-7)'])
                         try:
                             color_st = state_pal[r['total_states'].index(st) % len(state_pal)]
                         except Exception:
                             color_st = state_pal[0]
-                        # Expected counts under H₀ (true uniformity), for context. // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
-                        exp_p05 = 0.05 * n_pairs
-                        exp_p003 = 0.0027 * n_pairs
-                        z_lines = [
-                            (f'{n} Δ values, {n_pairs} unique pairs', '#aaaaaa', None, None),
-                            (f'|z|>2 (p<0.05): {n_sig2}/{n_pairs} = {100*n_sig2/max(n_pairs,1):.0f}%   (expected ≈{exp_p05:.0f})',
-                             '#dd8866' if n_sig2 > 0 else '#aaaaaa', None, None),
-                            (f'|z|>3 (p<0.003): {n_sig3}/{n_pairs} = {100*n_sig3/max(n_pairs,1):.0f}%   (expected ≈{exp_p003:.1f})',
-                             '#cc4444' if n_sig3 > 0 else '#aaaaaa', None, None),
-                            (f'BH-FDR significant (q≤{FDR_Q}): {n_fdr}/{n_pairs} = {100*n_fdr/max(n_pairs,1):.0f}%   (p_cut={p_cut:.2g})',
-                             '#88cc44' if n_fdr > 0 else '#aaaaaa', None, None),
-                            (f'max |z| = {abs(max_z):.2f} at (Δ={max_pair[0]}, Δ={max_pair[1]})',
-                             color_st, None, None),
-                            (f'Ĥ(Δ={max_pair[0]})={H_arr[max_idx[0]]:.3f}, Ĥ(Δ={max_pair[1]})={H_arr[max_idx[1]]:.3f}',
-                             color_st, None, None),
-                            ('Solid black contour: BH-FDR-significant region', '#aaaaaa', None, None),
-                            ('Dashed grey: |z|=2, |z|=3 (uncorrected)', '#888888', None, None),
-                            # Trust-band legend // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
-                            ('Trust-band overlay (rows + cols):', '#aaaaaa', None, None),
-                            ('  dark brown = fail-loose Δ', '#5d4037', None, None),
-                            ('  tan = borderline Δ', '#a87c4f', None, None),
-                            ('  no overlay = strict trust', '#aaaaaa', None, None),
+                        N_total_deltas = len(deltas_full)
+
+                        ZMAT_VARIANTS = [
+                            ('all',    'all Δ',                   finite_full,                    section_zmat_all,    True),
+                            ('loose',  'loose-trust Δ (ε=0.05)',  finite_full & trust_05_full,    section_zmat_loose,  False),
+                            ('strict', 'strict-trust Δ (ε=0.01)', finite_full & trust_01_full,    section_zmat_strict, False),
                         ]
-                        _fill_stats_panel(ax_z_stats, z_lines)
-                        canvas_z = _make_canvas(fig_z, save_name=f'zmat_{safe_name}_S{st}')
-                        canvas_z.setMinimumHeight(700)  # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
-                        section_zmat.add_widget(canvas_z)
-                        added_zmat = True
+                        for variant_id, variant_label, mask, target_section, draw_overlay in ZMAT_VARIANTS:
+                            n = int(mask.sum())
+                            if n < 3:
+                                if variant_id != 'all':
+                                    fig_ph = Figure(figsize=(6, 2), dpi=100, constrained_layout=True)
+                                    ax_ph = fig_ph.add_subplot(1, 1, 1)
+                                    ax_ph.axis('off')
+                                    title_st_ph = f' state {st}' if len(states_in_md) > 1 else ''
+                                    ax_ph.set_title(f'Pairwise |Z|({variant_label}) — {name}{title_st_ph}',
+                                                    fontsize=10)
+                                    ax_ph.text(0.5, 0.5,
+                                               f'no Δ passes this trust level (subset n={n} < 3) — no test possible',
+                                               ha='center', va='center', color='#aaaaaa',
+                                               fontsize=10, transform=ax_ph.transAxes)
+                                    target_section.add_widget(_make_canvas(
+                                        fig_ph, save_name=f'zmat_{variant_id}_{safe_name}_S{st}'))
+                                    if variant_id == 'loose':
+                                        added_zmat_loose = True
+                                    elif variant_id == 'strict':
+                                        added_zmat_strict = True
+                                continue
+                            d_arr = deltas_full[mask]
+                            H_arr = H_est_full[mask]
+                            s_arr = sigma_H_full[mask]
+                            Hi = H_arr[:, None]; Hj = H_arr[None, :]
+                            si = s_arr[:, None]; sj = s_arr[None, :]
+                            Z = (Hi - Hj) / np.sqrt(si ** 2 + sj ** 2)
+                            absZ = np.abs(Z)
+                            upper = np.triu_indices(n, k=1)
+                            n_pairs = upper[0].size
+                            absZ_upper = absZ[upper]
+                            n_sig2 = int((absZ_upper > 2).sum())
+                            n_sig3 = int((absZ_upper > 3).sum())
+                            max_idx = np.unravel_index(np.argmax(absZ * np.triu(np.ones_like(absZ), k=1)),
+                                                       absZ.shape)
+                            max_z = float(Z[max_idx])
+                            max_pair = (int(d_arr[max_idx[0]]), int(d_arr[max_idx[1]]))
+                            FDR_Q = 0.05
+                            p_upper = 2.0 * _norm.sf(absZ_upper)
+                            order = np.argsort(p_upper)
+                            p_sorted = p_upper[order]
+                            N_tests = n_pairs
+                            thresholds = FDR_Q * (np.arange(1, N_tests + 1)) / N_tests
+                            passing = p_sorted <= thresholds
+                            if np.any(passing):
+                                k_star = int(np.max(np.flatnonzero(passing)))
+                                p_cut = float(p_sorted[k_star])
+                                n_fdr = k_star + 1
+                            else:
+                                p_cut = 0.0
+                                n_fdr = 0
+                            sig_mask_upper = (p_upper <= p_cut) if n_fdr > 0 else np.zeros_like(p_upper, dtype=bool)
+                            sig_mat = np.zeros((n, n), dtype=bool)
+                            sig_mat[upper] = sig_mask_upper
+                            sig_mat = sig_mat | sig_mat.T
+
+                            fig_z = Figure(figsize=(13, 8), dpi=100, constrained_layout=True)
+                            gs_z = fig_z.add_gridspec(1, 2, width_ratios=[4, 1], wspace=0.02)
+                            ax_z = fig_z.add_subplot(gs_z[0])
+                            ax_z_stats = fig_z.add_subplot(gs_z[1])
+                            ax_z_stats.axis('off')
+                            edges = np.concatenate([d_arr - 0.5, [d_arr[-1] + 0.5]])
+                            im = ax_z.pcolormesh(edges, edges, absZ, cmap='coolwarm',
+                                                 vmin=0.0, vmax=5.0, shading='auto')
+                            try:
+                                if sig_mat.any() and (~sig_mat).any():
+                                    ax_z.contour(d_arr, d_arr, sig_mat.astype(float),
+                                                 levels=[0.5], colors=['black'], linewidths=1.4)
+                            except Exception:
+                                pass
+                            try:
+                                ax_z.contour(d_arr, d_arr, absZ,
+                                             levels=[2.0, 3.0], colors=['#888888', '#444444'],
+                                             linewidths=[0.5, 0.8], linestyles=['--', '--'])
+                            except Exception:
+                                pass
+                            if draw_overlay:
+                                try:
+                                    sigma_H_subset = sigma_H_full[mask]
+                                    spread_subset = spread_full[mask]
+                                    prec_05_z = (np.isfinite(sigma_H_subset)
+                                                 & (sigma_H_subset <= 0.05))
+                                    bias_05_z = (np.isfinite(spread_subset)
+                                                 & (spread_subset <= 0.05))
+                                    trust_05_z = prec_05_z & bias_05_z
+                                    prec_01_z = (np.isfinite(sigma_H_subset)
+                                                 & (sigma_H_subset <= 0.01))
+                                    bias_01_z = (np.isfinite(spread_subset)
+                                                 & (spread_subset <= 0.01))
+                                    trust_01_z = prec_01_z & bias_01_z
+                                    fail_05_arr = (~trust_05_z).astype(bool)
+                                    border_arr = (trust_05_z & (~trust_01_z)).astype(bool)
+                                    row_fail = fail_05_arr[:, None] | fail_05_arr[None, :]
+                                    row_border = border_arr[:, None] | border_arr[None, :]
+                                    overlay = np.zeros((n, n, 4), dtype=np.float32)
+                                    overlay[row_fail] = (0x5d / 255.0, 0x40 / 255.0,
+                                                         0x37 / 255.0, 0.7)
+                                    border_only = row_border & (~row_fail)
+                                    overlay[border_only] = (0xd2 / 255.0, 0xb4 / 255.0,
+                                                            0x8c / 255.0, 0.4)
+                                    ax_z.imshow(
+                                        overlay,
+                                        extent=[float(d_arr[0]) - 0.5, float(d_arr[-1]) + 0.5,
+                                                float(d_arr[0]) - 0.5, float(d_arr[-1]) + 0.5],
+                                        origin='lower', aspect='auto',
+                                        interpolation='nearest', zorder=3.0,
+                                    )
+                                except Exception:
+                                    pass
+                            ax_z.set_xlabel('Δⱼ (frames)')
+                            ax_z.set_ylabel('Δᵢ (frames)')
+                            title_st = f' state {st}' if len(states_in_md) > 1 else ''
+                            ax_z.set_title(f'Pairwise |Z|({variant_label}) — {name}{title_st}')
+                            ax_z.set_aspect('equal')
+                            cb = fig_z.colorbar(im, ax=ax_z, fraction=0.045, pad=0.02, extend='max')
+                            cb.set_label('|Z| = |Ĥᵢ−Ĥⱼ|/√(σᵢ²+σⱼ²)   (saturated at 5)', fontsize=8)
+                            cb.set_ticks([0, 2, 3, 5])
+                            cb.set_ticklabels(['0  (no diff)', '2  (p≈0.05)',
+                                               '3  (p≈3e-3)', '5  (p≈6e-7)'])
+                            exp_p05 = 0.05 * n_pairs
+                            exp_p003 = 0.0027 * n_pairs
+                            z_lines = [
+                                (f'Δ subset: {variant_label}', '#aaaaaa', None, None),
+                                (f'  {n}/{N_total_deltas} Δ kept,  {n_pairs} unique pairs',
+                                 '#aaaaaa', None, None),
+                                (f'|z|>2 (p<0.05): {n_sig2}/{n_pairs} = '
+                                 f'{100*n_sig2/max(n_pairs,1):.0f}%   (expected ≈{exp_p05:.0f})',
+                                 '#dd8866' if n_sig2 > 0 else '#aaaaaa', None, None),
+                                (f'|z|>3 (p<0.003): {n_sig3}/{n_pairs} = '
+                                 f'{100*n_sig3/max(n_pairs,1):.0f}%   (expected ≈{exp_p003:.1f})',
+                                 '#cc4444' if n_sig3 > 0 else '#aaaaaa', None, None),
+                                (f'BH-FDR (q≤{FDR_Q}): {n_fdr}/{n_pairs} = '
+                                 f'{100*n_fdr/max(n_pairs,1):.0f}%   (p_cut={p_cut:.2g})',
+                                 '#88cc44' if n_fdr > 0 else '#aaaaaa', None, None),
+                                (f'max |z| = {abs(max_z):.2f} at (Δ={max_pair[0]}, Δ={max_pair[1]})',
+                                 color_st, None, None),
+                                (f'Ĥ(Δ={max_pair[0]})={H_arr[max_idx[0]]:.3f}, '
+                                 f'Ĥ(Δ={max_pair[1]})={H_arr[max_idx[1]]:.3f}',
+                                 color_st, None, None),
+                                ('Solid black contour: BH-FDR-significant region',
+                                 '#aaaaaa', None, None),
+                                ('Dashed grey: |z|=2, |z|=3 (uncorrected)',
+                                 '#888888', None, None),
+                            ]
+                            if draw_overlay:
+                                z_lines.extend([
+                                    ('Trust-band overlay (rows + cols):', '#aaaaaa', None, None),
+                                    ('  dark brown = fail-loose Δ', '#5d4037', None, None),
+                                    ('  tan = borderline Δ', '#a87c4f', None, None),
+                                    ('  no overlay = strict trust', '#aaaaaa', None, None),
+                                ])
+                            _fill_stats_panel(ax_z_stats, z_lines)
+                            canvas_z = _make_canvas(fig_z,
+                                                    save_name=f'zmat_{variant_id}_{safe_name}_S{st}')
+                            canvas_z.setMinimumHeight(700)
+                            target_section.add_widget(canvas_z)
+                            if variant_id == 'all':
+                                added_zmat_all = True
+                            elif variant_id == 'loose':
+                                added_zmat_loose = True
+                            else:
+                                added_zmat_strict = True
+                    # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-05-02
 
                     # ---- Drift panel ----
+                    # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-05-02
+                    # Stats panel: 1-line band legend + per-state numerics.
                     fig_d, ax_d, ax_d_stats = _make_fig_with_stats()
-                    drift_lines = []
+                    drift_lines = [
+                        ('Shaded bands: ±1σ inconclusive, ±2σ ~95%, ±3σ ~99.7% (under H0)',
+                         '#aaaaaa', None, None),
+                        ('σ = √(σ_Ĥ(Δᵢ)² + σ_Ĥ(Δᵢ₊₁)²)  (CRLB)',
+                         '#aaaaaa', None, None),
+                        ('', '#aaaaaa', None, None),
+                    ]
                     has_drift = False
                     for st in states_in_md:
                         scan = md_per_st[st]
@@ -7831,6 +7866,27 @@ class FreeTraceGUI(QMainWindow):
                         ax_d.plot(d_adj, drift, 'o-', color=color, lw=1.2, markersize=3,
                                   label=f'State {st}' if len(states_in_md) > 1 else name)
                         has_drift = True
+                        # Per-state numerical summary // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-05-02
+                        valid_floor = floor > 0
+                        if np.any(valid_floor):
+                            z_vals = np.where(valid_floor,
+                                              np.abs(drift) / np.where(valid_floor, floor, 1.0),
+                                              0.0)
+                            max_idx = int(np.argmax(z_vals))
+                            max_z = float(z_vals[max_idx])
+                            max_d_at = int(d_adj[max_idx])
+                            max_drift_val = float(drift[max_idx])
+                            n_out_2s = int((z_vals > 2.0).sum())
+                            n_out_3s = int((z_vals > 3.0).sum())
+                            n_total = int(z_vals.size)
+                            state_label = f'State {st}' if len(states_in_md) > 1 else name
+                            drift_lines.append((f'{state_label}:', color, None, None))
+                            drift_lines.append(
+                                (f'  max |drift|/σ = {max_z:.2f} at Δ={max_d_at}  '
+                                 f'(drift={max_drift_val:+.3f})', color, None, None))
+                            drift_lines.append(
+                                (f'  outside ±2σ: {n_out_2s}/{n_total},  ±3σ: {n_out_3s}/{n_total}',
+                                 color, None, None))
                     if has_drift:
                         ax_d.axhline(0, color='#888888', lw=0.8)
                         ax_d.set_xlabel('Δ (frames)')
@@ -7838,10 +7894,12 @@ class FreeTraceGUI(QMainWindow):
                         ax_d.set_title(f'Adjacent-Δ drift — {name}')
                         ax_d.grid(True, alpha=0.3)
                         ax_d.legend(fontsize=7, loc='best')
+                        _fill_stats_panel(ax_d_stats, drift_lines)
                         section_drift.add_widget(_make_canvas(fig_d, save_name=f'drift_{safe_name}'))
                         added_drift = True
                     else:
                         plt.close(fig_d)
+                    # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-05-02
 
                     # ---- λ_noise = σ²_loc / K sensitivity ---- // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-29
                     # References are multipliers of the data-derived λ_baseline.
@@ -7967,8 +8025,14 @@ class FreeTraceGUI(QMainWindow):
             ordered_sections = []
             if has_any_md:
                 ordered_sections.append(section3)
-                if added_zmat:
-                    ordered_sections.append(section_zmat)
+                # Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-05-02
+                if added_zmat_all:
+                    ordered_sections.append(section_zmat_all)
+                if added_zmat_loose:
+                    ordered_sections.append(section_zmat_loose)
+                if added_zmat_strict:
+                    ordered_sections.append(section_zmat_strict)
+                # End modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-05-02
             ordered_sections.append(section2)
             if has_any_diag:
                 ordered_sections.append(section_diag)
@@ -8051,7 +8115,7 @@ class FreeTraceGUI(QMainWindow):
                 header_lines = [
                     f'# dataset = {name}',
                     f'# state = {st}',
-                    f'# K_est_px2_per_frame_2H = {K_per_state.get(st)}',
+                    f'# K_estim_px2_per_frame_2H = {K_per_state.get(st)}',
                     f'# sigma_loc_rms_px = {sigma_loc_rms_px}',
                     f'# R = {R_used}',
                     f'# delta_max = {int(scan["delta_max"])}',
@@ -8071,16 +8135,50 @@ class FreeTraceGUI(QMainWindow):
 require σ_loc (per-spot CRLB) are skipped when the loaded <code>_loc.csv</code> lacks
 <code>bg_median</code> / <code>bg_var</code> / <code>integrated_flux</code> — re-run
 localisation with the current FreeTrace to enable them.</p>
+<p><b>Note on Ĥ-snap for n_eff and CRLB.</b> The Tier-3 corrected-Cauchy n_eff
+and σ_Ĥ_CRLB use Monte-Carlo-tabulated H-score covariance tables at H ∈
+{0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875}. The fitted Ĥ at each Δ is snapped
+to the nearest of these for the n_eff / CRLB computation. Accuracy is tightest
+when fitted Ĥ falls near a snap point and weakest at the midpoints (e.g.,
+Ĥ=0.1875 sits exactly between H=0.125 and H=0.25 tables) — typical worst-case
+bias on σ_Ĥ is &lt;5%.</p>
 
 <h3>1. Corrected Cauchy Ĥ(Δ)  <small>(headline)</small></h3>
 <p>Per-Δ Hurst estimate from the corrected Cauchy MLE on displacement-ratio chains,
 with a 95% CRLB band shaded around it. Flat curve at H≈0.5 is Brownian; monotone
-decrease with Δ suggests confinement or non-Markov memory; V-shaped curves are
-characteristic of confined Rouse polymer dynamics. K_est (from short-lag MSD fit)
-and σ_loc rms appear in the stats panel.</p>
+decrease with Δ suggests confinement or non-Markov memory. K_estim (from
+short-lag MSD fit) and σ_loc rms appear in the stats panel.</p>
+<p><b>Δ range determination.</b> The curve has two pairs of bounds — the
+<i>mechanical</i> scan range and the <i>effective</i> trust-band range
+inside it.</p>
+<p><b>Mechanical bounds</b> (where the curve is drawn):</p>
+<ul>
+  <li><i>Lower</i> = Δ = 1, hard-coded. No auto-shift.</li>
+  <li><i>Upper</i> = Δ_max, auto-selected per state as the largest Δ ≤ 75
+      (cap) for which the number of independent Δ-span ratio chains is ≥ 30;
+      the walk is monotone and stops at the first Δ that fails the count.</li>
+</ul>
+<p>A per-Δ point inside that range is rendered only when all three gates
+pass: n_ratios ≥ 30, the corrected-Cauchy MLE converges, and the CRLB n_eff
+is finite — otherwise the point is dropped (NaN).</p>
+<p><b>Effective bounds</b> (where the curve is statistically trustworthy —
+set by the trust-band overlay below):</p>
+<ul>
+  <li><i>Lower</i> = smallest Δ where the σ_loc-bias gate
+      |∂Ĥ/∂σ²|·σ_loc² ≤ ε passes. Bias-limited. For confined / low-K
+      states this can sit several frames above Δ=1; for fast / superdiffusive
+      states it usually reaches Δ=1.</li>
+  <li><i>Upper</i> = largest Δ where the CRLB precision gate σ_H_CRLB ≤ ε
+      passes. Precision-limited: n_eff drops as Δ-offset chains exhaust
+      trajectory length (n_t = max(T−2Δ, 0) per coord), so σ_H_CRLB ∝
+      1/√n_eff grows with Δ. The trust-band upper edge typically sits well
+      inside the mechanical Δ_max.</li>
+</ul>
 <p><b>Trust-band overlay</b> (brown / tan): Δs are flagged untrustworthy when either
 the statistical CRLB (σ_Ĥ) or the bias proxy (|Ĥ-spread| under σ_loc·{√0.5, √2})
-exceeds a precision target ε. Two ε levels — ε=0.05 (loose) and ε=0.01 (strict).</p>
+exceeds a precision target ε. Two ε levels — ε=0.05 (loose) and ε=0.01 (strict).
+Note: the bias gate is a deterministic σ_loc²-misspecification sensitivity, not a
+probabilistic CI — sharing ε with the CRLB precision gate is a convention.</p>
 <ul>
   <li>No overlay → Δ inside the strict trust band (passes both ε); Ĥ(Δ) is robust.</li>
   <li><b>Tan</b> (light) → borderline (passes ε=0.05 but fails ε=0.01).</li>
@@ -8089,19 +8187,35 @@ exceeds a precision target ε. Two ε levels — ε=0.05 (loose) and ε=0.01 (st
 <p>The bias proxy uses a saturation guard: when both σ_loc perturbations clamp at the
 same H bound (degenerate inversion), spread is forced to +∞.</p>
 
-<h3>2. Pairwise |Z| significance matrix</h3>
+<h3>2. Pairwise |Z| significance matrix — three trust-subset variants</h3>
 <p>For each pair of Δ values, the matrix shows
 |Ĥ(Δᵢ)−Ĥ(Δⱼ)| / √(σ_H(Δᵢ)² + σ_H(Δⱼ)²) — the number of CRLB standard deviations
 separating two H estimates. Cells inside the solid black contour are significant
 under Benjamini–Hochberg FDR control at q≤0.05 (≤5% expected false positives among
 the flagged cells). Dashed grey lines are the uncorrected |z|=2 / |z|=3 thresholds
-(reference only — under H₀ with ~2,400 pairs, ~120 will exceed |z|=2 by chance).
-Stats panel reports observed vs expected counts and the BH cutoff p-value.</p>
-<p><b>Trust-band overlay</b>: same brown/tan convention as panel 1, applied as
-row+column overlays (single-color, no double-alpha at intersections). Cells where
-either Δᵢ or Δⱼ falls in the fail-loose region are dark brown; cells where either is
-borderline (and neither fails loose) are tan; cells with both Δs in the strict
-trust band are unshaded.</p>
+(reference only — under H₀ with ~2,400 pairs, ~120 will exceed |z|=2 by chance).</p>
+<p>Three matrices are rendered per state, each in its own collapsible section.
+The reduced N_pairs in the trust-restricted variants tightens the BH-FDR
+threshold p_cut, so a borderline pair can flip in or out of significance vs.
+the all-Δ test:</p>
+<ul>
+  <li><b>(all Δ)</b> — every Δ that passed the per-Δ rendering gates,
+      including dark-brown and tan ones. Trust-band brown/tan overlay shown.
+      Default expanded.</li>
+  <li><b>(loose-trust ε=0.05)</b> — Δs that pass both Gate 1 (σ_Ĥ_CRLB ≤ 0.05)
+      AND Gate 2 (|∂Ĥ/∂σ²|·σ² ≤ 0.05). Excludes dark-brown Δs. No overlay.
+      Default collapsed.</li>
+  <li><b>(strict-trust ε=0.01)</b> — Δs passing both gates at ε=0.01. Excludes
+      dark-brown AND tan. May be empty for confined / low-SNR datasets — the
+      panel then shows a "no Δ passes" placeholder. Default collapsed.</li>
+</ul>
+<p>Each matrix runs its own BH-FDR over its own pair count; counts and p_cut
+are reported in the per-matrix stats panel.</p>
+<p><b>Trust-band overlay</b> (all-Δ matrix only): same brown/tan convention as
+panel 1, applied as row+column overlays (single-color, no double-alpha at
+intersections). Cells where either Δᵢ or Δⱼ falls in the fail-loose region are
+dark brown; cells where either is borderline (and neither fails loose) are tan;
+cells with both Δs in the strict trust band are unshaded.</p>
 
 <h3>3. 1D Displacement (Δx, Δy)</h3>
 <p>Histogram of consecutive-frame jumps in x and y, with a Gaussian fit overlaid. A
@@ -8122,15 +8236,19 @@ will be skipped (status flagged in the stats panel).</p>
 
 <h3>5. Adjacent-Δ drift Ĥ(Δ+1)−Ĥ(Δ)</h3>
 <p>The first-difference of Ĥ(Δ), with ±1σ / ±2σ / ±3σ floors built from the
-neighbouring sigma_H values. Excursions outside the ±2σ band signal "real" jumps in
-Ĥ at that Δ. Useful to identify the Δ at which the curve transitions between
-regimes (e.g., from caged to free).</p>
+joint CRLB σ = √(σ_Ĥ(Δᵢ)² + σ_Ĥ(Δᵢ₊₁)²). Excursions outside the ±2σ band
+signal "real" jumps in Ĥ at that Δ. Useful to identify the Δ at which the
+curve transitions between regimes (e.g., from caged to free). Points inside
+±1σ are inconclusive (not evidence of flatness).</p>
+<p>The right-side stats panel reports, per state: max |drift|/σ and the Δ
+at which it occurs, plus counts of points outside ±2σ and ±3σ. Less rigorous
+than the pairwise |Z| matrix because it ignores the cross-Δ joint variance.</p>
 
 <h3>6. Ĥ(Δ) sensitivity to λ_noise = σ²_loc / K</h3>
 <p>Single panel that subsumes the previous K and σ_loc sensitivity panels. Holds
-K = K_fit fixed and varies σ_loc to multiply the data-derived λ_baseline by
+K = K_estim fixed and varies σ_loc to multiply the data-derived λ_baseline by
 {0.1×, 0.5×, 1×, 2×, 10×}. So σ_target = √m · σ_loc for each multiplier m. The 1×
-curve (solid, bold) is the baseline at the data's own (K_fit, σ_loc); the 0.5×
+curve (solid, bold) is the baseline at the data's own (K_estim, σ_loc); the 0.5×
 curve halves λ (cleaner-than-data), 2× doubles λ (noisier-than-data), etc. When
 the curves agree across multipliers at large Δ, diffusion dominates and Ĥ(Δ) is
 robust to noise; where they fan out (typically small Δ) you're in the
@@ -8152,15 +8270,17 @@ not here.</p>
       sibling TIFF (when present, used to recompute <code>bg_var</code> /
       <code>integrated_flux</code> with the thesis-style annulus convention).</li>
   <li><b>σ_loc</b>: localisation precision in pixels, used as the noise plug-in for
-      both K_est and the multi-Δ Cauchy fit. Auto-filled on data load from the
+      both K_estim and the multi-Δ Cauchy fit. Auto-filled on data load from the
       computed CRLB rms; can be edited to override (e.g., to plug in a fiducial-bead
       calibration or to match the thesis value).</li>
   <li><b>Pixel size (μm/px)</b>, <b>Frame rate (s)</b>: scaling for displacements
       and times in the 1D Displacement / TA-MSD plots only — the multi-Δ scan and
-      K_est are computed in raw pixel/frame units.</li>
+      K_estim are computed in raw pixel/frame units.</li>
   <li><b>Min traj length</b>: trajectories shorter than this are dropped.</li>
   <li><b>R</b>: motion-blur fraction τ_exp/Δt ∈ [0,1]. 0 = instantaneous capture; 1 =
-      full-frame integration.</li>
+      full-frame integration. <i>Assumes uniform illumination over the exposure
+      window τ_exp; non-uniform / pulsed illumination would require a different
+      blur kernel.</i></li>
   <li><b>Read metadata from video</b>: pick a TIFF/ND2 to auto-fill pixel size,
       frame interval, and R from ImageJ / NIS-Elements metadata. All-or-nothing —
       missing fields trigger a warning and the toolbar is left untouched. On
