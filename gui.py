@@ -8191,6 +8191,13 @@ probabilistic CI — sharing ε with the CRLB precision gate is a convention.</p
   <li><b>Tan</b> (light) → borderline (passes ε=0.05 but fails ε=0.01).</li>
   <li><b>Dark brown</b> → fail-loose (Ĥ(Δ) clearly untrustworthy at this Δ).</li>
 </ul>
+<p><b>Alternating bands (tan/brown/tan/brown across Δ):</b> the per-Δ gate
+values (σ_H_CRLB and |∂Ĥ/∂σ²|·σ_loc²) can oscillate around the ε threshold —
+either because Ĥ(Δ) is non-monotonic (driving the bias term up and down) or
+because n_eff(Δ) jumps in steps when Δ crosses a trajectory-length cluster
+(driving σ_H_CRLB up and down). Read alternating bands as "the data is
+straddling the threshold in this Δ-region", not as "trust transitions
+genuinely multiple times". Treat the whole alternating region as borderline.</p>
 <p>The bias proxy uses a saturation guard: when both σ_loc perturbations clamp at the
 same H bound (degenerate inversion), spread is forced to +∞.</p>
 
