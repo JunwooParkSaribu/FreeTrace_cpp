@@ -20,7 +20,9 @@ import shutil
 # packaged via PyInstaller (one-folder mode), data files live under sys._MEIPASS;
 # when running from a checkout, they live next to gui.py.
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-    _PY_HELPERS_DIR = os.path.join(sys._MEIPASS, "python")
+    # PyInstaller bundle: dest is "freetrace_python" to avoid case-insensitive
+    # collision with the bundled Python interpreter ("Python" on macOS, etc.).
+    _PY_HELPERS_DIR = os.path.join(sys._MEIPASS, "freetrace_python")
 else:
     _PY_HELPERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "python")
 if _PY_HELPERS_DIR not in sys.path:

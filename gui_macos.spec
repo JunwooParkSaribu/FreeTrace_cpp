@@ -20,7 +20,9 @@ a = Analysis(
     binaries=[],
     datas=[
         (os.path.join(script_dir, 'icon'), 'icon'),
-        (os.path.join(script_dir, 'python'), 'python'),  # cauchy_fit.py + cauchy_neff_cov_H*.npz cov tables
+        # Destination "freetrace_python" (not "python") to avoid case-insensitive
+        # filesystem collisions on macOS/Windows with PyInstaller's bundled Python binary.
+        (os.path.join(script_dir, 'python'), 'freetrace_python'),  # cauchy_fit.py + cauchy_neff_cov_H*.npz cov tables
     ],
     hiddenimports=['PyQt6.sip', 'numpy', 'pandas', 'tifffile', 'nd2', 'matplotlib', 'seaborn', 'scipy', 'scipy.optimize', 'google.genai', 'google.genai.types'],  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-22
     hookspath=[],
