@@ -59,3 +59,4 @@ debug_*.py
 !models/qt_99.bin
 !models/traj_colors.bin
 !models/k_model_weights.bin
+!models/*.mlpackage/Data/com.apple.CoreML/weights/weight.bin
