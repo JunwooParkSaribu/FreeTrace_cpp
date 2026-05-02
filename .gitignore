@@ -53,6 +53,7 @@ dmg_staging/
 test_*
 inputs/
 outputs_*/
+outputs
 debug_*.py
 *.bin
 !models/qt_99.bin

@@ -15,9 +15,14 @@ import subprocess
 import time
 import shutil
 
-# Make the FreeTrace_cpp/python helper directory importable so `import cauchy_fit` // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-04-28
-# resolves to the bundled module + cov tables regardless of cwd.
-_PY_HELPERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "python")
+# Make the FreeTrace_cpp/python helper directory importable so `import cauchy_fit` // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-05-02
+# resolves to the bundled module + cov tables regardless of cwd. When the GUI is
+# packaged via PyInstaller (one-folder mode), data files live under sys._MEIPASS;
+# when running from a checkout, they live next to gui.py.
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    _PY_HELPERS_DIR = os.path.join(sys._MEIPASS, "python")
+else:
+    _PY_HELPERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "python")
 if _PY_HELPERS_DIR not in sys.path:
     sys.path.insert(0, _PY_HELPERS_DIR)
 
