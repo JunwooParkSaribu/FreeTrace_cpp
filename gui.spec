@@ -27,6 +27,19 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         'tkinter',  # Modified by Claude (claude-opus-4-6, Anthropic AI) - 2026-03-19
+        # ---- Heavy deps the C++ GUI does NOT use (avoid bloat); fBm inference is done // Modified by Claude (claude-opus-4-7, Anthropic AI) - 2026-05-02
+        # by the freetrace.exe binary via ONNX Runtime, not Python TF/keras.
+        'tensorflow', 'tensorflow_cpu_aws', 'tensorflow_intel',
+        'tf_keras', 'keras', 'tensorboard', 'tensorboard_data_server',
+        'jax', 'jaxlib', 'flax', 'optax',
+        'torch', 'torchvision', 'torchaudio',
+        'numba', 'llvmlite',
+        'cupy', 'cupy_backends',
+        'sklearn', 'skimage',
+        'cv2', 'opencv_python', 'opencv_contrib_python',
+        'notebook', 'jupyter', 'IPython', 'ipykernel', 'ipywidgets',
+        'pytest', 'pylint', 'mypy', 'black', 'flake8',
+        'nvidia',  # NVIDIA pip wheels (CUDA libs); Mac doesn't need them, Windows ships its own DLLs
     ],
     noarchive=False,
     optimize=1,
